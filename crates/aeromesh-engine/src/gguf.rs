@@ -39,23 +39,48 @@ pub fn resolve_model_path<P: AsRef<Path>>(input_path: Option<P>) -> Result<PathB
             return Ok(in_models_gguf);
         }
 
-        bail!("Could not find model file at {:?} (also checked .gguf extension and models/ directory)", path);
+        // Try stripping leading "models/" if already inside models/ directory
+        if let Ok(stripped) = path.strip_prefix("models") {
+            if stripped.exists() {
+                return Ok(stripped.to_path_buf());
+            }
+            let stripped_gguf = stripped.with_extension("gguf");
+            if stripped_gguf.exists() {
+                return Ok(stripped_gguf);
+            }
+        }
+
+        // Try just the file_name in current dir or models dir
+        if let Some(file_name) = path.file_name() {
+            let in_curr = Path::new(file_name);
+            if in_curr.exists() {
+                return Ok(in_curr.to_path_buf());
+            }
+            let in_parent_models = Path::new("..").join("models").join(file_name);
+            if in_parent_models.exists() {
+                return Ok(in_parent_models);
+            }
+        }
+
+        bail!("Could not find model file at {:?} (also checked current directory, models/ and ../models/)", path);
     }
 
-    // Auto-discover first .gguf in models/ folder
-    let models_dir = Path::new("models");
-    if models_dir.exists() {
-        for entry in std::fs::read_dir(models_dir)? {
-            let entry = entry?;
-            let p = entry.path();
-            if p.is_file() && p.extension().map_or(false, |ext| ext == "gguf") {
-                info!(found = %p.display(), "Auto-discovered model in models/ folder");
-                return Ok(p);
+    // Auto-discover in current directory or models/ folder
+    for candidate_dir in &[Path::new("models"), Path::new("."), Path::new("..").join("models").as_path()] {
+        if candidate_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(candidate_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file() && p.extension().map_or(false, |ext| ext == "gguf") {
+                        info!(found = %p.display(), "Auto-discovered model file");
+                        return Ok(p);
+                    }
+                }
             }
         }
     }
 
-    bail!("No model specified and no .gguf models found in models/ directory");
+    bail!("No model specified and no .gguf models found in models/ or current directory");
 }
 
 pub fn inspect_gguf_file<P: AsRef<Path>>(path: P) -> Result<GgufMetadata> {

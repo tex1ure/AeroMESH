@@ -132,13 +132,20 @@ async fn handle_worker_connection(
                 sequence_id: seq_id,
                 token_id,
                 is_eos,
-                token_text,
+                token_text: token_text.clone(),
                 eval_time_ms,
             };
 
             let resp_bytes = resp.encode();
             socket.write_all(&resp_bytes).await?;
             socket.flush().await?;
+
+            println!("  ⚡ [Stage 2 Worker] Token #{:<2} | Recv: {:.2} KB payload | Compute: {:.2}ms -> Emitted: \"{}\"",
+                seq_id + 1,
+                (frame.payload.len() as f64) / 1024.0,
+                eval_time_ms,
+                token_text
+            );
         }
     }
 
