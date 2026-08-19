@@ -96,7 +96,6 @@ impl EngineSupervisor {
 
         let mut cmd = Command::new(&exe);
         cmd.args([
-            "-no-cnv",
             "-m",
             &abs_model_path.to_string_lossy(),
             "-ngl",
@@ -104,8 +103,11 @@ impl EngineSupervisor {
             "-p",
             prompt,
             "-n",
-            "64",
+            "128",
             "--no-warmup",
+            "--simple-io",
+            "-no-cnv",
+            "--single-turn",
         ]);
 
         if !peers.is_empty() {

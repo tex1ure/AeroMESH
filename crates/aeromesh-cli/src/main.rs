@@ -86,8 +86,8 @@ enum Commands {
         #[arg(long)]
         peers: Option<String>,
 
-        /// Execution mode: "pipeline" (native zero-weight P2P activation streaming) or "rpc" (CUDA RPC backend)
-        #[arg(long, default_value = "pipeline")]
+        /// Execution mode: "rpc" (CUDA RPC backend across cluster GPUs) or "pipeline" (P2P activation streaming)
+        #[arg(long, default_value = "rpc")]
         mode: String,
 
         /// Number of layers to offload to GPU (-1 for all, RPC mode)
