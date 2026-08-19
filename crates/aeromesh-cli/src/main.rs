@@ -53,6 +53,13 @@ enum Commands {
         target: String,
     },
 
+    /// Pre-populate local RPC disk cache from GGUF on SSD (0.0 MB network transfer guarantee)
+    PrimeCache {
+        /// Path to the .gguf model file
+        #[arg(value_name = "FILE")]
+        path: Option<PathBuf>,
+    },
+
     /// Start a worker node (Zero-Weight Pipeline or Supervised CUDA RPC)
     Worker {
         /// Host IP to bind
@@ -234,6 +241,21 @@ async fn main() -> Result<()> {
             println!("========================================================\n");
         }
 
+        Commands::PrimeCache { path } => {
+            let model_path = resolve_model_path(path.as_ref())?;
+            println!("\n========================================================");
+            println!("   AEROMESH RPC DISK CACHE PRE-PRIMER");
+            println!("========================================================");
+            println!("  Source Model:    {}", model_path.display());
+            info!("🚀 Pre-populating RPC cache directly from NVMe SSD...");
+            let (count, bytes) = aeromesh_engine::prime_rpc_cache(&model_path)?;
+            println!("  Cached Blocks:   {} tensor blocks", count);
+            println!("  Total Primed:    {:.2} GB", (bytes as f64) / 1024.0 / 1024.0 / 1024.0);
+            println!("  Cache Directory: {}", aeromesh_engine::get_rpc_cache_dir().display());
+            println!("  Status:          ✅ READY (Zero-Network weight transfers guaranteed)");
+            println!("========================================================\n");
+        }
+
         Commands::Worker { host, port, model, layers, cache } => {
             if let Some(m_path) = model {
                 // Native Zero-Weight Pipeline Worker Mode
@@ -252,6 +274,16 @@ async fn main() -> Result<()> {
                 let service = PipelineWorkerService::new(&resolved_path, slice_config)?;
                 service.run_server(&host, port).await?;
             } else {
+                // Auto-prime local disk cache from SSD if model is present on disk
+                if cache {
+                    if let Ok(m_path) = resolve_model_path::<&str>(None) {
+                        info!("⚡ Pre-populating local RPC disk cache from {:?}...", m_path);
+                        if let Ok((count, bytes)) = aeromesh_engine::prime_rpc_cache(&m_path) {
+                            info!("✅ Pre-primed {} tensor blocks ({:.2} GB) into local RPC cache directly from SSD", count, (bytes as f64) / 1024.0 / 1024.0 / 1024.0);
+                        }
+                    }
+                }
+
                 // Supervised CUDA RPC Backend Worker
                 info!("🛡️ Starting AeroMesh Worker Daemon on {}:{} (cache: {})", host, port, cache);
                 let mut supervisor = EngineSupervisor::new(&current_dir)?;

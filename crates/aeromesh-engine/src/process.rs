@@ -20,15 +20,26 @@ pub struct EngineSupervisor {
 impl EngineSupervisor {
     pub fn new<P: AsRef<Path>>(workspace_root: P) -> Result<Self> {
         let ws = workspace_root.as_ref();
-        let bin_candidate_1 = ws.join("bin");
-        let bin_candidate_2 = ws.join("llama.cpp").join("build").join("bin").join("Release");
+        let candidates = [
+            ws.join("bin"),
+            ws.join("llama.cpp").join("build").join("bin").join("Release"),
+            ws.join("..").join("bin"),
+            ws.join("..").join("llama.cpp").join("build").join("bin").join("Release"),
+            ws.join("..").join("..").join("bin"),
+            ws.join("..").join("..").join("llama.cpp").join("build").join("bin").join("Release"),
+        ];
 
-        let bin_dir = if bin_candidate_1.join("ggml-rpc-server.exe").exists() {
-            bin_candidate_1
-        } else if bin_candidate_2.join("ggml-rpc-server.exe").exists() {
-            bin_candidate_2
-        } else {
-            bail!("Could not find llama.cpp binary directory in {:?}", ws);
+        let mut found_dir = None;
+        for c in &candidates {
+            if c.join("ggml-rpc-server.exe").exists() || c.join("llama-cli.exe").exists() {
+                found_dir = Some(c.canonicalize().unwrap_or_else(|_| c.clone()));
+                break;
+            }
+        }
+
+        let bin_dir = match found_dir {
+            Some(d) => d,
+            None => bail!("Could not find llama.cpp binary directory in {:?} or parent directories", ws),
         };
 
         info!(bin_dir = %bin_dir.display(), "Engine supervisor initialized with binary directory");
