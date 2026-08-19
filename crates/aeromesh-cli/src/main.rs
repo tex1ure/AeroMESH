@@ -48,6 +48,10 @@ enum Commands {
         /// Port to bind
         #[arg(long, default_value_t = 50052)]
         port: u16,
+
+        /// Enable local tensor disk caching (avoids re-sending GBs over network)
+        #[arg(long, default_value_t = true)]
+        cache: bool,
     },
 
     /// Run the multi-node cluster coordinator
@@ -165,16 +169,17 @@ async fn main() -> Result<()> {
             println!("========================================================\n");
         }
 
-        Commands::Worker { host, port } => {
-            info!("🛡️ Starting AeroMesh Worker Daemon on {}:{}", host, port);
+        Commands::Worker { host, port, cache } => {
+            info!("🛡️ Starting AeroMesh Worker Daemon on {}:{} (cache: {})", host, port, cache);
             let mut supervisor = EngineSupervisor::new(&current_dir)?;
-            supervisor.spawn_rpc_worker(&host, port)?;
+            supervisor.spawn_rpc_worker(&host, port, cache)?;
 
             println!("\n========================================================");
             println!("   AEROMESH CUDA RPC WORKER RUNNING");
             println!("========================================================");
             println!("  Bound Address:  {}:{}", host, port);
             println!("  Protection:     Windows Job Object Active (Leak-Proof VRAM)");
+            println!("  Tensor Caching: {}", if cache { "✅ ENABLED (Zero-Network reloads from disk cache)" } else { "❌ DISABLED" });
             println!("  Status:         Listening for Coordinator Tensor Offloads...");
             println!("  Press Ctrl+C to terminate worker safely.");
             println!("========================================================\n");

@@ -2,6 +2,7 @@
 # Run this script in PowerShell: .\setup.ps1
 
 $ErrorActionPreference = "Stop"
+Set-Location $PSScriptRoot
 
 Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host "   🚀 AEROMESH CLUSTER NODE SETUP (Windows + CUDA)      " -ForegroundColor Cyan
@@ -60,6 +61,12 @@ if (-not (Test-Path "llama.cpp")) {
     }
 } else {
     Write-Host "  ✅ llama.cpp repository found." -ForegroundColor Green
+}
+
+$releaseBin = "llama.cpp\build\bin\Release"
+if (Test-Path $releaseBin) {
+    Copy-Item -Path "$releaseBin\*" -Destination "bin" -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "  ✅ Synchronized CUDA backend binaries to 'bin' folder." -ForegroundColor Green
 }
 
 # Step 5: Build AeroMesh

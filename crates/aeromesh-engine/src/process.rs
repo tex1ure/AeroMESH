@@ -41,15 +41,20 @@ impl EngineSupervisor {
         })
     }
 
-    pub fn spawn_rpc_worker(&mut self, host: &str, port: u16) -> Result<()> {
+    pub fn spawn_rpc_worker(&mut self, host: &str, port: u16, use_cache: bool) -> Result<()> {
         let exe = self.bin_dir.join("ggml-rpc-server.exe");
         if !exe.exists() {
             bail!("ggml-rpc-server.exe not found at {:?}", exe);
         }
 
-        info!(host = %host, port = port, "🚀 Spawning CUDA RPC backend worker");
-        let child = Command::new(&exe)
-            .args(["--host", host, "--port", &port.to_string()])
+        info!(host = %host, port = port, cache = use_cache, "🚀 Spawning CUDA RPC backend worker");
+        let mut cmd = Command::new(&exe);
+        cmd.args(["--host", host, "--port", &port.to_string()]);
+        if use_cache {
+            cmd.arg("--cache");
+        }
+
+        let child = cmd
             .current_dir(&self.bin_dir)
             .spawn()
             .context(format!("Failed to start ggml-rpc-server at {}:{}", host, port))?;
