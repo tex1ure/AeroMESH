@@ -88,6 +88,30 @@ pub fn prime_rpc_cache<P: AsRef<Path>>(model_path: P) -> Result<(usize, u64)> {
     Ok((primed_count, primed_bytes))
 }
 
+/// Checks the status of the local RPC disk cache
+pub fn check_rpc_cache_status() -> Result<(usize, u64)> {
+    let cache_dir = get_rpc_cache_dir();
+    if !cache_dir.exists() {
+        return Ok((0, 0));
+    }
+
+    let mut count = 0;
+    let mut total_bytes = 0u64;
+
+    for entry in fs::read_dir(&cache_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            if let Ok(meta) = fs::metadata(&path) {
+                count += 1;
+                total_bytes += meta.len();
+            }
+        }
+    }
+
+    Ok((count, total_bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

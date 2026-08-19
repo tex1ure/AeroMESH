@@ -55,9 +55,13 @@ enum Commands {
 
     /// Pre-populate local RPC disk cache from GGUF on SSD (0.0 MB network transfer guarantee)
     PrimeCache {
-        /// Path to the .gguf model file
-        #[arg(value_name = "FILE")]
-        path: Option<PathBuf>,
+        /// Path to the .gguf model file (via --model or --path)
+        #[arg(short, long, alias = "path", value_name = "FILE")]
+        model: Option<PathBuf>,
+
+        /// Positional path to the .gguf model file
+        #[arg(value_name = "MODEL_FILE")]
+        file: Option<PathBuf>,
     },
 
     /// Start a worker node (Zero-Weight Pipeline or Supervised CUDA RPC)
@@ -241,8 +245,9 @@ async fn main() -> Result<()> {
             println!("========================================================\n");
         }
 
-        Commands::PrimeCache { path } => {
-            let model_path = resolve_model_path(path.as_ref())?;
+        Commands::PrimeCache { model, file } => {
+            let target = model.or(file);
+            let model_path = resolve_model_path(target.as_ref())?;
             println!("\n========================================================");
             println!("   AEROMESH RPC DISK CACHE PRE-PRIMER");
             println!("========================================================");
