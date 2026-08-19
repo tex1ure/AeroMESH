@@ -6,7 +6,10 @@ use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use aeromesh_core::tailscale::TailscaleInspector;
-use aeromesh_engine::{inspect_gguf_file, resolve_model_path, EngineSupervisor};
+use aeromesh_engine::{
+    inspect_gguf_file, resolve_model_path, EngineSupervisor, GgufSliceLoader,
+    LayerSliceConfig, PipelineCoordinatorClient, PipelineWorkerService,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "aeromesh")]
@@ -32,6 +35,17 @@ enum Commands {
         path: Option<PathBuf>,
     },
 
+    /// Inspect GGUF layer ranges, tensor boundaries, and VRAM memory-mapping footprint
+    SliceInfo {
+        /// Path to the .gguf model file
+        #[arg(long)]
+        model: Option<PathBuf>,
+
+        /// Specific layer range (e.g. "0..24" or "25..48")
+        #[arg(long)]
+        layers: Option<String>,
+    },
+
     /// Probe Tailscale link quality (Direct WireGuard vs DERP, RTT latency)
     Probe {
         /// Target Tailscale address (e.g. 100.122.125.95:50052)
@@ -39,7 +53,7 @@ enum Commands {
         target: String,
     },
 
-    /// Start a supervised CUDA RPC backend worker node
+    /// Start a worker node (Zero-Weight Pipeline or Supervised CUDA RPC)
     Worker {
         /// Host IP to bind
         #[arg(long, default_value = "0.0.0.0")]
@@ -49,7 +63,15 @@ enum Commands {
         #[arg(long, default_value_t = 50052)]
         port: u16,
 
-        /// Enable local tensor disk caching (avoids re-sending GBs over network)
+        /// Path to local GGUF model file for Zero-Weight Pipeline mode
+        #[arg(long)]
+        model: Option<PathBuf>,
+
+        /// Layer range for this worker stage (e.g. "16..32" or "auto")
+        #[arg(long)]
+        layers: Option<String>,
+
+        /// Enable local tensor disk caching (for RPC backend mode)
         #[arg(long, default_value_t = true)]
         cache: bool,
     },
@@ -64,13 +86,21 @@ enum Commands {
         #[arg(long)]
         peers: Option<String>,
 
-        /// Number of layers to offload to GPU (-1 for all)
+        /// Execution mode: "pipeline" (native zero-weight P2P activation streaming) or "rpc" (CUDA RPC backend)
+        #[arg(long, default_value = "pipeline")]
+        mode: String,
+
+        /// Number of layers to offload to GPU (-1 for all, RPC mode)
         #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
         ngl: i32,
 
         /// Prompt text to execute
         #[arg(long, default_value = "Write a short sentence about distributed GPU clusters.")]
         prompt: String,
+
+        /// Maximum tokens to generate (pipeline mode)
+        #[arg(long, default_value_t = 64)]
+        max_tokens: usize,
     },
 }
 
@@ -151,6 +181,41 @@ async fn main() -> Result<()> {
             println!("========================================================\n");
         }
 
+        Commands::SliceInfo { model, layers } => {
+            let model_path = resolve_model_path(model.as_ref())?;
+            let loader = GgufSliceLoader::open(&model_path)?;
+
+            let slice_config = if let Some(l_str) = layers {
+                parse_layer_range(&l_str, loader.total_layers)?
+            } else {
+                LayerSliceConfig::new(0, loader.total_layers.saturating_sub(1) / 2, loader.total_layers)?
+            };
+
+            let report = loader.get_slice_report(&slice_config);
+
+            println!("\n========================================================");
+            println!("   AEROMESH GGUF ZERO-COPY SLICE INSPECTOR");
+            println!("========================================================");
+            println!("  Model Path:          {}", report.model_path.display());
+            println!("  Architecture:        {}", report.architecture);
+            println!("  Total Model Layers:  {}", report.total_layers);
+            println!("  Assigned Slice:      Layers {}..={} ({} layers)", 
+                slice_config.layer_start, slice_config.layer_end, slice_config.layer_count());
+            println!("  Stage Type:          {}", 
+                if slice_config.is_first_stage { "Stage 1 (Embeddings + Lower Layers)" } 
+                else if slice_config.is_last_stage { "Final Stage (Upper Layers + LM Head)" } 
+                else { "Intermediate Transformer Block" });
+            println!("  Slice Tensors:       {} tensors", report.tensor_count);
+            println!("  Slice VRAM Required: {:.2} MB ({:.2} GB)", 
+                (report.slice_bytes as f64) / 1024.0 / 1024.0,
+                (report.slice_bytes as f64) / 1024.0 / 1024.0 / 1024.0);
+            println!("  Full Model Size:     {:.2} GB", 
+                (report.total_model_bytes as f64) / 1024.0 / 1024.0 / 1024.0);
+            println!("  VRAM Savings:        {:.1}% less VRAM than full model", 
+                report.memory_reduction_ratio * 100.0);
+            println!("========================================================\n");
+        }
+
         Commands::Probe { target } => {
             info!("🛰️ Probing Tailscale target: {}", target);
             let addr: SocketAddr = target.parse().context("Invalid target socket address")?;
@@ -169,31 +234,52 @@ async fn main() -> Result<()> {
             println!("========================================================\n");
         }
 
-        Commands::Worker { host, port, cache } => {
-            info!("🛡️ Starting AeroMesh Worker Daemon on {}:{} (cache: {})", host, port, cache);
-            let mut supervisor = EngineSupervisor::new(&current_dir)?;
-            supervisor.spawn_rpc_worker(&host, port, cache)?;
+        Commands::Worker { host, port, model, layers, cache } => {
+            if let Some(m_path) = model {
+                // Native Zero-Weight Pipeline Worker Mode
+                let resolved_path = resolve_model_path(Some(&m_path))?;
+                let loader = GgufSliceLoader::open(&resolved_path)?;
+                let total_layers = loader.total_layers;
 
-            println!("\n========================================================");
-            println!("   AEROMESH CUDA RPC WORKER RUNNING");
-            println!("========================================================");
-            println!("  Bound Address:  {}:{}", host, port);
-            println!("  Protection:     Windows Job Object Active (Leak-Proof VRAM)");
-            println!("  Tensor Caching: {}", if cache { "✅ ENABLED (Zero-Network reloads from disk cache)" } else { "❌ DISABLED" });
-            println!("  Status:         Listening for Coordinator Tensor Offloads...");
-            println!("  Press Ctrl+C to terminate worker safely.");
-            println!("========================================================\n");
+                let slice_config = if let Some(l_str) = layers {
+                    parse_layer_range(&l_str, total_layers)?
+                } else {
+                    // Default to second half
+                    let mid = total_layers / 2;
+                    LayerSliceConfig::new(mid, total_layers.saturating_sub(1), total_layers)?
+                };
 
-            tokio::signal::ctrl_c().await?;
-            info!("Received shutdown signal. Reclaiming all resources...");
-            supervisor.shutdown_all();
+                let service = PipelineWorkerService::new(&resolved_path, slice_config)?;
+                service.run_server(&host, port).await?;
+            } else {
+                // Supervised CUDA RPC Backend Worker
+                info!("🛡️ Starting AeroMesh Worker Daemon on {}:{} (cache: {})", host, port, cache);
+                let mut supervisor = EngineSupervisor::new(&current_dir)?;
+                supervisor.spawn_rpc_worker(&host, port, cache)?;
+
+                println!("\n========================================================");
+                println!("   AEROMESH CUDA RPC WORKER RUNNING");
+                println!("========================================================");
+                println!("  Bound Address:  {}:{}", host, port);
+                println!("  Protection:     Windows Job Object Active (Leak-Proof VRAM)");
+                println!("  Tensor Caching: {}", if cache { "✅ ENABLED (Zero-Network reloads from disk cache)" } else { "❌ DISABLED" });
+                println!("  Status:         Listening for Coordinator Tensor Offloads...");
+                println!("  Press Ctrl+C to terminate worker safely.");
+                println!("========================================================\n");
+
+                tokio::signal::ctrl_c().await?;
+                info!("Received shutdown signal. Reclaiming all resources...");
+                supervisor.shutdown_all();
+            }
         }
 
         Commands::Coordinator {
             model,
             peers,
+            mode,
             ngl,
             prompt,
+            max_tokens,
         } => {
             println!("\n========================================================");
             println!("   AEROMESH DISTRIBUTED COORDINATOR INITIALIZING");
@@ -224,7 +310,7 @@ async fn main() -> Result<()> {
                         match TailscaleInspector::probe_socket_link(addr).await {
                             Ok(quality) => {
                                 if quality.is_acceptable {
-                                    approved_peers.push((peer.clone(), quality.tcp_rtt_ms));
+                                    approved_peers.push((peer.clone(), quality.tcp_rtt_ms, addr));
                                     info!(peer = %peer, rtt_ms = quality.tcp_rtt_ms, "Peer approved for cluster");
                                 } else {
                                     warn!(
@@ -252,37 +338,83 @@ async fn main() -> Result<()> {
             println!("========================================================");
             println!("  [Node 1] Local Machine (Coordinator GPU): ACTIVE");
             if approved_peers.is_empty() {
-                println!("  [Remote] No approved remote RPC workers active (running standalone)");
+                println!("  [Remote] No approved remote workers active (running standalone)");
             } else {
-                for (idx, (peer_addr, rtt)) in approved_peers.iter().enumerate() {
-                    println!("  [Node {}] Remote Worker ({}) - RTT: {:.1}ms [OFFLOAD ACTIVE]", idx + 2, peer_addr, rtt);
+                for (idx, (peer_str, rtt, _)) in approved_peers.iter().enumerate() {
+                    println!("  [Node {}] Remote Worker ({}) - RTT: {:.1}ms [OFFLOAD ACTIVE]", idx + 2, peer_str, rtt);
                 }
             }
             println!("========================================================\n");
 
             // Step 3: Launch inference execution
-            info!("Step 3/3: Dispatching prompt across active cluster pipeline...");
-            let active_peer_addrs: Vec<String> = approved_peers.iter().map(|(p, _)| p.clone()).collect();
-            let mut supervisor = EngineSupervisor::new(&current_dir)?;
-            let result = supervisor.run_completion(&model_path, &active_peer_addrs, ngl, &prompt)?;
+            if mode.eq_ignore_ascii_case("pipeline") && !approved_peers.is_empty() {
+                // Native Zero-Weight P2P Activation Streaming Mode
+                info!("Step 3/3: Dispatching via Native Zero-Weight Pipeline Engine...");
+                let worker_sock_addrs: Vec<SocketAddr> = approved_peers.iter().map(|(_, _, addr)| *addr).collect();
+                let mut client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs)?;
+                let (_output_text, perf_metrics) = client.run_pipeline_completion(&prompt, max_tokens).await?;
 
-            println!("\n========================================================");
-            println!("   AEROMESH INFERENCE GENERATION OUTPUT");
-            println!("========================================================");
-            println!("{}", result.output_text.trim());
-            println!("========================================================");
-
-            if !result.performance_summary.is_empty() {
                 println!("\n--- CLUSTER PERFORMANCE METRICS ---");
-                for metric in &result.performance_summary {
+                for metric in &perf_metrics {
                     println!("  {}", metric);
                 }
                 println!("------------------------------------\n");
-            }
 
-            info!("🎉 Multi-node token generation completed successfully!");
+                info!("🎉 Zero-Weight P2P Pipeline generation completed successfully!");
+            } else {
+                // Supervised CUDA RPC Backend Mode
+                info!("Step 3/3: Dispatching prompt across active RPC cluster backend...");
+                let active_peer_addrs: Vec<String> = approved_peers.iter().map(|(p, _, _)| p.clone()).collect();
+                let mut supervisor = EngineSupervisor::new(&current_dir)?;
+                let result = supervisor.run_completion(&model_path, &active_peer_addrs, ngl, &prompt)?;
+
+                println!("\n========================================================");
+                println!("   AEROMESH INFERENCE GENERATION OUTPUT");
+                println!("========================================================");
+                println!("{}", result.output_text.trim());
+                println!("========================================================");
+
+                if !result.performance_summary.is_empty() {
+                    println!("\n--- CLUSTER PERFORMANCE METRICS ---");
+                    for metric in &result.performance_summary {
+                        println!("  {}", metric);
+                    }
+                    println!("------------------------------------\n");
+                }
+
+                info!("🎉 Multi-node token generation completed successfully!");
+            }
         }
     }
 
     Ok(())
+}
+
+fn parse_layer_range(s: &str, total_layers: usize) -> Result<LayerSliceConfig> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("auto") {
+        let mid = total_layers / 2;
+        return LayerSliceConfig::new(mid, total_layers.saturating_sub(1), total_layers);
+    }
+
+    if let Some((start_str, end_str)) = s.split_once("..=") {
+        let start: usize = start_str.trim().parse()?;
+        let end: usize = end_str.trim().parse()?;
+        LayerSliceConfig::new(start, end, total_layers)
+    } else if let Some((start_str, end_str)) = s.split_once("..") {
+        let start: usize = start_str.trim().parse()?;
+        let end: usize = end_str.trim().parse()?;
+        let inclusive_end = if end >= total_layers {
+            total_layers.saturating_sub(1)
+        } else if end > start {
+            end - 1
+        } else {
+            start
+        };
+        LayerSliceConfig::new(start, inclusive_end, total_layers)
+    } else if let Ok(single) = s.parse::<usize>() {
+        LayerSliceConfig::new(single, single, total_layers)
+    } else {
+        anyhow::bail!("Invalid layer range format: '{}'. Expected e.g. '16..32' or '16..=31'", s);
+    }
 }
