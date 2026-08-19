@@ -41,7 +41,7 @@ $rustVersion = cargo --version 2>$null
 Write-Host "  ✅ Rust Ready: $rustVersion" -ForegroundColor Green
 
 # Step 4: Ensure Folder Structure & Binaries
-Write-Host "`n[4/5] Preparing Models and Binary Folders..." -ForegroundColor Yellow
+Write-Host "`n[4/5] Preparing Models, Binaries, and llama.cpp Repository..." -ForegroundColor Yellow
 if (-not (Test-Path "models")) {
     New-Item -ItemType Directory -Path "models" | Out-Null
     Write-Host "  📁 Created 'models' directory." -ForegroundColor Green
@@ -49,6 +49,17 @@ if (-not (Test-Path "models")) {
 if (-not (Test-Path "bin")) {
     New-Item -ItemType Directory -Path "bin" | Out-Null
     Write-Host "  📁 Created 'bin' directory." -ForegroundColor Green
+}
+if (-not (Test-Path "llama.cpp")) {
+    Write-Host "  Cloning llama.cpp repository..." -ForegroundColor Cyan
+    git clone https://github.com/ggerganov/llama.cpp.git
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  ✅ llama.cpp successfully cloned." -ForegroundColor Green
+    } else {
+        Write-Host "  ⚠️ Failed to clone llama.cpp repository." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  ✅ llama.cpp repository found." -ForegroundColor Green
 }
 
 # Step 5: Build AeroMesh

@@ -1,31 +1,49 @@
-#   AeroMesh: Distributed Fault-Tolerant LLM Cluster Engine
+# AeroMesh: Distributed Fault-Tolerant LLM Cluster Engine
 
 AeroMesh aggregates heterogeneous consumer laptops (Windows + NVIDIA GPUs) into a unified, high-throughput LLM inference cluster interconnected via **Tailscale** and local networks.
 
 ---
 
-##  Quickstart Guide for Teammates
+## Quickstart Guide for Teammates
 
 ### 1. Prerequisites
 - **OS**: Windows 10/11 (64-bit)
 - **GPU**: NVIDIA GPU with updated drivers
+- **Git**: [Git for Windows](https://git-scm.com/) installed
 - **Network**: [Tailscale](https://tailscale.com) installed and signed into your team account.
 
 ---
 
-### 2. Setup Your Node in 1 Step
+### 2. Clone the Repository & llama.cpp
 
-Open **PowerShell** in the project folder and run:
+Open **PowerShell** and clone the AeroMesh repository along with the `llama.cpp` backend:
+
 ```powershell
-.\setup.ps1
+# 1. Clone AeroMesh repository
+git clone https://github.com/tex1ure/AeroMESH.git
+cd AeroMESH
+
+# 2. Clone llama.cpp repository
+git clone https://github.com/ggerganov/llama.cpp.git
 ```
-*This checks your GPU, verifies Tailscale, installs Rust if needed, and builds the `aeromesh` binary.*
+
+> **Note:** If you haven't cloned `llama.cpp` manually, `setup.ps1` will automatically detect and clone it during the setup step.
 
 ---
 
-### 3. How to Run the Cluster
+### 3. Setup Your Node in 1 Step
 
-####  On Worker Laptops (e.g., Laptop B & C):
+In **PowerShell** inside the `AeroMESH` project folder, run:
+```powershell
+.\setup.ps1
+```
+*This checks your GPU, verifies Tailscale, ensures `llama.cpp` and required folders are present, installs Rust if needed, and builds the `aeromesh` binary.*
+
+---
+
+### 4. How to Run the Cluster
+
+#### On Worker Laptops (e.g., Laptop B & C):
 1. Place the `.gguf` model file inside the `models/` folder.
 2. Start the worker daemon:
    ```powershell
@@ -39,7 +57,7 @@ Open **PowerShell** in the project folder and run:
 
 ---
 
-####  On the Coordinator Laptop (e.g., Laptop A):
+#### On the Coordinator Laptop (e.g., Laptop A):
 1. Verify the model file hash across nodes:
    ```powershell
    cargo run --bin aeromesh -- model-check "models/test.gguf"
@@ -59,7 +77,7 @@ Open **PowerShell** in the project folder and run:
 
 ---
 
-##  CLI Command Reference
+## CLI Command Reference
 
 | Command | Description |
 |---|---|
@@ -70,16 +88,17 @@ Open **PowerShell** in the project folder and run:
 
 ---
 
-##  Project Architecture
+## Project Architecture
 
 ```
-llama-cluster/
+AeroMESH/
 ├── setup.ps1                 # Automated 1-click bootstrap script
 ├── Cargo.toml                # Rust workspace configuration
 ├── crates/
 │   ├── aeromesh-core/        # Core domain types, Tailscale prober, error definitions
 │   ├── aeromesh-engine/      # Windows Job Object supervisor, GGUF parser, llama process manager
 │   └── aeromesh-cli/         # Unified 'aeromesh' CLI binary
+├── llama.cpp/                # Native llama.cpp submodule/repository
 ├── bin/                      # Native CUDA llama.cpp backend executables and DLLs
 └── models/                   # Local .gguf model repository
 ```
