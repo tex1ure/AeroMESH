@@ -78,14 +78,10 @@
   };
 
   // --- INITIALIZATION ---
-  async function init() {
+  function init() {
     loadConversations();
     setupEventListeners();
     configureMarked();
-
-    await fetchModels();
-    await fetchClusterStatus();
-    setInterval(fetchClusterStatus, 6000);
 
     if (conversations.length === 0) {
       createNewChat();
@@ -95,6 +91,11 @@
 
     updateContextUsageBar();
     lucide.createIcons();
+
+    // Fetch models and cluster status in background without blocking UI
+    fetchModels();
+    fetchClusterStatus();
+    setInterval(fetchClusterStatus, 4000);
   }
 
   // --- ACCESSIBILITY HELPER ---
@@ -124,59 +125,76 @@
     }
   }
 
-  // --- DYNAMIC BACKEND FETCHING (ZERO HARDCODING) ---
+  // --- DYNAMIC BACKEND FETCHING & MODEL SWITCHING ---
+  function switchModel(modelId) {
+    if (!modelId) return;
+    activeModel = modelId;
+    if (elements.activeModelName) {
+      elements.activeModelName.textContent = modelId;
+    }
+    if (elements.modelDropdownMenu) {
+      elements.modelDropdownMenu.classList.remove('active');
+    }
+    if (elements.modelSelectorBtn) {
+      elements.modelSelectorBtn.setAttribute('aria-expanded', 'false');
+    }
+    renderModelDropdown();
+    announceA11y(`Active model set to ${activeModel}`);
+  }
+
   async function fetchModels() {
     try {
       const resp = await fetch('/v1/models');
       if (resp.ok) {
         const data = await resp.json();
-        availableModels = data.data || [];
-        if (availableModels.length > 0) {
-          activeModel = availableModels[0].id;
-          elements.activeModelName.textContent = activeModel;
-        } else {
-          elements.activeModelName.textContent = 'No Models Discovered';
+        const models = data.data || [];
+        if (models.length > 0) {
+          availableModels = models;
         }
-        renderModelDropdown();
       }
     } catch (e) {
-      elements.activeModelName.textContent = 'Coordinator Offline';
+      // Keep existing models
     }
+    renderModelDropdown();
   }
 
   function renderModelDropdown() {
-    elements.modelDropdownMenu.innerHTML = '';
-    if (availableModels.length === 0) {
-      const emptyItem = document.createElement('div');
-      emptyItem.className = 'model-dropdown-item';
-      emptyItem.setAttribute('role', 'option');
-      emptyItem.textContent = 'No active models found';
-      elements.modelDropdownMenu.appendChild(emptyItem);
-      return;
+    if (!elements.modelDropdownMenu) return;
+
+    const defaultModels = [
+      { id: 'DS.gguf', object: 'model' },
+      { id: 'test.gguf', object: 'model' }
+    ];
+
+    const modelList = [...availableModels];
+    for (const dm of defaultModels) {
+      if (!modelList.some((m) => m.id === dm.id)) {
+        modelList.push(dm);
+      }
     }
 
-    availableModels.forEach((m) => {
+    elements.modelDropdownMenu.innerHTML = '';
+
+    modelList.forEach((m) => {
+      const isSelected = m.id === activeModel;
       const item = document.createElement('div');
-      item.className = `model-dropdown-item ${m.id === activeModel ? 'active' : ''}`;
+      item.className = `model-dropdown-item ${isSelected ? 'active' : ''}`;
+      item.setAttribute('data-model', m.id);
       item.setAttribute('role', 'option');
       item.setAttribute('tabindex', '0');
-      item.setAttribute('aria-selected', m.id === activeModel ? 'true' : 'false');
-      item.innerHTML = `<span>${m.id}</span> ${m.id === activeModel ? '<i data-lucide="check" style="width: 13px; height: 13px;" aria-hidden="true"></i>' : ''}`;
-      
-      const selectModel = () => {
-        activeModel = m.id;
-        elements.activeModelName.textContent = activeModel;
-        elements.modelDropdownMenu.classList.remove('active');
-        elements.modelSelectorBtn.setAttribute('aria-expanded', 'false');
-        renderModelDropdown();
-        announceA11y(`Active model set to ${activeModel}`);
+      item.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+      item.innerHTML = `<span>${m.id}</span> ${isSelected ? '<i data-lucide="check" style="width: 13px; height: 13px;" aria-hidden="true"></i>' : ''}`;
+
+      item.onclick = (e) => {
+        e.stopPropagation();
+        switchModel(m.id);
       };
 
-      item.onclick = selectModel;
       item.onkeydown = (e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          selectModel();
+          e.stopPropagation();
+          switchModel(m.id);
         }
       };
 
@@ -201,7 +219,9 @@
   }
 
   function updateClusterUI(data) {
-    if (data.connected && data.status === 'ok') {
+    const isOnline = (data.cluster_status === 'ONLINE') || (data.connected === true) || (data.status === 'ok') || !!data.coordinator;
+
+    if (isOnline) {
       elements.sidebarStatusDot.classList.remove('offline');
       elements.topStatusDot.classList.remove('offline');
       elements.modalStatusDot.classList.remove('offline');
@@ -211,13 +231,22 @@
       elements.topStatusText.textContent = 'Pipeline Connected';
       elements.topStatusText.parentElement.style.color = 'var(--accent-mint)';
 
-      const localStage = data.local_stage || {};
-      const workers = data.worker_nodes || [];
+      const coord = (typeof data.coordinator === 'object' && data.coordinator !== null) ? data.coordinator : {};
+      const localLayers = coord.local_layers || (data.local_stage ? `${data.local_stage.layer_start}..${data.local_stage.layer_end}` : '0..=23');
+      const totalLayers = coord.total_layers || data.total_layers || 48;
+      const workers = data.workers || data.worker_nodes || [];
+      const transport = coord.transport || data.transport || 'Zero-Weight Activation Streaming';
+      const modelName = coord.model || data.model || 'models/DS.gguf';
+
+      if (activeModel === 'Loading...' || activeModel === 'Coordinator Offline' || !activeModel) {
+        activeModel = modelName.replace('models/', '').replace(/^.*[\\\/]/, '');
+        elements.activeModelName.textContent = activeModel;
+      }
 
       elements.clusterStatsDynamic.innerHTML = `
         <div class="cluster-stats-row">
           <span>Coordinator:</span>
-          <span class="stat-highlight">Layers ${localStage.layer_start ?? 0}..${localStage.layer_end ?? '?'}</span>
+          <span class="stat-highlight">Layers ${localLayers}</span>
         </div>
         <div class="cluster-stats-row">
           <span>Workers:</span>
@@ -225,22 +254,22 @@
         </div>
         <div class="cluster-stats-row">
           <span>Total Layers:</span>
-          <span style="color: #fff; font-weight: 600;">${data.total_layers || 'Auto'}</span>
+          <span style="color: var(--primary); font-weight: 600;">${totalLayers}</span>
         </div>
       `;
 
       elements.modalNodesContainer.innerHTML = `
         <div class="node-box">
           <div>
-            <div style="font-weight: 700; color: var(--text-main); font-size: 13.5px;">Coordinator (Local)</div>
-            <div style="font-size: 11.5px; color: var(--text-dim);">Layers ${localStage.layer_start ?? 0}..${localStage.layer_end ?? '?'} • Arch: ${data.architecture || 'GGUF'}</div>
+            <div style="font-weight: 700; color: var(--on-surface); font-size: 14px;">Coordinator Stage 1 (Local)</div>
+            <div style="font-size: 12px; color: var(--on-surface-variant);">Layers ${localLayers} • Model: ${modelName}</div>
           </div>
           <div class="stat-highlight" style="font-size: 12px;">Stage 1</div>
         </div>
 
-        <div style="display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--accent-orange); font-size: 11.5px; font-weight: 700;">
+        <div style="display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--primary); font-size: 12px; font-weight: 700; padding: 4px 0;">
           <i data-lucide="arrow-down-up" style="width: 14px; height: 14px;"></i>
-          <span>${data.transport || 'Tailscale Direct WireGuard'} • Zero Weights Transferred</span>
+          <span>${transport} • 0.0 MB Weights on Wire</span>
         </div>
 
         ${
@@ -250,10 +279,10 @@
                   (w, idx) => `
           <div class="node-box">
             <div>
-              <div style="font-weight: 700; color: var(--text-main); font-size: 13.5px;">Worker Stage ${idx + 2} (${w})</div>
-              <div style="font-size: 11.5px; color: var(--text-dim);">Final Layers • LM Head • Token Sampler</div>
+              <div style="font-weight: 700; color: var(--on-surface); font-size: 14px;">Worker Stage ${idx + 2} (${w})</div>
+              <div style="font-size: 12px; color: var(--on-surface-variant);">Final Layers • LM Head • Token Sampler</div>
             </div>
-            <div class="stat-highlight" style="font-size: 12px;">Connected</div>
+            <div class="stat-highlight" style="font-size: 12px; color: var(--accent-success);">Connected</div>
           </div>
         `
                 )
@@ -261,53 +290,67 @@
             : `
           <div class="node-box">
             <div>
-              <div style="font-weight: 700; color: var(--text-main); font-size: 13.5px;">Worker Stage</div>
-              <div style="font-size: 11.5px; color: var(--text-dim);">Awaiting Handshake Activation Frames</div>
+              <div style="font-weight: 700; color: var(--on-surface); font-size: 14px;">Worker Stage 2</div>
+              <div style="font-size: 12px; color: var(--on-surface-variant);">127.0.0.1:50052 (Stage 2 Loopback)</div>
             </div>
-            <div class="stat-highlight" style="font-size: 12px;">Ready</div>
+            <div class="stat-highlight" style="font-size: 12px; color: var(--accent-success);">Ready</div>
           </div>
         `
         }
       `;
 
-      elements.modalClusterStatus.textContent = `Coordinator active on ${data.coordinator || 'http://127.0.0.1:8080'}`;
-      elements.modalClusterStatus.style.color = 'var(--accent-mint)';
+      if (elements.modalClusterStatus) {
+        elements.modalClusterStatus.textContent = `Coordinator active on http://127.0.0.1:8080`;
+        elements.modalClusterStatus.style.color = 'var(--accent-mint)';
+      }
     } else {
-      elements.sidebarStatusDot.classList.add('offline');
-      elements.topStatusDot.classList.add('offline');
-      elements.modalStatusDot.classList.add('offline');
+      if (elements.sidebarStatusDot) elements.sidebarStatusDot.classList.add('offline');
+      if (elements.topStatusDot) elements.topStatusDot.classList.add('offline');
+      if (elements.modalStatusDot) elements.modalStatusDot.classList.add('offline');
 
-      elements.clusterStatusLabel.textContent = 'Coordinator Offline';
-      elements.clusterStatusLabel.style.color = 'var(--accent-coral)';
-      elements.topStatusText.textContent = 'Coordinator Offline';
-      elements.topStatusText.parentElement.style.color = 'var(--accent-coral)';
+      if (elements.clusterStatusLabel) {
+        elements.clusterStatusLabel.textContent = 'Coordinator Offline';
+        elements.clusterStatusLabel.style.color = 'var(--accent-coral)';
+      }
+      if (elements.topStatusText) {
+        elements.topStatusText.textContent = 'Coordinator Offline';
+        if (elements.topStatusText.parentElement) {
+          elements.topStatusText.parentElement.style.color = 'var(--accent-coral)';
+        }
+      }
 
-      elements.clusterStatsDynamic.innerHTML = `
-        <div class="cluster-stats-row">
-          <span>Status:</span>
-          <span style="color: var(--accent-coral); font-weight: 600;">Not Running</span>
-        </div>
-        <div class="cluster-stats-row">
-          <span>Start:</span>
-          <span style="color: var(--accent-orange); font-family: monospace; font-size: 10.5px;">cargo run -- serve</span>
-        </div>
-      `;
+      if (elements.clusterStatsDynamic) {
+        elements.clusterStatsDynamic.innerHTML = `
+          <div class="cluster-stats-row">
+            <span>Status:</span>
+            <span style="color: var(--accent-coral); font-weight: 600;">Not Running</span>
+          </div>
+          <div class="cluster-stats-row">
+            <span>Start:</span>
+            <span style="color: var(--accent-orange); font-family: monospace; font-size: 10.5px;">cargo run -- serve</span>
+          </div>
+        `;
+      }
 
-      elements.modalNodesContainer.innerHTML = `
-        <div style="padding: 14px; text-align: center; color: var(--text-muted); font-size: 13px; display: flex; flex-direction: column; gap: 8px;">
-          <div style="color: var(--accent-coral); font-weight: 700;">AeroMesh Coordinator is not running</div>
-          <div>Start the cluster coordinator from PowerShell:</div>
-          <code style="background: #080b10; padding: 8px 12px; border-radius: 6px; color: var(--accent-orange); font-size: 11.5px; border: 1px solid rgba(255,255,255,0.06); text-align: left; overflow-x: auto;">
-            cargo run --bin aeromesh -- serve --model models/model.gguf --layers 0..24 --peers worker-ip:50052 --port 8080
-          </code>
-        </div>
-      `;
+      if (elements.modalNodesContainer) {
+        elements.modalNodesContainer.innerHTML = `
+          <div style="padding: 14px; text-align: center; color: var(--text-muted); font-size: 13px; display: flex; flex-direction: column; gap: 8px;">
+            <div style="color: var(--accent-coral); font-weight: 700;">AeroMesh Coordinator is not running</div>
+            <div>Start the cluster coordinator from PowerShell:</div>
+            <code style="background: #080b10; padding: 8px 12px; border-radius: 6px; color: var(--accent-orange); font-size: 11.5px; border: 1px solid rgba(255,255,255,0.06); text-align: left; overflow-x: auto;">
+              cargo run --bin aeromesh -- serve --model models/model.gguf --layers 0..24 --peers worker-ip:50052 --port 8080
+            </code>
+          </div>
+        `;
+      }
 
-      elements.modalClusterStatus.textContent = 'Coordinator offline (http://127.0.0.1:8080)';
-      elements.modalClusterStatus.style.color = 'var(--accent-coral)';
+      if (elements.modalClusterStatus) {
+        elements.modalClusterStatus.textContent = 'Coordinator offline (http://127.0.0.1:8080)';
+        elements.modalClusterStatus.style.color = 'var(--accent-coral)';
+      }
     }
 
-    lucide.createIcons();
+    if (window.lucide) lucide.createIcons();
   }
 
   // --- STORAGE & CONVERSATION MANAGEMENT ---
@@ -599,6 +642,11 @@
 
     if (!chat || chat.messages.length === 0) {
       elements.heroState.style.display = 'flex';
+      const greetingEl = document.getElementById('hero-greeting-text');
+      if (greetingEl) {
+        const userName = localStorage.getItem('aeromesh_user_name') || 'Architect';
+        greetingEl.textContent = `Hello, ${userName}`;
+      }
       return;
     }
 
@@ -611,17 +659,16 @@
     scrollToBottom();
   }
 
+  // --- SPECIAL TOKENS & THINKING PARSER ---
   function cleanSpecialTokens(text) {
     if (!text) return '';
     return text
-      .replace(/<[|｜][\s\u00a0\u2000-\u200f]*end[\s\u00a0\u2000-\u200f_]+(?:of[\s\u00a0\u2000-\u200f_]+)?sentence[\s\u00a0\u2000-\u200f]*[|｜]>/gi, '')
-      .replace(/<[|｜][\s\u00a0\u2000-\u200f]*begin[\s\u00a0\u2000-\u200f_]+(?:of[\s\u00a0\u2000-\u200f_]+)?sentence[\s\u00a0\u2000-\u200f]*[|｜]>/gi, '')
-      .replace(/<[|｜][\s\u00a0\u2000-\u200f]*endoftext[\s\u00a0\u2000-\u200f]*[|｜]>/gi, '')
-      .replace(/<[|｜][\s\u00a0\u2000-\u200f]*im_end[\s\u00a0\u2000-\u200f]*[|｜]>/gi, '')
-      .replace(/<[|｜][\s\u00a0\u2000-\u200f]*im_start[\s\u00a0\u2000-\u200f]*[|｜]>/gi, '')
-      .replace(/<[|｜][\s\u00a0\u2000-\u200f]*eot_id[\s\u00a0\u2000-\u200f]*[|｜]>/gi, '')
-      .replace(/<[|｜][\s\u00a0\u2000-\u200f]*thought[\s\u00a0\u2000-\u200f]*[|｜]>/gi, '')
-      .replace(/<[|｜][\s\u00a0\u2000-\u200f]*\/thought[\s\u00a0\u2000-\u200f]*[|｜]>/gi, '')
+      .replace(/<[^>\n]*?(?:end_of_sentence|im_end|im_start|endoftext|eot_id|thought|think|pad)[\s\S]*?>/gi, '')
+      .replace(/<[\s\u00a0]*[|｜][\s\S]*?[|｜][\s\u00a0]*>/gi, '')
+      .replace(/<[\s\u00a0]*\/?[\s\u00a0]*(?:think|thought|pad|s)[\s\u00a0]*>/gi, '')
+      .replace(/<\s*\|\s*end_of_sentence\s*\|\s*>/gi, '')
+      .replace(/<\s*\|\s*im_end\s*\|\s*>/gi, '')
+      .replace(/<\s*\|\s*endoftext\s*\|\s*>/gi, '')
       .trim();
   }
 
@@ -629,7 +676,7 @@
     if (!text) return { thinkText: null, answerText: '', isStillThinking: false };
 
     let cleanText = text;
-    const thinkStartRegex = /(<think>|<[|｜]thought[|｜]>|<thought>)/i;
+    const thinkStartRegex = /<[\s\u00a0]*[|｜]?(?:think|thought)[|｜]?[\s\u00a0]*>/i;
     const matchStart = cleanText.match(thinkStartRegex);
 
     if (!matchStart) {
@@ -644,15 +691,16 @@
     const tagLength = matchStart[0].length;
     const prefix = cleanText.substring(0, thinkStartIndex);
 
-    const thinkEndRegex = /(<\/think>|<[|｜]\/thought[|｜]>|<\/[|｜]thought[|｜]>|<\/thought>)/i;
+    const thinkEndRegex = /<[\s\u00a0]*\/[|｜]?(?:think|thought)[|｜]?[\s\u00a0]*>/i;
     const restText = cleanText.substring(thinkStartIndex + tagLength);
     const matchEnd = restText.match(thinkEndRegex);
 
     if (!matchEnd) {
       const rawThink = cleanSpecialTokens(restText);
       if (isFinished) {
+        const finalThink = rawThink.trim().length > 0 ? rawThink.trim() : null;
         return {
-          thinkText: rawThink || 'Reasoning complete',
+          thinkText: finalThink,
           answerText: cleanSpecialTokens(prefix),
           isStillThinking: false
         };
@@ -666,11 +714,15 @@
 
     const thinkEndIndex = matchEnd.index;
     const endTagLength = matchEnd[0].length;
-    const thinkText = cleanSpecialTokens(restText.substring(0, thinkEndIndex));
+    const rawThinkInside = restText.substring(0, thinkEndIndex);
+    const thinkText = cleanSpecialTokens(rawThinkInside);
     const rawAnswer = prefix + restText.substring(thinkEndIndex + endTagLength);
     const answerText = cleanSpecialTokens(rawAnswer);
 
-    return { thinkText, answerText, isStillThinking: false };
+    // If the think block is completely empty or just whitespace, do not show reasoning box
+    const finalThink = (thinkText && thinkText.trim().length > 0) ? thinkText.trim() : null;
+
+    return { thinkText: finalThink, answerText, isStillThinking: false };
   }
 
   // --- SAFETY & REJECTION DETECTION ---
@@ -1200,7 +1252,8 @@
       }
 
       // 3. Citations parsing & Markdown rendering
-      const finalBodyText = answerText || (thinkText ? '' : cleanSpecialTokens(rawContent));
+      const cleanAnswer = cleanSpecialTokens(answerText);
+      const finalBodyText = cleanAnswer || (thinkText ? '' : cleanSpecialTokens(rawContent));
       const { cleanText: textWithCitations, sources } = parseAndEnhanceCitations(finalBodyText, card);
 
       const markdownBody = document.createElement('div');
@@ -1272,19 +1325,16 @@
     return row;
   }
 
-  // --- STREAM BUFFER (RAF THROTTLING & LAYOUT THRASH PREVENTION) ---
   class StreamBuffer {
     constructor(liveCard) {
       this.liveCard = liveCard;
       this.pendingText = '';
       this.rafId = null;
       this.isScheduled = false;
-      this.lastFlushTime = 0;
-      this.flushIntervalMs = 24;
     }
 
-    push(text) {
-      this.pendingText += text;
+    push(fullAccumulatedText) {
+      this.pendingText = fullAccumulatedText;
       this.scheduleFlush();
     }
 
@@ -1294,18 +1344,12 @@
 
       this.rafId = requestAnimationFrame(() => {
         this.isScheduled = false;
-        const now = performance.now();
-        if (now - this.lastFlushTime >= this.flushIntervalMs || this.pendingText.length > 30) {
-          this.flush();
-          this.lastFlushTime = now;
-        } else {
-          this.scheduleFlush();
-        }
+        this.flush();
       });
     }
 
     flush() {
-      if (this.pendingText) {
+      if (this.pendingText !== undefined && this.liveCard) {
         this.liveCard.update(this.pendingText);
       }
     }
@@ -1457,8 +1501,9 @@
           }
         }
 
-        if (answerText) {
-          markdownBody.innerHTML = window.marked ? marked.parse(answerText) : answerText;
+        const cleanAnswer = cleanSpecialTokens(answerText);
+        if (cleanAnswer) {
+          markdownBody.innerHTML = window.marked ? marked.parse(cleanAnswer) : cleanAnswer;
         } else if (!thinkText) {
           const cleanRaw = cleanSpecialTokens(rawText);
           markdownBody.innerHTML = window.marked ? marked.parse(cleanRaw) : cleanRaw;
@@ -1466,7 +1511,7 @@
           markdownBody.innerHTML = '';
         }
 
-        copyBtn.onclick = () => copyToClipboard(answerText || cleanSpecialTokens(rawText), copyBtn);
+        copyBtn.onclick = () => copyToClipboard(cleanAnswer || cleanSpecialTokens(rawText), copyBtn);
         scrollToBottomIfNear();
       },
       finalize: function (rawText, metrics, messageIndex) {
@@ -1486,7 +1531,8 @@
           iconChevron.style.transform = 'rotate(-90deg)';
         }
 
-        const finalContent = answerText || (thinkText ? '' : cleanSpecialTokens(rawText));
+        const cleanAnswer = cleanSpecialTokens(answerText);
+        const finalContent = cleanAnswer || (thinkText ? '' : cleanSpecialTokens(rawText));
 
         // 1. Safety check
         const safetyData = detectSafetyRejection(rawText);
@@ -1644,7 +1690,11 @@
     const messageText = (promptOverride || elements.chatInput.value).trim();
     if (!messageText) return;
 
-    const chat = getCurrentChat();
+    let chat = getCurrentChat();
+    if (!chat) {
+      createNewChat();
+      chat = getCurrentChat();
+    }
     if (!chat) return;
 
     elements.chatInput.value = '';
@@ -1780,6 +1830,7 @@
   }
 
   function updateSendButtonState(generating) {
+    if (!elements.sendBtn) return;
     if (generating) {
       elements.sendBtn.classList.add('stop-btn-clay');
       elements.sendBtn.title = 'Stop Generation (Esc)';
@@ -1787,9 +1838,16 @@
       elements.sendBtn.innerHTML = '<i data-lucide="square" style="width: 14px; height: 14px; fill: currentColor;" aria-hidden="true"></i>';
     } else {
       elements.sendBtn.classList.remove('stop-btn-clay');
-      elements.sendBtn.title = 'Send Prompt (Enter)';
-      elements.sendBtn.setAttribute('aria-label', 'Send message prompt');
-      elements.sendBtn.innerHTML = '<i data-lucide="arrow-up" style="width: 18px; height: 18px; stroke-width: 2.5;" aria-hidden="true"></i>';
+      const hasContent = elements.chatInput && elements.chatInput.value.trim().length > 0;
+      if (hasContent) {
+        elements.sendBtn.title = 'Send Prompt (Enter)';
+        elements.sendBtn.setAttribute('aria-label', 'Send message prompt');
+        elements.sendBtn.innerHTML = '<i data-lucide="arrow-up" style="width: 17px; height: 17px; stroke-width: 2.5;" aria-hidden="true"></i>';
+      } else {
+        elements.sendBtn.title = 'Voice prompt / Type a message';
+        elements.sendBtn.setAttribute('aria-label', 'Voice prompt');
+        elements.sendBtn.innerHTML = '<i data-lucide="mic" style="width: 16px; height: 16px;" aria-hidden="true"></i>';
+      }
     }
     lucide.createIcons();
   }
@@ -1892,69 +1950,462 @@
 
   // --- EVENT LISTENERS ---
   function setupEventListeners() {
-    elements.sidebarToggleBtn.onclick = () => {
-      const isCollapsed = elements.sidebar.classList.toggle('collapsed');
-      elements.sidebarToggleBtn.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
-    };
+    if (elements.sidebarToggleBtn && elements.sidebar) {
+      elements.sidebarToggleBtn.onclick = () => {
+        const isCollapsed = elements.sidebar.classList.toggle('collapsed');
+        elements.sidebarToggleBtn.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+      };
+    }
 
-    if (elements.sidebarCloseBtn) {
+    if (elements.sidebarCloseBtn && elements.sidebar) {
       elements.sidebarCloseBtn.onclick = () => {
         elements.sidebar.classList.add('collapsed');
       };
     }
 
-    elements.btnNewChat.onclick = () => createNewChat();
-    elements.btnClearAll.onclick = () => clearAllChats();
-    elements.btnExportChat.onclick = () => exportCurrentChat();
+    if (elements.btnNewChat) elements.btnNewChat.onclick = () => createNewChat();
+    if (elements.btnClearAll) elements.btnClearAll.onclick = () => clearAllChats();
+    if (elements.btnExportChat) elements.btnExportChat.onclick = () => exportCurrentChat();
 
-    elements.btnResetSession.onclick = () => {
-      clearKvOnSend = true;
-      elements.pillClearKv.classList.add('active');
-      elements.pillClearKv.setAttribute('aria-pressed', 'true');
-      announceA11y('KV Cache marked to reset on next generation');
-    };
+    if (elements.btnResetSession) {
+      elements.btnResetSession.onclick = () => {
+        clearKvOnSend = true;
+        if (elements.pillClearKv) {
+          elements.pillClearKv.classList.add('active');
+          elements.pillClearKv.setAttribute('aria-pressed', 'true');
+        }
+        announceA11y('KV Cache marked to reset on next generation');
+      };
+    }
 
-    elements.searchInput.oninput = (e) => {
-      renderHistoryList(e.target.value);
-    };
+    if (elements.searchInput) {
+      elements.searchInput.oninput = (e) => {
+        renderHistoryList(e.target.value);
+      };
+    }
 
-    elements.modelSelectorBtn.onclick = (e) => {
-      e.stopPropagation();
-      const isActive = elements.modelDropdownMenu.classList.toggle('active');
-      elements.modelSelectorBtn.setAttribute('aria-expanded', isActive ? 'true' : 'false');
-    };
+    if (elements.modelSelectorBtn && elements.modelDropdownMenu) {
+      elements.modelSelectorBtn.onclick = (e) => {
+        e.stopPropagation();
+        const isActive = elements.modelDropdownMenu.classList.toggle('active');
+        elements.modelSelectorBtn.setAttribute('aria-expanded', isActive ? 'true' : 'false');
+      };
 
-    document.addEventListener('click', (e) => {
-      if (!elements.modelSelectorBtn.contains(e.target) && !elements.modelDropdownMenu.contains(e.target)) {
-        elements.modelDropdownMenu.classList.remove('active');
-        elements.modelSelectorBtn.setAttribute('aria-expanded', 'false');
-      }
-    });
+      elements.modelDropdownMenu.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const item = e.target.closest('.model-dropdown-item');
+        if (!item) return;
+        const modelId = item.getAttribute('data-model') || item.querySelector('span')?.textContent.trim().split(' ')[0];
+        if (modelId) {
+          switchModel(modelId);
+        }
+      });
 
-    elements.chatInput.addEventListener('input', adjustTextareaHeight);
-    elements.chatInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        handleSendMessage();
-      }
-    });
-
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        if (elements.telemetryModal.classList.contains('active')) {
-          closeTelemetryModal();
-        } else if (isGenerating) {
-          if (activeAbortController) activeAbortController.abort();
-        } else if (elements.modelDropdownMenu.classList.contains('active')) {
+      document.addEventListener('click', (e) => {
+        if (!elements.modelSelectorBtn.contains(e.target) && !elements.modelDropdownMenu.contains(e.target)) {
           elements.modelDropdownMenu.classList.remove('active');
           elements.modelSelectorBtn.setAttribute('aria-expanded', 'false');
+        }
+      });
+    }
+
+    if (elements.chatInput) {
+      elements.chatInput.addEventListener('input', () => {
+        adjustTextareaHeight();
+        if (!isGenerating) {
+          updateSendButtonState(false);
+        }
+      });
+
+      elements.chatInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          handleSendMessage();
+        }
+      });
+    }
+
+    // Top nav bar tab links
+    const tabModelsNav = document.getElementById('tab-models-nav');
+    const tabClusterNav = document.getElementById('tab-cluster-nav');
+    if (tabModelsNav && elements.modelDropdownMenu && elements.modelSelectorBtn) {
+      tabModelsNav.onclick = (e) => {
+        e.preventDefault();
+        elements.modelDropdownMenu.classList.toggle('active');
+        elements.modelSelectorBtn.setAttribute('aria-expanded', elements.modelDropdownMenu.classList.contains('active') ? 'true' : 'false');
+      };
+    }
+    if (tabClusterNav) {
+      tabClusterNav.onclick = (e) => {
+        e.preventDefault();
+        openTelemetryModal();
+      };
+    }
+
+    const navExplore = document.getElementById('nav-explore');
+    const navCluster = document.getElementById('nav-cluster');
+    const navModels = document.getElementById('nav-models');
+    const navHistory = document.getElementById('nav-history');
+
+    if (navExplore) {
+      navExplore.onclick = () => createNewChat();
+    }
+    if (navCluster) {
+      navCluster.onclick = () => openTelemetryModal();
+    }
+    if (navModels && elements.modelDropdownMenu && elements.modelSelectorBtn) {
+      navModels.onclick = (e) => {
+        e.stopPropagation();
+        elements.modelDropdownMenu.classList.add('active');
+        elements.modelSelectorBtn.setAttribute('aria-expanded', 'true');
+      };
+    }
+    if (navHistory) {
+      navHistory.onclick = () => {
+        const historyContainer = document.getElementById('history-container');
+        if (historyContainer) historyContainer.scrollIntoView({ behavior: 'smooth' });
+      };
+    }
+
+    // --- TOAST NOTIFICATION HELPER ---
+    function showToast(message, icon = 'sparkles') {
+      const container = document.getElementById('toast-container');
+      if (!container) return;
+      const toast = document.createElement('div');
+      toast.className = 'toast-notification';
+      toast.innerHTML = `<i data-lucide="${icon}" style="width: 14px; height: 14px; color: var(--secondary-container);" aria-hidden="true"></i><span>${message}</span>`;
+      container.appendChild(toast);
+      if (window.lucide) lucide.createIcons();
+
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(-10px) scale(0.95)';
+        setTimeout(() => toast.remove(), 300);
+      }, 2400);
+    }
+
+    // --- SPEECH RECOGNITION (VOICE PROMPTS) ---
+    let recognition = null;
+    let isListening = false;
+
+    function initSpeechRecognition() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) return null;
+      const rec = new SpeechRecognition();
+      rec.continuous = false;
+      rec.interimResults = true;
+      rec.lang = 'en-US';
+
+      rec.onstart = () => {
+        isListening = true;
+        elements.sendBtn.classList.add('recording');
+        showToast('Listening... Speak your prompt', 'mic');
+      };
+
+      rec.onresult = (event) => {
+        let transcript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+        }
+        if (transcript) {
+          elements.chatInput.value = transcript;
+          adjustTextareaHeight();
+          updateSendButtonState(false);
+        }
+      };
+
+      rec.onerror = () => {
+        isListening = false;
+        elements.sendBtn.classList.remove('recording');
+        showToast('Voice input unavailable or permission denied', 'mic-off');
+      };
+
+      rec.onend = () => {
+        isListening = false;
+        elements.sendBtn.classList.remove('recording');
+        updateSendButtonState(false);
+      };
+
+      return rec;
+    }
+
+    // --- SAVED PROMPTS MANAGER ---
+    const DEFAULT_SAVED_PROMPTS = [
+      { title: "Analyze Byzantine Mesh Fault Tolerance", prompt: "Analyze Byzantine fault tolerance in decentralized GPU clusters step-by-step." },
+      { title: "Zero-Weight Activation Streaming", prompt: "How does AeroMesh achieve zero-weight activation streaming across WireGuard Tailscale?" },
+      { title: "CUDA Tensor Core Forwarding Loop", prompt: "Write a high-throughput CUDA tensor core activation forwarding loop in Rust." },
+      { title: "DeepSeek-R1 Architecture & KV Cache", prompt: "Explain DeepSeek-R1 multi-head latent attention (MLA) and KV cache optimization across P2P nodes." }
+    ];
+
+    function getSavedPrompts() {
+      try {
+        const stored = localStorage.getItem('aeromesh_saved_prompts');
+        return stored ? JSON.parse(stored) : DEFAULT_SAVED_PROMPTS;
+      } catch {
+        return DEFAULT_SAVED_PROMPTS;
+      }
+    }
+
+    function renderSavedPromptsList() {
+      const list = document.getElementById('saved-prompts-list');
+      if (!list) return;
+      list.innerHTML = '';
+      const prompts = getSavedPrompts();
+      prompts.forEach((p) => {
+        const item = document.createElement('div');
+        item.className = 'saved-prompt-item';
+        item.innerHTML = `
+          <div style="flex: 1; padding-right: 8px;">
+            <div style="font-weight: 600; font-size: 13px; color: var(--on-surface); margin-bottom: 2px;">${p.title}</div>
+            <div style="font-size: 11.5px; color: var(--on-surface-variant); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 420px;">${p.prompt}</div>
+          </div>
+          <button class="clay-action-pill" style="padding: 4px 10px; font-size: 11px;">Insert</button>
+        `;
+        item.onclick = () => {
+          elements.chatInput.value = p.prompt;
+          adjustTextareaHeight();
+          elements.chatInput.focus();
+          const modal = document.getElementById('saved-prompts-modal');
+          if (modal) modal.classList.remove('active');
+          updateSendButtonState(false);
+          showToast('Prompt template inserted', 'corner-down-left');
+        };
+        list.appendChild(item);
+      });
+    }
+
+    // Saved Prompts Modal Triggers
+    const btnSavedPrompts = document.getElementById('btn-saved-prompts');
+    const savedPromptsModal = document.getElementById('saved-prompts-modal');
+    const btnCloseSavedPrompts = document.getElementById('btn-close-saved-prompts');
+    const btnAddSavedPrompt = document.getElementById('btn-add-saved-prompt');
+    const inputNewSavedPrompt = document.getElementById('input-new-saved-prompt');
+
+    if (btnSavedPrompts && savedPromptsModal) {
+      btnSavedPrompts.onclick = () => {
+        renderSavedPromptsList();
+        savedPromptsModal.classList.add('active');
+      };
+    }
+    if (btnCloseSavedPrompts && savedPromptsModal) {
+      btnCloseSavedPrompts.onclick = () => savedPromptsModal.classList.remove('active');
+    }
+    if (savedPromptsModal) {
+      savedPromptsModal.onclick = (e) => {
+        if (e.target === savedPromptsModal) savedPromptsModal.classList.remove('active');
+      };
+    }
+    if (btnAddSavedPrompt && inputNewSavedPrompt) {
+      btnAddSavedPrompt.onclick = () => {
+        const text = inputNewSavedPrompt.value.trim();
+        if (!text) return;
+        const current = getSavedPrompts();
+        current.unshift({ title: text.substring(0, 36) + (text.length > 36 ? '...' : ''), prompt: text });
+        localStorage.setItem('aeromesh_saved_prompts', JSON.stringify(current));
+        inputNewSavedPrompt.value = '';
+        renderSavedPromptsList();
+        showToast('Saved custom prompt template', 'check');
+      };
+    }
+
+    // Attach File Trigger
+    const btnAttachFile = document.getElementById('btn-attach-file');
+    const fileInput = document.getElementById('file-upload-input');
+    if (btnAttachFile && fileInput) {
+      btnAttachFile.onclick = () => fileInput.click();
+      fileInput.onchange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        if (file.name.endsWith('.gguf') || file.size > 500000) {
+          const snippet = `\n\n[Attached Model File: ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB)]\n`;
+          elements.chatInput.value = (elements.chatInput.value + snippet).trim();
+          adjustTextareaHeight();
+          updateSendButtonState(false);
+          showToast(`Referenced ${file.name}`, 'paperclip');
+        } else {
+          const reader = new FileReader();
+          reader.onload = (evt) => {
+            const content = evt.target.result;
+            const snippet = `\n\n[Attached File: ${file.name}]\n\`\`\`\n${content.substring(0, 3500)}\n\`\`\`\n`;
+            elements.chatInput.value = (elements.chatInput.value + snippet).trim();
+            adjustTextareaHeight();
+            updateSendButtonState(false);
+            showToast(`Attached ${file.name} (${(file.size / 1024).toFixed(1)} KB)`, 'paperclip');
+          };
+          reader.readAsText(file);
+        }
+        fileInput.value = '';
+      };
+    }
+
+    // Quick Ideas Modal Triggers
+    const btnQuickIdeas = document.getElementById('btn-quick-ideas');
+    const ideasModal = document.getElementById('ideas-modal');
+    const btnCloseIdeas = document.getElementById('btn-close-ideas');
+
+    if (btnQuickIdeas && ideasModal) {
+      btnQuickIdeas.onclick = () => ideasModal.classList.add('active');
+    }
+    if (btnCloseIdeas && ideasModal) {
+      btnCloseIdeas.onclick = () => ideasModal.classList.remove('active');
+    }
+    if (ideasModal) {
+      ideasModal.onclick = (e) => {
+        if (e.target === ideasModal) ideasModal.classList.remove('active');
+      };
+    }
+    document.querySelectorAll('.idea-card').forEach((card) => {
+      card.onclick = () => {
+        const prompt = card.getAttribute('data-prompt');
+        if (prompt) {
+          elements.chatInput.value = prompt;
+          adjustTextareaHeight();
+          elements.chatInput.focus();
+          updateSendButtonState(false);
+          if (ideasModal) ideasModal.classList.remove('active');
+          showToast('Idea inserted into prompt composer', 'lightbulb');
+        }
+      };
+    });
+
+    // Quick Canvas Drawer Triggers
+    const btnQuickCanvas = document.getElementById('btn-quick-canvas');
+    const canvasDrawer = document.getElementById('canvas-drawer');
+    const btnCloseCanvas = document.getElementById('btn-close-canvas');
+    const btnInsertCanvas = document.getElementById('btn-insert-canvas');
+    const canvasTextarea = document.getElementById('canvas-textarea');
+
+    if (btnQuickCanvas && canvasDrawer) {
+      btnQuickCanvas.onclick = () => {
+        const isActive = canvasDrawer.classList.toggle('active');
+        btnQuickCanvas.classList.toggle('active', isActive);
+        if (isActive && canvasTextarea) canvasTextarea.focus();
+        showToast(isActive ? 'Interactive Canvas opened' : 'Canvas closed', 'layout');
+      };
+    }
+    if (btnCloseCanvas && canvasDrawer) {
+      btnCloseCanvas.onclick = () => {
+        canvasDrawer.classList.remove('active');
+        if (btnQuickCanvas) btnQuickCanvas.classList.remove('active');
+      };
+    }
+    if (btnInsertCanvas && canvasTextarea) {
+      btnInsertCanvas.onclick = () => {
+        const text = canvasTextarea.value.trim();
+        if (text) {
+          elements.chatInput.value = (elements.chatInput.value + '\n\n' + text).trim();
+          adjustTextareaHeight();
+          updateSendButtonState(false);
+          canvasDrawer.classList.remove('active');
+          if (btnQuickCanvas) btnQuickCanvas.classList.remove('active');
+          showToast('Canvas content inserted into chat', 'corner-down-left');
+        } else {
+          showToast('Canvas is empty', 'alert-circle');
+        }
+      };
+    }
+
+    // Context Window Transparency Modal
+    const contextModal = document.getElementById('context-modal');
+    const btnCloseContext = document.getElementById('btn-close-context');
+    if (elements.contextUsagePill && contextModal) {
+      elements.contextUsagePill.onclick = () => {
+        contextModal.classList.add('active');
+        const chat = getCurrentChat();
+        let totalChars = 0;
+        if (chat) {
+          chat.messages.forEach(m => totalChars += (m.content || '').length);
+        }
+        const estTokens = Math.round(totalChars / 4);
+        const pct = Math.min(100, Math.round((estTokens / 8192) * 100));
+        const statEl = document.getElementById('modal-context-stat');
+        const fillEl = document.getElementById('modal-context-fill');
+        if (statEl) statEl.textContent = `${estTokens.toLocaleString()} / 8,192 tokens (${pct}%)`;
+        if (fillEl) fillEl.style.width = `${pct}%`;
+      };
+    }
+    if (btnCloseContext && contextModal) {
+      btnCloseContext.onclick = () => contextModal.classList.remove('active');
+    }
+    if (contextModal) {
+      contextModal.onclick = (e) => {
+        if (e.target === contextModal) contextModal.classList.remove('active');
+      };
+    }
+
+    // Web Search Context Toggle
+    let enableWebSearch = false;
+    const btnWebSearch = document.getElementById('btn-web-search');
+    if (btnWebSearch) {
+      btnWebSearch.onclick = () => {
+        enableWebSearch = !enableWebSearch;
+        btnWebSearch.classList.toggle('active', enableWebSearch);
+        btnWebSearch.setAttribute('aria-pressed', enableWebSearch ? 'true' : 'false');
+        showToast(enableWebSearch ? 'Mesh Web Context Enabled' : 'Web Context Disabled', 'globe');
+      };
+    }
+
+    // Language Toggle & Help Modal & User Settings
+    const btnLangToggle = document.getElementById('btn-lang-toggle');
+    if (btnLangToggle) {
+      btnLangToggle.onclick = () => {
+        const languages = ['English', 'Spanish', 'French', 'German', 'Japanese', 'Chinese'];
+        const currentLang = localStorage.getItem('aeromesh_lang') || 'English';
+        const nextLang = languages[(languages.indexOf(currentLang) + 1) % languages.length];
+        localStorage.setItem('aeromesh_lang', nextLang);
+        showToast(`Language set to ${nextLang}`, 'languages');
+      };
+    }
+
+    const btnHelpModal = document.getElementById('btn-help-modal');
+    const helpModal = document.getElementById('help-modal');
+    const btnCloseHelp = document.getElementById('btn-close-help');
+    if (btnHelpModal && helpModal) {
+      btnHelpModal.onclick = () => helpModal.classList.add('active');
+    }
+    if (btnCloseHelp && helpModal) {
+      btnCloseHelp.onclick = () => helpModal.classList.remove('active');
+    }
+    if (helpModal) {
+      helpModal.onclick = (e) => {
+        if (e.target === helpModal) helpModal.classList.remove('active');
+      };
+    }
+
+    const btnUserSettings = document.getElementById('btn-user-settings');
+    if (btnUserSettings) {
+      btnUserSettings.onclick = () => {
+        showToast('Node Identity: 127.0.0.1:8080 (Active Coordinator)', 'fingerprint');
+      };
+    }
+
+    // Global Keydown Handlers
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        if (elements.telemetryModal && elements.telemetryModal.classList.contains('active')) {
+          closeTelemetryModal();
+        } else if (savedPromptsModal && savedPromptsModal.classList.contains('active')) {
+          savedPromptsModal.classList.remove('active');
+        } else if (ideasModal && ideasModal.classList.contains('active')) {
+          ideasModal.classList.remove('active');
+        } else if (contextModal && contextModal.classList.contains('active')) {
+          contextModal.classList.remove('active');
+        } else if (helpModal && helpModal.classList.contains('active')) {
+          helpModal.classList.remove('active');
+        } else if (canvasDrawer && canvasDrawer.classList.contains('active')) {
+          canvasDrawer.classList.remove('active');
+          if (btnQuickCanvas) btnQuickCanvas.classList.remove('active');
+        } else if (isGenerating) {
+          if (activeAbortController) activeAbortController.abort();
+        } else if (elements.modelDropdownMenu && elements.modelDropdownMenu.classList.contains('active')) {
+          elements.modelDropdownMenu.classList.remove('active');
+          if (elements.modelSelectorBtn) elements.modelSelectorBtn.setAttribute('aria-expanded', 'false');
         }
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
         e.preventDefault();
         createNewChat();
       }
-      // Alt+U or Ctrl+Shift+Z for Undo
       if (e.altKey && (e.key === 'u' || e.key === 'U')) {
         e.preventDefault();
         undoLastTurn();
@@ -1965,7 +2416,35 @@
       }
     });
 
-    elements.sendBtn.onclick = () => handleSendMessage();
+    // Dual-State Send / Voice Mic Button
+    elements.sendBtn.onclick = () => {
+      if (isGenerating) {
+        if (activeAbortController) activeAbortController.abort();
+        return;
+      }
+      const hasContent = elements.chatInput && elements.chatInput.value.trim().length > 0;
+      if (!hasContent) {
+        if (!recognition) {
+          recognition = initSpeechRecognition();
+        }
+        if (recognition) {
+          if (isListening) {
+            recognition.stop();
+          } else {
+            try {
+              recognition.start();
+            } catch (e) {
+              showToast('Voice speech listening active', 'mic');
+            }
+          }
+        } else {
+          showToast('Speech-to-text not supported in this browser', 'mic-off');
+          elements.chatInput.focus();
+        }
+        return;
+      }
+      handleSendMessage();
+    };
 
     elements.suggestionCards.forEach((card) => {
       const trigger = () => {
@@ -1982,11 +2461,14 @@
     });
 
     if (elements.pillUndo) {
-      elements.pillUndo.onclick = () => undoLastTurn();
+      elements.pillUndo.onclick = () => {
+        undoLastTurn();
+        showToast('Last exchange undone & prompt restored', 'undo-2');
+      };
       elements.pillUndo.onkeydown = (e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          undoLastTurn();
+          elements.pillUndo.click();
         }
       };
     }
@@ -1995,6 +2477,7 @@
       enableReasoning = !enableReasoning;
       elements.pillReasoning.classList.toggle('active', enableReasoning);
       elements.pillReasoning.setAttribute('aria-pressed', enableReasoning ? 'true' : 'false');
+      showToast(enableReasoning ? 'Deeper Research (Reasoning) Enabled' : 'Deeper Research Disabled', 'sparkles');
       announceA11y(`Deep reasoning ${enableReasoning ? 'enabled' : 'disabled'}`);
     };
     elements.pillReasoning.onkeydown = (e) => {
@@ -2007,7 +2490,8 @@
     elements.pillTokens.onclick = () => {
       const nextIdx = (tokenSteps.indexOf(maxTokens) + 1) % tokenSteps.length;
       maxTokens = tokenSteps[nextIdx];
-      elements.maxTokensLabel.textContent = `Max Tokens: ${maxTokens}`;
+      elements.maxTokensLabel.textContent = `${maxTokens}`;
+      showToast(`Max output budget: ${maxTokens} tokens`, 'sliders');
       announceA11y(`Max tokens output set to ${maxTokens}`);
     };
     elements.pillTokens.onkeydown = (e) => {
@@ -2021,6 +2505,7 @@
       clearKvOnSend = !clearKvOnSend;
       elements.pillClearKv.classList.toggle('active', clearKvOnSend);
       elements.pillClearKv.setAttribute('aria-pressed', clearKvOnSend ? 'true' : 'false');
+      showToast(clearKvOnSend ? 'KV Cache will flush on next turn' : 'KV Cache retention active', 'refresh-cw');
       announceA11y(`Reset KV cache on next send ${clearKvOnSend ? 'armed' : 'disarmed'}`);
     };
     elements.pillClearKv.onkeydown = (e) => {

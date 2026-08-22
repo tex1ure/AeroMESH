@@ -644,7 +644,7 @@ impl LlamaPipelineInstance {
                 *batch.pos.add(i) = (start_pos as i32) + (i as i32);
                 *batch.n_seq_id.add(i) = 1;
                 *(*batch.seq_id.add(i)) = 0;
-                *batch.logits.add(i) = 1;
+                *batch.logits.add(i) = if i == (n_tokens as usize) - 1 { 1 } else { 0 };
             }
         }
 
@@ -653,6 +653,15 @@ impl LlamaPipelineInstance {
 
         if res != 0 {
             bail!("llama_decode failed in Stage 1 forward pass (code {})", res);
+        }
+
+        // Accept prompt tokens into sampler to prime repetition penalties
+        for &t in tokens {
+            unsafe {
+                if !self.sampler.is_null() {
+                    llama_sampler_accept(self.sampler, t);
+                }
+            }
         }
 
         // Extract intermediate activation embeddings for all tokens in batch

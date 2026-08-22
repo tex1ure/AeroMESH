@@ -52,6 +52,18 @@ function Get-AeroMeshExe {
     return ""
 }
 
+function Stop-PortProcess {
+    param ([int]$TargetPort)
+    try {
+        $conns = Get-NetTCPConnection -LocalPort $TargetPort -State Listen -ErrorAction SilentlyContinue
+        foreach ($conn in $conns) {
+            if ($conn.OwningProcess -and $conn.OwningProcess -ne $PID) {
+                Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {}
+}
+
 function Show-AeroMeshBanner {
     Write-Host ""
     Write-Host "========================================================================" -ForegroundColor Cyan
@@ -227,6 +239,10 @@ if ($Role -eq "all") {
     $coordUrl = "http://127.0.0.1:" + $apiPort
     $uiUrl = "http://127.0.0.1:" + $uiPort
 
+    # Clean up any lingering process holding the ports
+    Stop-PortProcess $uiPort
+    Stop-PortProcess $apiPort
+
     Write-Host ""
     Write-Host "[+] Launching Full Local Demo Mesh (Worker + Coordinator + Web UI)..." -ForegroundColor Cyan
     Write-Host "  Model:       $modelName" -ForegroundColor Gray
@@ -316,6 +332,10 @@ if ($Role -eq "coordinator") {
         }
         exit 0
     }
+
+    # Clean up any lingering process holding the ports
+    Stop-PortProcess 7860
+    Stop-PortProcess $apiPort
 
     # Start Coordinator API in background process
     if ($aeroExe) {

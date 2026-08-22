@@ -3,19 +3,25 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AeroMesh • Distributed LLM Cluster Interface</title>
+  <title>AeroMESH • P2P Inference Engine</title>
   
   <!-- Favicon -->
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e58244' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polygon points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237c5cbf' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polygon points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>">
 
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
 
+  <!-- Google Material Symbols -->
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+
+  <!-- Three.js (r125) for 3D Orb -->
+  <script src="https://ajax.googleapis.com/ajax/libs/threejs/r125/three.min.js"></script>
+
   <!-- Marked.js for Markdown Rendering -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
-  <!-- Highlight.js for Syntax Highlighting -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <!-- Highlight.js for Syntax Highlighting (Light Theme) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 
   <!-- KaTeX for LaTeX Math Support -->
@@ -23,10 +29,15 @@
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 
-  <!-- Custom Luxury Warm Dark Claymorphic CSS -->
-  <link rel="stylesheet" href="/static/css/claymorphic.css">
+  <!-- Custom Cortex-Inspired Stitch Glassmorphic CSS -->
+  <link rel="stylesheet" href="/static/css/claymorphic.css?v=2.2">
 </head>
 <body>
+
+<!-- WebGL Ambient Background Canvas -->
+<div id="shader-background-layer" aria-hidden="true">
+  <canvas id="shader-canvas-ANIMATION_4"></canvas>
+</div>
 
 <div id="app-container">
 
@@ -37,53 +48,91 @@
   <div id="a11y-live-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
   <!-- ====================================================================
-       COLLAPSIBLE SIDEBAR
+       SIDEBAR
        ==================================================================== -->
   <aside id="sidebar" role="navigation" aria-label="Conversation and Mesh Navigation">
     <div class="sidebar-header">
       <div class="brand-row">
         <div class="brand-badge">
           <div class="brand-icon" aria-hidden="true">
-            <i data-lucide="zap"></i>
+            <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1; font-size: 22px;">hub</span>
           </div>
           <div>
-            <div class="brand-title">AeroMESH <span class="brand-tag">P2P MESH</span></div>
+            <div class="brand-title">AeroMESH</div>
+            <div class="brand-subtitle">P2P INFERENCE ENGINE</div>
           </div>
         </div>
         <button id="sidebar-close-btn" class="toggle-sidebar-btn" title="Toggle Sidebar" aria-label="Close sidebar" style="display: none;">
-          <i data-lucide="panel-left-close"></i>
+          <i data-lucide="panel-left-close" style="width: 16px; height: 16px;"></i>
         </button>
       </div>
 
-      <button id="btn-new-chat" class="clay-btn btn-new-chat" aria-label="Start new conversation">
-        <i data-lucide="plus" style="width: 17px; height: 17px;" aria-hidden="true"></i>
-        <span>New Chat</span>
+      <!-- Stitch Primary Action New Chat Button -->
+      <button id="btn-new-chat" class="btn-new-chat" aria-label="Start new conversation">
+        <span class="material-symbols-outlined" style="font-size: 20px;">add</span>
+        <span>New chat</span>
       </button>
     </div>
 
-    <!-- Search Recessed Box -->
+    <!-- Search Recessed Box with ⌘ Shortcut Glyph -->
     <div class="search-container">
       <div class="recessed-search">
         <i data-lucide="search" style="width: 14px; height: 14px; color: var(--text-dim);" aria-hidden="true"></i>
-        <input type="text" id="search-input" placeholder="Search conversations & messages..." aria-label="Search conversation history">
+        <input type="text" id="search-input" placeholder="Search" aria-label="Search conversation history">
+        <span class="search-shortcut-badge" aria-hidden="true">⌘</span>
       </div>
     </div>
 
-    <!-- Conversation History List -->
-    <div class="sidebar-history" id="history-container" role="region" aria-label="Saved conversations">
-      <div class="history-section-title" id="history-section-heading">Conversations</div>
-      <div id="chat-list-today" role="list" aria-labelledby="history-section-heading"></div>
+    <!-- Stitch Quick Navigation Section -->
+    <div class="sidebar-nav-section">
+      <div class="sidebar-nav-item active" id="nav-explore" role="button" tabindex="0">
+        <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1; font-size: 20px;">explore</span>
+        <span>Explore</span>
+      </div>
+      <div class="sidebar-nav-item" id="nav-cluster" role="button" tabindex="0">
+        <span class="material-symbols-outlined" style="font-size: 20px;">hub</span>
+        <span>Mesh Nodes</span>
+      </div>
+      <div class="sidebar-nav-item" id="nav-models" role="button" tabindex="0">
+        <span class="material-symbols-outlined" style="font-size: 20px;">model_training</span>
+        <span>Models</span>
+      </div>
+      <div class="sidebar-nav-item" id="nav-history" role="button" tabindex="0">
+        <span class="material-symbols-outlined" style="font-size: 20px;">history</span>
+        <span>History</span>
+      </div>
     </div>
 
-    <!-- Dynamic Cluster Telemetry Card in Sidebar Footer -->
+    <!-- Conversation History List (Date Grouped) -->
+    <div class="sidebar-history" id="history-container" role="region" aria-label="Saved conversations">
+      <div id="chat-list-today" role="list" aria-label="Conversation history"></div>
+    </div>
+
+    <!-- Sidebar Footer -->
     <div class="sidebar-footer">
+      <div class="sidebar-user-profile">
+        <div class="user-profile-left">
+          <div class="user-avatar-circle" aria-hidden="true">
+            <span class="material-symbols-outlined" style="font-size: 18px;">fingerprint</span>
+          </div>
+          <div style="display: flex; flex-direction: column; min-width: 0;">
+            <div class="user-name-title">Node Identity</div>
+            <div class="user-sub-label">node0@aeromesh.p2p</div>
+          </div>
+        </div>
+        <button id="btn-user-settings" class="icon-ghost-btn" title="Node Settings" aria-label="Settings">
+          <span class="material-symbols-outlined" style="font-size: 18px;">settings</span>
+        </button>
+      </div>
+
+      <!-- Cluster Telemetry Card -->
       <div class="cluster-telemetry-card" id="sidebar-telemetry-card" role="region" aria-label="Cluster status summary">
         <div class="cluster-card-header">
           <div class="cluster-status-indicator">
             <span class="status-dot" id="sidebar-status-dot" aria-hidden="true"></span>
             <span id="cluster-status-label">Checking Cluster...</span>
           </div>
-          <span style="font-size: 11px; font-weight: 700; color: var(--accent-orange);" id="cluster-wire-transfer">0.0 MB Wire</span>
+          <span style="font-size: 11px; font-weight: 700; color: var(--primary);" id="cluster-wire-transfer">0.0 MB Wire</span>
         </div>
         <div id="cluster-stats-dynamic" style="display: flex; flex-direction: column; gap: 4px; margin-top: 2px;">
           <!-- Dynamically filled by JS from backend API -->
@@ -92,7 +141,7 @@
 
       <div style="display: flex; gap: 8px;">
         <button id="btn-open-telemetry" class="clay-btn" style="flex: 1; padding: 7px 12px; font-size: 12px;" aria-label="Open Cluster HUD topology modal">
-          <i data-lucide="activity" style="width: 14px; height: 14px; color: var(--accent-orange);" aria-hidden="true"></i>
+          <i data-lucide="activity" style="width: 14px; height: 14px; color: var(--primary);" aria-hidden="true"></i>
           <span>Cluster HUD</span>
         </button>
         <button id="btn-clear-all" class="clay-btn" style="padding: 7px 12px; font-size: 12px; color: var(--text-dim);" title="Clear all local conversations" aria-label="Clear all conversations">
@@ -103,41 +152,61 @@
   </aside>
 
   <!-- ====================================================================
-       MAIN STAGE (Spread Chat Viewport)
+       MAIN STAGE
        ==================================================================== -->
   <main id="main-stage" role="main" aria-label="AeroMESH Chat Interface">
 
-    <!-- Top Navigation Bar -->
+    <!-- TopNavBar -->
     <header class="top-nav" role="banner">
       <div class="top-left-group">
         <button id="sidebar-toggle-btn" class="toggle-sidebar-btn" title="Toggle Sidebar" aria-label="Toggle sidebar panel">
-          <i data-lucide="panel-left" aria-hidden="true"></i>
+          <i data-lucide="panel-left" style="width: 18px; height: 18px;" aria-hidden="true"></i>
         </button>
+
+        <nav class="nav-tab-links" aria-label="Primary Navigation Tabs">
+          <a class="nav-tab-link active" id="tab-models-nav" href="#models">Models</a>
+          <a class="nav-tab-link" id="tab-cluster-nav" href="#cluster">Cluster HUD</a>
+        </nav>
 
         <div class="model-selector-container">
           <div class="model-selector-pill" id="model-selector-btn" role="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Select Model">
-            <i data-lucide="cpu" style="width: 15px; height: 15px; color: var(--accent-orange);" aria-hidden="true"></i>
-            <span id="active-model-name">Loading Model...</span>
+            <i data-lucide="cpu" style="width: 15px; height: 15px; color: var(--primary);" aria-hidden="true"></i>
+            <span id="active-model-name">DS.gguf</span>
             <i data-lucide="chevron-down" style="width: 13px; height: 13px; color: var(--text-dim);" aria-hidden="true"></i>
           </div>
-          <div class="model-dropdown-menu" id="model-dropdown-menu" role="listbox" aria-label="Available Models"></div>
+          <div class="model-dropdown-menu" id="model-dropdown-menu" role="listbox" aria-label="Available Models">
+            <div class="model-dropdown-item active" role="option" tabindex="0" aria-selected="true">
+              <span>DS.gguf</span>
+              <i data-lucide="check" style="width: 13px; height: 13px;" aria-hidden="true"></i>
+            </div>
+            <div class="model-dropdown-item" role="option" tabindex="0" aria-selected="false">
+              <span>test.gguf</span>
+            </div>
+          </div>
         </div>
       </div>
 
       <div class="top-right-group">
-        <div class="cluster-pill-badge" id="live-cluster-badge" aria-label="Cluster Connection Status">
-          <span class="status-dot" id="top-status-dot" aria-hidden="true"></span>
-          <span id="top-status-text">Connecting...</span>
+        <button id="btn-reset-session" class="btn-primary-action" title="Flush KV cache for clean multi-turn session" aria-label="Sync KV Cache">
+          Sync KV Cache
+        </button>
+
+        <button id="btn-export-chat" class="btn-secondary-action" title="Export chat history as Markdown" aria-label="Export conversation as Markdown">
+          Export
+        </button>
+
+        <div style="display: flex; gap: 4px; padding-left: 8px; border-left: 1px solid var(--outline-variant);">
+          <button class="icon-ghost-btn" id="btn-top-network" title="Mesh Topology" aria-label="Topology">
+            <span class="material-symbols-outlined" style="font-size: 19px;">account_tree</span>
+          </button>
+          <button class="icon-ghost-btn" id="btn-top-notifications" title="System Notifications" aria-label="Notifications">
+            <span class="material-symbols-outlined" style="font-size: 19px;">notifications</span>
+          </button>
         </div>
 
-        <button id="btn-reset-session" class="clay-btn" style="padding: 5px 12px; font-size: 12px;" title="Flush KV cache for clean multi-turn session" aria-label="Sync KV Cache">
-          <i data-lucide="sparkles" style="width: 13px; height: 13px; color: var(--accent-orange);" aria-hidden="true"></i>
-          <span>Sync KV</span>
-        </button>
-
-        <button id="btn-export-chat" class="clay-btn" style="padding: 5px 10px; font-size: 12px;" title="Export chat history as Markdown" aria-label="Export conversation as Markdown">
-          <i data-lucide="download" style="width: 13px; height: 13px;" aria-hidden="true"></i>
-        </button>
+        <div class="user-node-avatar" title="Coordinator Node: 127.0.0.1:8080">
+          <img alt="User Node Avatar" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBaElKAfz3amF9OZcfnzWSLc90-i2LWMCB-88dBFt0_mmoiljuw9SUSZaiPTjZ9otx3JlwX6S30kum1YddVFrtkmO8VU7bHEdf-wL_n9PH-u5jdYnCFrrAQHrhrMKxuOtU4MIoZ_QotM_44wFqq7DCNvaLy2jeS0YyamuvL-FUvW60cZh8FuX4BDY46wkjunw_e345EPslUpyANH-AvVx6WQYTjmygBHgzXHjYq1SEftfGUNzWaVkZ5DA"/>
+        </div>
       </div>
     </header>
 
@@ -147,47 +216,43 @@
 
         <!-- Hero State (Displayed when chat is empty) -->
         <div id="hero-state">
-          <div class="hero-emblem" aria-hidden="true">
-            <i data-lucide="zap" style="width: 34px; height: 34px;"></i>
+          <!-- Live Three.js 3D Orb Canvas -->
+          <div class="threejs-hero-container" aria-label="Interactive 3D Glass Orb">
+            <div id="threejs-container-ANIMATION_5"></div>
           </div>
+
           <div>
-            <h1 class="hero-title">AeroMESH <span>Cluster</span></h1>
-            <p class="hero-subtitle" id="hero-model-subtitle">
-              Fault-tolerant distributed inference across heterogeneous GPUs with <strong>0.0 MB model weights transferred over the network</strong>.
-            </p>
+            <div class="hero-greeting" id="hero-greeting-text">Hello, Architect</div>
+            <h1 class="hero-question">How can I assist you today?</h1>
           </div>
 
+          <!-- Stitch 3-Column Suggestion Cards Grid -->
           <div class="hero-suggestions-grid" role="group" aria-label="Example prompt suggestions">
-            <div class="suggestion-card" data-prompt="How does AeroMesh achieve zero-weight activation streaming across Tailscale?" role="button" tabindex="0">
-              <div class="suggestion-tag">
-                <i data-lucide="network" style="width: 12px; height: 12px;" aria-hidden="true"></i>
-                <span>Zero-Weight Pipeline</span>
-              </div>
-              <div class="suggestion-text">How does AeroMesh achieve zero-weight activation streaming across Tailscale?</div>
-            </div>
-
+            <!-- Card 1 -->
             <div class="suggestion-card" data-prompt="Analyze Byzantine fault tolerance in decentralized GPU clusters step-by-step." role="button" tabindex="0">
-              <div class="suggestion-tag">
-                <i data-lucide="brain-circuit" style="width: 12px; height: 12px;" aria-hidden="true"></i>
-                <span>Deep Reasoning</span>
+              <div class="suggestion-icon-pill" aria-hidden="true">
+                <span class="material-symbols-outlined" style="font-size: 22px;">network_check</span>
               </div>
-              <div class="suggestion-text">Analyze Byzantine fault tolerance in decentralized GPU clusters step-by-step.</div>
+              <div class="suggestion-title-text">Analyze Mesh Performance</div>
+              <div class="suggestion-desc-text">Review current node latency, throughput, and connectivity health across the P2P cluster.</div>
             </div>
 
+            <!-- Card 2 -->
+            <div class="suggestion-card" data-prompt="How does AeroMesh achieve zero-weight activation streaming across Tailscale?" role="button" tabindex="0">
+              <div class="suggestion-icon-pill" aria-hidden="true">
+                <span class="material-symbols-outlined" style="font-size: 22px;">layers</span>
+              </div>
+              <div class="suggestion-title-text">Optimize Layer Slices</div>
+              <div class="suggestion-desc-text">Configure zero-weight activation streaming details for more efficient distributed inference.</div>
+            </div>
+
+            <!-- Card 3 -->
             <div class="suggestion-card" data-prompt="Write a high-throughput CUDA tensor core activation forwarding loop in Rust." role="button" tabindex="0">
-              <div class="suggestion-tag">
-                <i data-lucide="code-2" style="width: 12px; height: 12px;" aria-hidden="true"></i>
-                <span>CUDA & Systems Code</span>
+              <div class="suggestion-icon-pill" aria-hidden="true">
+                <span class="material-symbols-outlined" style="font-size: 22px;">description</span>
               </div>
-              <div class="suggestion-text">Write a high-throughput CUDA tensor core activation forwarding loop in Rust.</div>
-            </div>
-
-            <div class="suggestion-card" data-prompt="Compare Tailscale Direct WireGuard vs DERP Relay latency for distributed LLM inference." role="button" tabindex="0">
-              <div class="suggestion-tag">
-                <i data-lucide="activity" style="width: 12px; height: 12px;" aria-hidden="true"></i>
-                <span>Network Analysis</span>
-              </div>
-              <div class="suggestion-text">Compare Tailscale Direct WireGuard vs DERP Relay latency for distributed LLM inference.</div>
+              <div class="suggestion-title-text">Export Cluster Report</div>
+              <div class="suggestion-desc-text">Generate a comprehensive Markdown export detailing node performance and system metrics.</div>
             </div>
           </div>
         </div>
@@ -199,70 +264,99 @@
     </div>
 
     <!-- ====================================================================
-         FLOATING CLAYMORPHIC BOTTOM INPUT DOCK
+         FLOATING LIGHT GLASS INPUT DOCK
          ==================================================================== -->
     <div class="bottom-input-anchor">
       <div class="input-dock-container">
 
-        <!-- Toolbar Pills Row -->
-        <div class="input-toolbar-row" role="toolbar" aria-label="Chat options toolbar">
-          <div class="toolbar-pills">
-            <div class="clay-tool-pill active" id="pill-reasoning" role="button" tabindex="0" title="Toggle DeepSeek-R1 reasoning foldout" aria-pressed="true">
-              <i data-lucide="brain" style="width: 12px; height: 12px;" aria-hidden="true"></i>
-              <span>Reasoning Mode</span>
-            </div>
-
-            <div class="clay-tool-pill" id="pill-tokens" role="button" tabindex="0" title="Set token output budget" aria-label="Adjust token limit">
-              <i data-lucide="sliders" style="width: 12px; height: 12px;" aria-hidden="true"></i>
-              <span id="max-tokens-label">Max Tokens: 256</span>
-            </div>
-
-            <div class="clay-tool-pill" id="pill-undo" role="button" tabindex="0" title="Undo last exchange & restore prompt (Alt+U / Ctrl+Shift+Z)" aria-label="Undo last turn">
-              <i data-lucide="undo-2" style="width: 12px; height: 12px;" aria-hidden="true"></i>
-              <span>Undo</span>
-            </div>
-
-            <div class="clay-tool-pill" id="pill-clearkv" role="button" tabindex="0" title="Clear KV Cache on next generation" aria-pressed="false">
-              <i data-lucide="refresh-cw" style="width: 12px; height: 12px;" aria-hidden="true"></i>
-              <span>Reset KV on Send</span>
-            </div>
-
-            <!-- Context Window Transparency Bar -->
-            <div class="context-bar-pill" id="context-usage-pill" title="Context Window Utilization: Estimates active token memory" role="status" aria-label="Context window usage">
-              <div class="context-bar-label">
-                <i data-lucide="gauge" style="width: 11px; height: 11px;" aria-hidden="true"></i>
-                <span id="context-tokens-count">0 / 8,192 tok (0%)</span>
-              </div>
-              <div class="context-bar-track">
-                <div class="context-bar-fill" id="context-bar-fill" style="width: 0%;"></div>
-              </div>
-            </div>
-          </div>
-
-          <div class="shortcut-legend-text" style="font-size: 11px; color: var(--text-dim);">
-            <span><strong>Enter ↵</strong> to send, <strong>Shift+Enter</strong> for newline</span>
-          </div>
-        </div>
-
-        <!-- Main Floating Clay Input Capsule -->
+        <!-- Main Glass Input Capsule -->
         <div class="input-capsule">
+          <!-- Row 1: Textarea Input -->
           <div class="textarea-row">
             <textarea
               id="chat-input"
               rows="1"
-              placeholder="Ask anything or prompt the AeroMesh cluster..."
+              placeholder="Ask me anything or prompt the AeroMesh cluster..."
               autocomplete="off"
               aria-label="Message prompt input"
             ></textarea>
-            
-            <button id="send-btn" class="send-btn-clay" title="Send Prompt (Enter)" aria-label="Send prompt">
-              <i data-lucide="arrow-up" style="width: 18px; height: 18px; stroke-width: 2.5;" aria-hidden="true"></i>
+          </div>
+
+          <!-- Row 2: Toolbar Controls -->
+          <div class="input-toolbar-row" role="toolbar" aria-label="Chat options toolbar">
+            <!-- Left Toolbar Cluster: Deeper Research & Quick Action Icons -->
+            <div class="toolbar-pills">
+              <div class="clay-tool-pill deeper-research-pill active" id="pill-reasoning" role="button" tabindex="0" title="Toggle DeepSeek-R1 reasoning foldout" aria-pressed="true">
+                <i data-lucide="sparkles" style="width: 13px; height: 13px;" aria-hidden="true"></i>
+                <span>Deeper Research</span>
+              </div>
+
+              <button class="icon-ghost-btn" id="btn-quick-canvas" title="Interactive Canvas" aria-label="Canvas">
+                <i data-lucide="layout" style="width: 15px; height: 15px;"></i>
+              </button>
+
+              <button class="icon-ghost-btn" id="btn-quick-ideas" title="Prompt Ideas" aria-label="Ideas">
+                <i data-lucide="lightbulb" style="width: 15px; height: 15px;"></i>
+              </button>
+            </div>
+
+            <!-- Right Toolbar Cluster: Settings & Dual-State Send/Mic Button -->
+            <div class="toolbar-right-cluster">
+              <div class="clay-tool-pill" id="pill-tokens" role="button" tabindex="0" title="Set token output budget" aria-label="Adjust token limit">
+                <i data-lucide="sliders" style="width: 12px; height: 12px;" aria-hidden="true"></i>
+                <span id="max-tokens-label">256</span>
+              </div>
+
+              <div class="clay-tool-pill" id="pill-undo" role="button" tabindex="0" title="Undo last exchange & restore prompt (Alt+U)" aria-label="Undo last turn">
+                <i data-lucide="undo-2" style="width: 12px; height: 12px;" aria-hidden="true"></i>
+              </div>
+
+              <div class="clay-tool-pill" id="pill-clearkv" role="button" tabindex="0" title="Clear KV Cache on next generation" aria-pressed="false">
+                <i data-lucide="refresh-cw" style="width: 12px; height: 12px;" aria-hidden="true"></i>
+              </div>
+
+              <!-- Context Window Transparency Bar -->
+              <div class="context-bar-pill" id="context-usage-pill" title="Context Window Utilization" role="status" aria-label="Context window usage">
+                <div class="context-bar-track">
+                  <div class="context-bar-fill" id="context-bar-fill" style="width: 0%;"></div>
+                </div>
+                <span id="context-tokens-count" style="display: none;">0 / 8,192 tok (0%)</span>
+              </div>
+
+              <button class="icon-ghost-btn" id="btn-web-search" title="Mesh Web Context" aria-label="Web search">
+                <i data-lucide="globe" style="width: 15px; height: 15px;"></i>
+              </button>
+
+              <!-- Primary Dual-State Mic / Send Action Circle Button -->
+              <button id="send-btn" class="send-btn-clay" title="Send Prompt (Enter)" aria-label="Send prompt">
+                <i data-lucide="mic" id="send-btn-icon" style="width: 16px; height: 16px;" aria-hidden="true"></i>
+              </button>
+            </div>
+          </div>
+
+          <!-- Row 3: Inside Card Subfooter (Saved Prompts & Attach File) -->
+          <div class="input-subfooter-row">
+            <span class="saved-prompts-label" id="btn-saved-prompts" role="button" tabindex="0">
+              <i data-lucide="sparkles" style="width: 12px; height: 12px;" aria-hidden="true"></i>
+              <span>Saved prompts</span>
+            </span>
+
+            <button class="attach-pill-btn" id="btn-attach-file" aria-label="Attach File">
+              <i data-lucide="paperclip" style="width: 12px; height: 12px;" aria-hidden="true"></i>
+              <span>Attach file</span>
             </button>
           </div>
         </div>
 
+        <!-- Footer Disclaimer & Community Info -->
         <div class="input-footer-disclaimer" id="footer-disclaimer">
-          ⚡ AeroMesh Zero-Weight Pipeline • Activations streamed via Tailscale Direct WireGuard • 0.0 MB Weights on Wire
+          <div class="footer-utility-row">
+            <span>Join the AeroMesh community for distributed AI insights <a href="https://github.com" target="_blank" rel="noopener">Join Discord</a></span>
+            <div style="display: flex; gap: 8px; margin-left: 8px;">
+              <button class="icon-ghost-btn" id="btn-lang-toggle" title="Translate / Language" aria-label="Language"><i data-lucide="languages" style="width: 13px; height: 13px;"></i></button>
+              <button class="icon-ghost-btn" id="btn-help-modal" title="Help & Documentation" aria-label="Help"><i data-lucide="help-circle" style="width: 13px; height: 13px;"></i></button>
+            </div>
+          </div>
         </div>
 
       </div>
@@ -279,7 +373,7 @@
   <div class="clay-modal">
     <div class="modal-header">
       <div class="modal-title">
-        <i data-lucide="cpu" style="color: var(--accent-orange);"></i>
+        <i data-lucide="cpu" style="color: var(--primary);"></i>
         <span>AeroMesh Cluster Topology</span>
       </div>
       <button class="modal-close-btn" id="modal-close-btn">
@@ -287,7 +381,7 @@
       </button>
     </div>
 
-    <p style="font-size: 13px; color: var(--text-muted);" id="modal-description">
+    <p style="font-size: 13px; color: var(--on-surface-variant);" id="modal-description">
       Dynamic cluster node status and layer slice allocation queried directly from the backend coordinator:
     </p>
 
@@ -308,8 +402,431 @@
   </div>
 </div>
 
+<!-- Hidden File Upload Input -->
+<input type="file" id="file-upload-input" style="display: none;" accept=".txt,.md,.json,.csv,.py,.rs,.cu,.cpp,.c,.h,.hpp,.log,.gguf,.yaml,.yml">
+
+<!-- Toast Notification Container -->
+<div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+<!-- ====================================================================
+     SAVED PROMPTS & TEMPLATES MODAL
+     ==================================================================== -->
+<div class="modal-backdrop" id="saved-prompts-modal">
+  <div class="clay-modal" style="max-width: 580px;">
+    <div class="modal-header">
+      <div class="modal-title">
+        <i data-lucide="sparkles" style="color: var(--primary);"></i>
+        <span>Saved Prompt Templates</span>
+      </div>
+      <button class="modal-close-btn" id="btn-close-saved-prompts">
+        <i data-lucide="x"></i>
+      </button>
+    </div>
+
+    <p style="font-size: 13px; color: var(--on-surface-variant); margin-bottom: 12px;">
+      Select a saved prompt to insert into your composer or save custom templates:
+    </p>
+
+    <div class="saved-prompts-list" id="saved-prompts-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 280px; overflow-y: auto; padding-right: 4px;">
+      <!-- Populated dynamically by JS -->
+    </div>
+
+    <div style="display: flex; gap: 8px; margin-top: 14px;">
+      <input type="text" id="input-new-saved-prompt" class="modal-input-box" placeholder="Type custom template to save..." style="flex: 1; padding: 8px 12px; border-radius: var(--radius-sm); border: 1px solid var(--outline-variant); font-size: 13px;">
+      <button class="btn-primary-action" id="btn-add-saved-prompt" style="padding: 8px 14px; font-size: 12px;">Save Prompt</button>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================
+     PROMPT IDEAS & INSPIRATION MODAL
+     ==================================================================== -->
+<div class="modal-backdrop" id="ideas-modal">
+  <div class="clay-modal" style="max-width: 620px;">
+    <div class="modal-header">
+      <div class="modal-title">
+        <i data-lucide="lightbulb" style="color: var(--primary);"></i>
+        <span>Prompt Ideas & Cluster Benchmarks</span>
+      </div>
+      <button class="modal-close-btn" id="btn-close-ideas">
+        <i data-lucide="x"></i>
+      </button>
+    </div>
+
+    <p style="font-size: 13px; color: var(--on-surface-variant); margin-bottom: 14px;">
+      Quick starter prompts curated for distributed P2P inference, CUDA optimization, and zero-weight streaming:
+    </p>
+
+    <div class="ideas-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+      <div class="idea-card" data-prompt="Analyze Byzantine fault tolerance in decentralized GPU clusters step-by-step." style="background: var(--surface-container-low); border: 1px solid var(--outline-variant); border-radius: var(--radius-md); padding: 12px; cursor: pointer; transition: var(--smooth-fast);">
+        <div style="font-weight: 600; font-size: 13px; color: var(--primary); margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">
+          <i data-lucide="network" style="width: 14px; height: 14px;"></i> Mesh Health
+        </div>
+        <div style="font-size: 12px; color: var(--on-surface-variant); line-height: 1.4;">Analyze Byzantine fault tolerance in decentralized GPU clusters step-by-step.</div>
+      </div>
+
+      <div class="idea-card" data-prompt="How does AeroMesh achieve zero-weight activation streaming across WireGuard Tailscale?" style="background: var(--surface-container-low); border: 1px solid var(--outline-variant); border-radius: var(--radius-md); padding: 12px; cursor: pointer; transition: var(--smooth-fast);">
+        <div style="font-weight: 600; font-size: 13px; color: var(--primary); margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">
+          <i data-lucide="layers" style="width: 14px; height: 14px;"></i> Zero-Weight Tech
+        </div>
+        <div style="font-size: 12px; color: var(--on-surface-variant); line-height: 1.4;">Explain zero-weight activation streaming across WireGuard Tailscale tunnels.</div>
+      </div>
+
+      <div class="idea-card" data-prompt="Write a high-throughput CUDA tensor core activation forwarding loop in Rust." style="background: var(--surface-container-low); border: 1px solid var(--outline-variant); border-radius: var(--radius-md); padding: 12px; cursor: pointer; transition: var(--smooth-fast);">
+        <div style="font-weight: 600; font-size: 13px; color: var(--primary); margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">
+          <i data-lucide="code" style="width: 14px; height: 14px;"></i> CUDA & Rust
+        </div>
+        <div style="font-size: 12px; color: var(--on-surface-variant); line-height: 1.4;">Write a high-throughput CUDA tensor core activation forwarding loop in Rust.</div>
+      </div>
+
+      <div class="idea-card" data-prompt="Compare Q4_K_M vs Q8_0 quantization perplexity and VRAM bandwidth trade-offs for 14B models." style="background: var(--surface-container-low); border: 1px solid var(--outline-variant); border-radius: var(--radius-md); padding: 12px; cursor: pointer; transition: var(--smooth-fast);">
+        <div style="font-weight: 600; font-size: 13px; color: var(--primary); margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">
+          <i data-lucide="cpu" style="width: 14px; height: 14px;"></i> Quantization
+        </div>
+        <div style="font-size: 12px; color: var(--on-surface-variant); line-height: 1.4;">Compare Q4_K_M vs Q8_0 perplexity & VRAM bandwidth trade-offs for 14B models.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================
+     INTERACTIVE CANVAS & CODE DRAFTING DRAWER
+     ==================================================================== -->
+<div class="canvas-drawer" id="canvas-drawer" aria-hidden="true">
+  <div class="canvas-header">
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <i data-lucide="layout" style="color: var(--primary); width: 16px; height: 16px;"></i>
+      <span style="font-weight: 700; font-size: 14px;">Interactive Canvas & Codepad</span>
+    </div>
+    <div style="display: flex; gap: 6px;">
+      <button class="clay-action-pill" id="btn-insert-canvas" title="Send canvas content into chat input">
+        <i data-lucide="corner-down-left" style="width: 11px; height: 11px;"></i>
+        <span>Insert to Chat</span>
+      </button>
+      <button class="modal-close-btn" id="btn-close-canvas">
+        <i data-lucide="x" style="width: 14px; height: 14px;"></i>
+      </button>
+    </div>
+  </div>
+  <div class="canvas-body" style="padding: 14px; display: flex; flex-direction: column; gap: 10px; height: calc(100% - 56px);">
+    <textarea id="canvas-textarea" placeholder="Draft code, write notes, or edit markdown here..." style="width: 100%; flex: 1; border: 1px solid var(--outline-variant); border-radius: var(--radius-sm); padding: 12px; font-family: 'JetBrains Mono', monospace; font-size: 12.5px; resize: none; background: #ffffff; color: var(--on-surface); outline: none;"></textarea>
+  </div>
+</div>
+
+<!-- ====================================================================
+     CONTEXT WINDOW UTILIZATION POPOVER MODAL
+     ==================================================================== -->
+<div class="modal-backdrop" id="context-modal">
+  <div class="clay-modal" style="max-width: 460px;">
+    <div class="modal-header">
+      <div class="modal-title">
+        <i data-lucide="sliders" style="color: var(--primary);"></i>
+        <span>Context Window Transparency</span>
+      </div>
+      <button class="modal-close-btn" id="btn-close-context">
+        <i data-lucide="x"></i>
+      </button>
+    </div>
+
+    <div style="padding: 10px 0;">
+      <div style="display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px; font-weight: 600;">
+        <span>Current Utilization:</span>
+        <span id="modal-context-stat" style="color: var(--primary);">0 / 8,192 tokens (0%)</span>
+      </div>
+      <div class="context-bar-track" style="height: 8px; border-radius: 4px; background: var(--surface-container-high); overflow: hidden; margin-bottom: 14px;">
+        <div class="context-bar-fill" id="modal-context-fill" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--primary), #a27ae6); border-radius: 4px;"></div>
+      </div>
+
+      <div style="font-size: 12px; color: var(--on-surface-variant); line-height: 1.6; display: flex; flex-direction: column; gap: 6px;">
+        <div>• <strong>Context Budget:</strong> 8,192 llama.cpp token capacity.</div>
+        <div>• <strong>KV Cache Mode:</strong> Dynamic rolling cache with zero cross-node layer state thrashing.</div>
+        <div>• <strong>Token Limiter:</strong> Click the <code style="background: var(--surface-container-high); padding: 2px 5px; border-radius: 4px;">256</code> pill to adjust generation limits.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================
+     HELP & DOCUMENTATION MODAL
+     ==================================================================== -->
+<div class="modal-backdrop" id="help-modal">
+  <div class="clay-modal" style="max-width: 520px;">
+    <div class="modal-header">
+      <div class="modal-title">
+        <i data-lucide="help-circle" style="color: var(--primary);"></i>
+        <span>AeroMesh Quick Guide & Shortcuts</span>
+      </div>
+      <button class="modal-close-btn" id="btn-close-help">
+        <i data-lucide="x"></i>
+      </button>
+    </div>
+
+    <div style="font-size: 13px; color: var(--on-surface-variant); line-height: 1.6; display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
+      <div><strong>⌨️ Keyboard Shortcuts:</strong></div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px;">
+        <div style="background: var(--surface-container-low); padding: 6px 10px; border-radius: 6px; border: 1px solid var(--outline-variant);"><kbd>Enter</kbd> Send prompt</div>
+        <div style="background: var(--surface-container-low); padding: 6px 10px; border-radius: 6px; border: 1px solid var(--outline-variant);"><kbd>Shift+Enter</kbd> Multi-line newline</div>
+        <div style="background: var(--surface-container-low); padding: 6px 10px; border-radius: 6px; border: 1px solid var(--outline-variant);"><kbd>Ctrl+N</kbd> Start new chat</div>
+        <div style="background: var(--surface-container-low); padding: 6px 10px; border-radius: 6px; border: 1px solid var(--outline-variant);"><kbd>Alt+U</kbd> Undo last exchange</div>
+        <div style="background: var(--surface-container-low); padding: 6px 10px; border-radius: 6px; border: 1px solid var(--outline-variant);"><kbd>Esc</kbd> Stop streaming or close modals</div>
+      </div>
+      <div style="margin-top: 6px;"><strong>🚀 Cluster Tip:</strong> AeroMesh shards model layers across nodes and sends activations over encrypted P2P channels with zero-weight movement.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================
+     THREE.JS 3D ORB & WEBGL BACKGROUND SHADER SCRIPTS
+     ==================================================================== -->
+<script>
+// 1. WebGL Ambient Background Shader
+(function() {
+  const canvas = document.getElementById('shader-canvas-ANIMATION_4');
+  if (!canvas) return;
+
+  function syncSize() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+  }
+  window.addEventListener('resize', syncSize);
+  syncSize();
+
+  const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+  if (!gl) return;
+
+  const vs = `attribute vec2 a_position;
+varying vec2 v_texCoord;
+void main() {
+  v_texCoord = a_position * 0.5 + 0.5;
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}`;
+
+  const fs = `precision highp float;
+varying vec2 v_texCoord;
+uniform float u_time;
+uniform vec2 u_resolution;
+
+void main() {
+    vec2 uv = v_texCoord;
+    vec3 color1 = vec3(0.914, 0.875, 0.969); // #e9dff7
+    vec3 color2 = vec3(0.945, 0.925, 0.976); // #f1ecf9
+    vec3 color3 = vec3(0.965, 0.953, 0.988); // #f6f3fc
+    
+    float noise = sin(uv.x * 2.0 + u_time * 0.5) * cos(uv.y * 2.0 + u_time * 0.3);
+    vec3 mixedColor = mix(color1, color2, uv.y + noise * 0.1);
+    mixedColor = mix(mixedColor, color3, uv.x - noise * 0.1);
+    
+    // Floating glow spheres
+    vec2 p1 = vec2(0.3 + 0.1 * cos(u_time * 0.2), 0.7 + 0.1 * sin(u_time * 0.3));
+    float g1 = 0.2 / length(uv - p1);
+    mixedColor += vec3(0.486, 0.361, 0.749) * g1 * 0.08;
+    
+    gl_FragColor = vec4(mixedColor, 1.0);
+}`;
+
+  function cs(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    return s;
+  }
+
+  const prog = gl.createProgram();
+  gl.attachShader(prog, cs(gl.VERTEX_SHADER, vs));
+  gl.attachShader(prog, cs(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+  const pos = gl.getAttribLocation(prog, 'a_position');
+  gl.enableVertexAttribArray(pos);
+  gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
+
+  const uTime = gl.getUniformLocation(prog, 'u_time');
+  const uRes = gl.getUniformLocation(prog, 'u_resolution');
+
+  function render(t) {
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    if (uTime) gl.uniform1f(uTime, t * 0.001);
+    if (uRes) gl.uniform2f(uRes, canvas.width, canvas.height);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    requestAnimationFrame(render);
+  }
+  render(0);
+})();
+
+// 2. Three.js Interactive Iridescent 3D Crystal Orb with Swirling Core & Neural Particles
+(function() {
+  const container = document.getElementById('threejs-container-ANIMATION_5');
+  if (!container || typeof THREE === 'undefined') return;
+
+  const width = container.clientWidth || 210;
+  const height = container.clientHeight || 210;
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(48, width / height, 0.1, 1000);
+  const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+  renderer.setSize(width, height);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.25;
+  container.appendChild(renderer.domElement);
+
+  // Group to rotate together with mouse interaction
+  const orbGroup = new THREE.Group();
+  scene.add(orbGroup);
+
+  // Texture Loader for the Iridescent Cortex Orb
+  const textureLoader = new THREE.TextureLoader();
+  const orbTexture = textureLoader.load('/static/img/cortex_orb.jpg');
+  orbTexture.wrapS = THREE.RepeatWrapping;
+  orbTexture.wrapT = THREE.RepeatWrapping;
+
+  // 1. Core Sphere with Iridescent Fluid Texture & Emissive Violet Glow
+  const coreGeo = new THREE.SphereGeometry(1.58, 64, 64);
+  const coreMat = new THREE.MeshStandardMaterial({
+    map: orbTexture,
+    roughness: 0.15,
+    metalness: 0.25,
+    emissive: 0x6343a4,
+    emissiveIntensity: 0.45,
+    emissiveMap: orbTexture
+  });
+  const coreMesh = new THREE.Mesh(coreGeo, coreMat);
+  orbGroup.add(coreMesh);
+
+  // 2. Outer Glass Shell with Fresnel & Specular Sheen
+  const outerGeo = new THREE.SphereGeometry(1.72, 64, 64);
+  const outerMat = new THREE.MeshPhysicalMaterial({
+    color: 0xfbf4ff,
+    transparent: true,
+    opacity: 0.52,
+    roughness: 0.04,
+    transmission: 0.88,
+    thickness: 1.4,
+    ior: 1.52,
+    reflectivity: 0.95,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.04,
+    specularIntensity: 1.0,
+    specularColor: 0xd2bcff
+  });
+  const outerGlass = new THREE.Mesh(outerGeo, outerMat);
+  orbGroup.add(outerGlass);
+
+  // 3. Orbiting Neural Particle Ring / Star Cloud
+  const particleCount = 80;
+  const particleGeo = new THREE.BufferGeometry();
+  const positions = new Float32Array(particleCount * 3);
+  const colors = new Float32Array(particleCount * 3);
+
+  for (let i = 0; i < particleCount; i++) {
+    const angle = (i / particleCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+    const radius = 2.05 + (Math.random() - 0.5) * 0.65;
+    const y = (Math.random() - 0.5) * 0.85;
+    positions[i * 3] = Math.cos(angle) * radius;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = Math.sin(angle) * radius;
+
+    // Violet / Lavender / Magenta particle colors
+    colors[i * 3] = 0.65 + Math.random() * 0.25;
+    colors[i * 3 + 1] = 0.38 + Math.random() * 0.25;
+    colors[i * 3 + 2] = 0.92 + Math.random() * 0.08;
+  }
+
+  particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  particleGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  const particleMat = new THREE.PointsMaterial({
+    size: 0.075,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.88,
+    blending: THREE.AdditiveBlending
+  });
+
+  const particleSystem = new THREE.Points(particleGeo, particleMat);
+  orbGroup.add(particleSystem);
+
+  // Dynamic Lights
+  const keyLight = new THREE.PointLight(0xd2bcff, 3.2, 50);
+  keyLight.position.set(4, 4, 4);
+  scene.add(keyLight);
+
+  const fillLight = new THREE.PointLight(0x7c5cbf, 2.6, 50);
+  fillLight.position.set(-4, -2, 3);
+  scene.add(fillLight);
+
+  const backLight = new THREE.PointLight(0xf72585, 2.0, 50);
+  backLight.position.set(0, 3, -4);
+  scene.add(backLight);
+
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
+  scene.add(ambientLight);
+
+  camera.position.z = 5.2;
+
+  // Mouse Parallax Interaction
+  let mouseX = 0, mouseY = 0;
+  let targetRotationX = 0, targetRotationY = 0;
+
+  window.addEventListener('mousemove', (e) => {
+    const rect = container.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    mouseX = (e.clientX - cx) / window.innerWidth;
+    mouseY = (e.clientY - cy) / window.innerHeight;
+    targetRotationY = mouseX * 1.2;
+    targetRotationX = mouseY * 0.8;
+  });
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const time = Date.now() * 0.001;
+
+    // Smooth mouse inertia rotation
+    orbGroup.rotation.y += (targetRotationY - orbGroup.rotation.y) * 0.05 + 0.0035;
+    orbGroup.rotation.x += (targetRotationX - orbGroup.rotation.x) * 0.05;
+
+    // Slow internal fluid texture spin
+    coreMesh.rotation.y -= 0.004;
+    coreMesh.rotation.z += 0.002;
+
+    // Orbiting particle ring counter-rotation
+    particleSystem.rotation.y += 0.007;
+    particleSystem.rotation.x = Math.sin(time * 0.5) * 0.22;
+
+    // Gentle vertical floating breathing motion
+    orbGroup.position.y = Math.sin(time * 1.4) * 0.12;
+
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  window.addEventListener('resize', () => {
+    const w = container.clientWidth || 210;
+    const h = container.clientHeight || 210;
+    renderer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  });
+})();
+
+// Ensure all Lucide icons are initialized
+if (window.lucide) {
+  lucide.createIcons();
+}
+</script>
+
 <!-- Application Script -->
-<script src="/static/js/app.js"></script>
+<script src="/static/js/app.js?v=3.1"></script>
 
 </body>
 </html>

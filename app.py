@@ -56,32 +56,49 @@ async def serve_spa():
 @app.get("/v1/models")
 async def get_models():
     """
-    Fetches the active models directly from the running AeroMesh coordinator.
-    If coordinator is offline, dynamically discovers local GGUF models from models/ directory.
+    Discovers all local GGUF models in models/ and merges with the active coordinator model.
     """
+    models_map = {}
+
+    # 1. Scan models/ directory for all available GGUF files
+    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+    if os.path.exists(models_dir):
+        for f in glob.glob(os.path.join(models_dir, "*.gguf")):
+            name = os.path.basename(f)
+            size_mb = os.path.getsize(f) / (1024 * 1024)
+            models_map[name] = {
+                "id": name,
+                "object": "model",
+                "owned_by": "local_disk",
+                "size_mb": round(size_mb, 1),
+                "path": f
+            }
+
+    # 2. Query running coordinator for active model
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
             resp = await client.get(MODELS_URL)
             if resp.status_code == 200:
-                return resp.json()
+                data = resp.json().get("data", [])
+                for m in data:
+                    mid = m.get("id")
+                    if mid:
+                        if mid not in models_map:
+                            models_map[mid] = m
+                        models_map[mid]["active"] = True
     except Exception:
         pass
 
-    # Discover local GGUF files dynamically if backend is offline
-    local_models = []
-    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
-    if os.path.exists(models_dir):
-        for f in glob.glob(os.path.join(models_dir, "*.gguf")):
-            local_models.append({
-                "id": os.path.basename(f),
-                "object": "model",
-                "owned_by": "local_disk",
-                "path": f
-            })
+    if not models_map:
+        models_map["DS.gguf"] = {
+            "id": "DS.gguf",
+            "object": "model",
+            "owned_by": "aeromesh-cluster"
+        }
 
     return {
         "object": "list",
-        "data": local_models
+        "data": list(models_map.values())
     }
 
 

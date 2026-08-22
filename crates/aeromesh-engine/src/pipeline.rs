@@ -332,11 +332,14 @@ impl PipelineCoordinatorClient {
         let piece_bytes = self.instance.token_to_piece(first_token_id).unwrap_or_default();
         let first_token_text = String::from_utf8_lossy(&piece_bytes).to_string();
         let is_first_eos = is_first_eog
+            || first_token_text.contains("end_of_sentence")
             || first_token_text.contains("< | end_of_sentence | >")
             || first_token_text.contains("<｜end of sentence｜>")
             || first_token_text.contains("<｜end_of_sentence｜>")
+            || first_token_text.contains("<|end_of_sentence|>")
             || first_token_text.contains("<|im_end|>")
-            || first_token_text.contains("<|endoftext|>");
+            || first_token_text.contains("<|endoftext|>")
+            || first_token_text.contains("</s>");
 
         // Stream Prefill Activation Frame [S * hidden_dim] over TCP if worker is connected
         if let Some(ref mut stream) = self.active_stream {
@@ -394,11 +397,16 @@ impl PipelineCoordinatorClient {
                 let token_text = String::from_utf8_lossy(&token_piece_bytes).to_string();
 
                 let is_eos = is_eog
+                    || token_text.contains("end_of_sentence")
                     || token_text.contains("< | end_of_sentence | >")
                     || token_text.contains("<｜end of sentence｜>")
                     || token_text.contains("<｜end_of_sentence｜>")
+                    || token_text.contains("<|end_of_sentence|>")
                     || token_text.contains("<|im_end|>")
-                    || token_text.contains("<|endoftext|>");
+                    || token_text.contains("<|endoftext|>")
+                    || token_text.contains("</s>")
+                    || generated_text.ends_with("< | end_of_sentence | >")
+                    || generated_text.ends_with("<|im_end|>");
 
                 if is_eos {
                     break;

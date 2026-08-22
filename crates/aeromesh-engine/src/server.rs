@@ -220,16 +220,57 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
     }))
 }
 
+fn format_chat_prompt(messages: &[ChatMessage]) -> String {
+    if messages.is_empty() {
+        return String::new();
+    }
+
+    if messages.len() == 1
+        && (messages[0].content.contains("<|im_start|>")
+            || messages[0].content.contains("<｜User｜>"))
+    {
+        return messages[0].content.clone();
+    }
+
+    let mut prompt = String::new();
+    let mut has_system = false;
+
+    for msg in messages {
+        let content = msg.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        match msg.role.as_str() {
+            "system" => {
+                has_system = true;
+                prompt.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", content));
+            }
+            "user" => {
+                if !has_system && prompt.is_empty() {
+                    prompt.push_str("<|im_start|>system\nYou are AeroMesh, a powerful decentralized AI assistant. Provide helpful, accurate, and direct responses.<|im_end|>\n");
+                    has_system = true;
+                }
+                prompt.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", content));
+            }
+            "assistant" => {
+                prompt.push_str(&format!("<|im_start|>assistant\n{}<|im_end|>\n", content));
+            }
+            _ => {
+                prompt.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", content));
+            }
+        }
+    }
+
+    prompt.push_str("<|im_start|>assistant\n");
+    prompt
+}
+
 async fn handle_chat_completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Response {
     let is_streaming = req.stream.unwrap_or(true);
-    let prompt = req
-        .messages
-        .last()
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
+    let prompt = format_chat_prompt(&req.messages);
 
     let max_tokens = req.max_tokens.unwrap_or(256);
     let temp = req.temperature.unwrap_or(0.7);
