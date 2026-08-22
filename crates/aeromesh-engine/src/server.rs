@@ -294,16 +294,37 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
     }))
 }
 
+fn format_chat_prompt(messages: &[ChatMessage]) -> String {
+    if messages.is_empty() {
+        return String::new();
+    }
+
+    // If message is already pre-formatted with ChatML or instruct tokens, pass directly
+    if messages.len() == 1 && (messages[0].content.contains("<|im_start|>") || messages[0].content.contains("<|user|>") || messages[0].content.contains("[INST]")) {
+        return messages[0].content.clone();
+    }
+
+    let mut prompt = String::new();
+    let has_system = messages.iter().any(|m| m.role.eq_ignore_ascii_case("system"));
+    if !has_system {
+        prompt.push_str("<|im_start|>system\nYou are a helpful, intelligent AI assistant.<|im_end|>\n");
+    }
+
+    for msg in messages {
+        let role = msg.role.trim().to_lowercase();
+        let content = msg.content.trim();
+        prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, content));
+    }
+    prompt.push_str("<|im_start|>assistant\n");
+    prompt
+}
+
 async fn handle_chat_completions(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Response {
     let is_streaming = req.stream.unwrap_or(true);
-    let prompt = req
-        .messages
-        .last()
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
+    let prompt = format_chat_prompt(&req.messages);
 
     let max_tokens = req.max_tokens.unwrap_or(256);
     let temp = req.temperature.unwrap_or(0.7);

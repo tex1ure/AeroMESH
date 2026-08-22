@@ -417,7 +417,6 @@ impl PipelineCoordinatorClient {
 
                 // Sample next token ID
                 let next_token_id = self.instance.sample_next_token(0.7, 0.9, seq_id as u32)?;
-                let is_eos = self.instance.is_eog(next_token_id);
                 let token_piece_bytes = self.instance.token_to_piece(next_token_id).unwrap_or_default();
                 let token_text = String::from_utf8_lossy(&token_piece_bytes).to_string();
 
@@ -441,6 +440,16 @@ impl PipelineCoordinatorClient {
                     }
                 }
 
+                let is_eos = self.instance.is_eog(next_token_id)
+                    || token_text.contains("<|im_end|>")
+                    || token_text.contains("<|endoftext|>")
+                    || token_text.contains("<|eot_id|>")
+                    || token_text.contains("</s>");
+
+                if is_eos {
+                    break;
+                }
+
                 print!("{}", token_text);
                 let _ = std::io::Write::flush(&mut std::io::stdout());
 
@@ -455,10 +464,6 @@ impl PipelineCoordinatorClient {
                 current_token_id = next_token_id;
                 current_pos += 1;
                 total_tokens += 1;
-
-                if is_eos {
-                    break;
-                }
             }
         }
 

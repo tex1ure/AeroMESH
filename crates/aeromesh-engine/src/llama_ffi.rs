@@ -196,10 +196,22 @@ extern "C" {
         idx: i32,
     ) -> LlamaToken;
     pub fn llama_sampler_free(smpl: *mut LlamaSampler);
-
     pub fn llama_get_memory(ctx: *const LlamaContext) -> *mut c_void;
     pub fn llama_memory_clear(mem: *mut c_void, data: bool);
     pub fn llama_synchronize(ctx: *mut LlamaContext);
+    pub fn llama_log_set(
+        log_callback: Option<extern "C" fn(level: i32, text: *const c_char, user_data: *mut c_void)>,
+        user_data: *mut c_void,
+    );
+}
+
+extern "C" fn quiet_llama_log_callback(level: i32, text: *const c_char, _user_data: *mut c_void) {
+    if level >= 3 && !text.is_null() {
+        let msg = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy();
+        if !msg.contains("CUDA Graph") && !msg.contains("reused") && !msg.contains("warmup") {
+            eprint!("{}", msg);
+        }
+    }
 }
 
 static INIT_BACKEND_ONCE: Once = Once::new();
@@ -232,6 +244,7 @@ pub fn ensure_llama_initialized() {
         }
 
         unsafe {
+            llama_log_set(Some(quiet_llama_log_callback), std::ptr::null_mut());
             llama_backend_init();
             info!("✅ Native llama.cpp / GGML CUDA Backend Initialized");
         }
