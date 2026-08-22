@@ -7,11 +7,16 @@ fn main() {
     let bin_dir = root_dir.join("bin");
     let release_bin_dir = root_dir.join("llama.cpp").join("build").join("bin").join("Release");
 
+    let src_release_dir = root_dir.join("llama.cpp").join("build").join("src").join("Release");
+
     if bin_dir.exists() {
         println!("cargo:rustc-link-search=native={}", bin_dir.display());
     }
     if release_bin_dir.exists() {
         println!("cargo:rustc-link-search=native={}", release_bin_dir.display());
+    }
+    if src_release_dir.exists() {
+        println!("cargo:rustc-link-search=native={}", src_release_dir.display());
     }
 
     println!("cargo:rustc-link-lib=dylib=llama");

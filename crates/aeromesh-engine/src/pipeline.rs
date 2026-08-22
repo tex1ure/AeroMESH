@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
@@ -328,9 +328,15 @@ impl PipelineCoordinatorClient {
 
         // Sample first token from prefill logits
         let first_token_id = self.instance.sample_next_token(0.7, 0.9, 0)?;
-        let is_first_eos = self.instance.is_eog(first_token_id);
+        let is_first_eog = self.instance.is_eog(first_token_id);
         let piece_bytes = self.instance.token_to_piece(first_token_id).unwrap_or_default();
         let first_token_text = String::from_utf8_lossy(&piece_bytes).to_string();
+        let is_first_eos = is_first_eog
+            || first_token_text.contains("< | end_of_sentence | >")
+            || first_token_text.contains("<｜end of sentence｜>")
+            || first_token_text.contains("<｜end_of_sentence｜>")
+            || first_token_text.contains("<|im_end|>")
+            || first_token_text.contains("<|endoftext|>");
 
         // Stream Prefill Activation Frame [S * hidden_dim] over TCP if worker is connected
         if let Some(ref mut stream) = self.active_stream {
@@ -352,18 +358,20 @@ impl PipelineCoordinatorClient {
             }
         }
 
-        print!("{}", first_token_text);
-        let _ = std::io::Write::flush(&mut std::io::stdout());
+        if !is_first_eos {
+            print!("{}", first_token_text);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
 
-        generated_text.push_str(&first_token_text);
-        if let Some(ref tx) = token_tx {
-            if tx.send(piece_bytes).await.is_err() {
-                info!("🛑 Client disconnected / aborted during prefill. Halting generation loop.");
-                return Ok((generated_text, perf_metrics));
+            generated_text.push_str(&first_token_text);
+            if let Some(ref tx) = token_tx {
+                if tx.send(piece_bytes).await.is_err() {
+                    info!("🛑 Client disconnected / aborted during prefill. Halting generation loop.");
+                    return Ok((generated_text, perf_metrics));
+                }
             }
+            total_tokens += 1;
         }
 
-        total_tokens += 1;
         let mut current_token_id = first_token_id;
         let mut current_pos = prompt_len;
 
@@ -381,9 +389,20 @@ impl PipelineCoordinatorClient {
 
                 // Sample next token ID
                 let next_token_id = self.instance.sample_next_token(0.7, 0.9, seq_id as u32)?;
-                let is_eos = self.instance.is_eog(next_token_id);
+                let is_eog = self.instance.is_eog(next_token_id);
                 let token_piece_bytes = self.instance.token_to_piece(next_token_id).unwrap_or_default();
                 let token_text = String::from_utf8_lossy(&token_piece_bytes).to_string();
+
+                let is_eos = is_eog
+                    || token_text.contains("< | end_of_sentence | >")
+                    || token_text.contains("<｜end of sentence｜>")
+                    || token_text.contains("<｜end_of_sentence｜>")
+                    || token_text.contains("<|im_end|>")
+                    || token_text.contains("<|endoftext|>");
+
+                if is_eos {
+                    break;
+                }
 
                 // Stream single-token activation frame [1 * hidden_dim] over TCP
                 if let Some(ref mut stream) = self.active_stream {
@@ -419,10 +438,6 @@ impl PipelineCoordinatorClient {
                 current_token_id = next_token_id;
                 current_pos += 1;
                 total_tokens += 1;
-
-                if is_eos {
-                    break;
-                }
             }
         }
 

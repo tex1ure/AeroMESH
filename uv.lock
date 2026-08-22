@@ -547,16 +547,20 @@ name = "llama-cluster"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "fastapi" },
     { name = "gradio" },
     { name = "httpx" },
     { name = "requests" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", specifier = ">=0.100.0" },
     { name = "gradio", specifier = ">=4.0.0" },
     { name = "httpx", specifier = ">=0.24.0" },
     { name = "requests", specifier = ">=2.28.0" },
+    { name = "uvicorn", specifier = ">=0.22.0" },
 ]
 
 [[package]]
