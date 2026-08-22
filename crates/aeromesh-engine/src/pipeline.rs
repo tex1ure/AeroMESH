@@ -242,7 +242,11 @@ impl PipelineCoordinatorClient {
             LayerSliceConfig::new(0, total_layers.saturating_sub(1) / 2, total_layers)?,
         );
 
-        let ngl = local_slice.layer_count() as i32;
+        let file_size_mb = std::fs::metadata(path_ref)
+            .map(|m| m.len() / (1024 * 1024))
+            .unwrap_or(0);
+        let ngl = if file_size_mb <= 4500 { 999 } else { local_slice.layer_count() as i32 };
+
         // Explicitly release old model VRAM before loading new model
         self.instance.close();
 

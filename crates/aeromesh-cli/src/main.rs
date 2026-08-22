@@ -427,7 +427,7 @@ async fn main() -> Result<()> {
                     };
 
                     info!("🚀 Starting AeroMesh Zero-Weight Worker Node on port {}...", bind_port);
-                    let ngl = slice_config.layer_count() as i32;
+                    let ngl = 999;
                     let service = PipelineWorkerService::new(&model_path, slice_config, ngl)?;
                     service.run_server("0.0.0.0", bind_port).await?;
                 }
@@ -455,7 +455,7 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|| "aeromesh-model".to_string());
 
                     info!("🚀 Starting AeroMesh Zero-Weight Coordinator & API Server on port {}...", api_port);
-                    let ngl = slice_config.layer_count() as i32;
+                    let ngl = 999;
                     let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, Some(slice_config), ngl)?;
                     let server = PipelineHttpServer::new(client, model_name);
                     server.run("0.0.0.0", api_port).await?;
@@ -466,17 +466,24 @@ async fn main() -> Result<()> {
                     let worker_slice = LayerSliceConfig::new(mid, total_layers.saturating_sub(1), total_layers)?;
                     let coord_slice = LayerSliceConfig::new(0, mid.saturating_sub(1), total_layers)?;
 
+                    let file_size_mb = std::fs::metadata(&model_path)
+                        .map(|m| m.len() / (1024 * 1024))
+                        .unwrap_or(0);
+
+                    let (coord_ngl, worker_ngl) = if file_size_mb <= 4500 {
+                        (999, 999)
+                    } else {
+                        (coord_slice.layer_count() as i32, worker_slice.layer_count() as i32)
+                    };
+
                     println!("\n========================================================");
                     println!("   AEROMESH FULL LOCAL MESH INITIALIZING");
                     println!("========================================================");
-                    println!("  Model:            {}", model_path.display());
-                    println!("  Stage 1 (Coord):  Layers 0..{} (API: http://127.0.0.1:{})", mid.saturating_sub(1), api_port);
-                    println!("  Stage 2 (Worker): Layers {}..{} (Port: {})", mid, total_layers.saturating_sub(1), worker_port);
+                    println!("  Model:            {} ({:.1} GB)", model_path.display(), file_size_mb as f32 / 1024.0);
+                    println!("  Stage 1 (Coord):  Layers 0..{} (API: http://127.0.0.1:{}) [GPU Offload: {}]", mid.saturating_sub(1), api_port, coord_ngl);
+                    println!("  Stage 2 (Worker): Layers {}..{} (Port: {}) [GPU Offload: {}]", mid, total_layers.saturating_sub(1), worker_port, worker_ngl);
                     println!("  Zero-Weight wire: 0.0 MB transferred (Local Loopback)");
                     println!("========================================================\n");
-
-                    let worker_ngl = worker_slice.layer_count() as i32;
-                    let coord_ngl = coord_slice.layer_count() as i32;
 
                     // Spawn worker in background task
                     let worker_model = model_path.clone();
