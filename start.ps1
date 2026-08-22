@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # AeroMesh 1-Click All-in-One Cluster Launcher
 # Usage:
 #   .\start.ps1                         -> Interactive Menu
@@ -50,19 +50,18 @@ function Show-AeroMeshBanner {
 function Find-ModelPath {
     param ([string]$ExplicitPath)
     if ($ExplicitPath -and (Test-Path $ExplicitPath)) {
-        return (Resolve-Path $ExplicitPath).Path
+        return $ExplicitPath
     }
     
-    $candidates = @("models\DS.gguf", "models\test.gguf", "models\gemma-4-E4B-it-UD-Q4_K_XL.gguf")
-    foreach ($c in $candidates) {
-        if (Test-Path $c) {
-            return (Resolve-Path $c).Path
-        }
-    }
-
-    $allGgufs = Get-ChildItem -Path "models" -Filter "*.gguf" -ErrorAction SilentlyContinue
+    # fuck this bro...
+    # Dynamically scan models/ or current directory for any .gguf files (zero hardcoded filenames)
+    $allGgufs = Get-ChildItem -Path @("models", ".") -Filter "*.gguf" -File -ErrorAction SilentlyContinue
     if ($allGgufs -and $allGgufs.Count -gt 0) {
-        return $allGgufs[0].FullName
+        $first = $allGgufs[0]
+        if ($first.Directory.Name -eq "models") {
+            return ("models/" + $first.Name)
+        }
+        return $first.Name
     }
 
     return ""
