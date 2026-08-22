@@ -177,6 +177,8 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?))
         .init();
 
+    aeromesh_engine::ensure_llama_initialized();
+
     let cli = Cli::parse();
     let current_dir = std::env::current_dir()?;
 
@@ -331,7 +333,7 @@ async fn main() -> Result<()> {
                     LayerSliceConfig::new(mid, total_layers.saturating_sub(1), total_layers)?
                 };
 
-                let service = PipelineWorkerService::new(&resolved_path, slice_config)?;
+                let service = PipelineWorkerService::new(&resolved_path, slice_config, 99)?;
                 service.run_server(&host, port).await?;
             } else {
                 // Auto-prime local disk cache from SSD if model is present on disk
@@ -397,7 +399,7 @@ async fn main() -> Result<()> {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "aeromesh-model".to_string());
 
-            let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, custom_slice)?;
+            let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, custom_slice, 99)?;
             let server = PipelineHttpServer::new(client, model_name);
             server.run(&host, port).await?;
         }
@@ -425,7 +427,7 @@ async fn main() -> Result<()> {
                     };
 
                     info!("🚀 Starting AeroMesh Zero-Weight Worker Node on port {}...", bind_port);
-                    let service = PipelineWorkerService::new(&model_path, slice_config)?;
+                    let service = PipelineWorkerService::new(&model_path, slice_config, 99)?;
                     service.run_server("0.0.0.0", bind_port).await?;
                 }
                 "coordinator" => {
@@ -452,7 +454,7 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|| "aeromesh-model".to_string());
 
                     info!("🚀 Starting AeroMesh Zero-Weight Coordinator & API Server on port {}...", api_port);
-                    let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, Some(slice_config))?;
+                    let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, Some(slice_config), 99)?;
                     let server = PipelineHttpServer::new(client, model_name);
                     server.run("0.0.0.0", api_port).await?;
                 }
@@ -474,13 +476,13 @@ async fn main() -> Result<()> {
                     // Spawn worker in background task
                     let worker_model = model_path.clone();
                     tokio::spawn(async move {
-                        if let Ok(service) = PipelineWorkerService::new(&worker_model, worker_slice) {
+                        if let Ok(service) = PipelineWorkerService::new(&worker_model, worker_slice, 99) {
                             let _ = service.run_server("127.0.0.1", worker_port).await;
                         }
                     });
 
-                    // Wait 300ms for worker listener
-                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    // Wait 500ms for worker listener
+                    tokio::time::sleep(Duration::from_millis(500)).await;
 
                     let worker_addr: SocketAddr = format!("127.0.0.1:{}", worker_port).parse().unwrap();
                     let model_name = model_path
@@ -488,7 +490,7 @@ async fn main() -> Result<()> {
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "aeromesh-model".to_string());
 
-                    let client = PipelineCoordinatorClient::new(&model_path, vec![worker_addr], Some(coord_slice))?;
+                    let client = PipelineCoordinatorClient::new(&model_path, vec![worker_addr], Some(coord_slice), 99)?;
                     let server = PipelineHttpServer::new(client, model_name);
                     server.run("0.0.0.0", api_port).await?;
                 }
@@ -590,7 +592,7 @@ async fn main() -> Result<()> {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "aeromesh-model".to_string());
 
-                let client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs, custom_slice)?;
+                let client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs, custom_slice, ngl.max(0) as i32)?;
                 let server = PipelineHttpServer::new(client, model_name);
                 server.run("0.0.0.0", serve_port).await?;
                 return Ok(());
@@ -601,8 +603,8 @@ async fn main() -> Result<()> {
                 // Native Zero-Weight P2P Activation Streaming Mode
                 info!("Step 3/3: Dispatching via Native Zero-Weight Pipeline Engine...");
                 let worker_sock_addrs: Vec<SocketAddr> = approved_peers.iter().map(|(_, _, addr)| *addr).collect();
-                let mut client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs, custom_slice)?;
-                let (_output_text, perf_metrics) = client.run_pipeline_completion(&prompt, max_tokens, 1, true, None).await?;
+                let mut client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs, custom_slice, ngl.max(0) as i32)?;
+                let (_output_text, perf_metrics) = client.generate_pipeline(&prompt, max_tokens, 0.7, 0.9, 1, None).await?;
 
                 println!("\n--- CLUSTER PERFORMANCE METRICS ---");
                 for metric in &perf_metrics {

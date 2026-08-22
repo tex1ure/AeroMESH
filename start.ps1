@@ -36,8 +36,21 @@ param (
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-# 1. Ensure Compiler & Toolchain PATH
-$env:PATH = "C:\w64devkit\bin;C:\Users\" + $env:USERNAME + "\.cargo\bin;" + $env:PATH
+# 1. Ensure Compiler & Toolchain PATH and DLL directories
+$binDir = Join-Path $PSScriptRoot "bin"
+$env:PATH = "C:\w64devkit\bin;C:\Users\" + $env:USERNAME + "\.cargo\bin;$binDir;" + $env:PATH
+
+# Ensure release DLLs are present
+if (Test-Path "target\release") {
+    Get-ChildItem -Path "bin\*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "target\release" -Force -ErrorAction SilentlyContinue
+}
+
+function Get-AeroMeshExe {
+    if (Test-Path "target\release\aeromesh.exe") {
+        return (Resolve-Path "target\release\aeromesh.exe").Path
+    }
+    return ""
+}
 
 function Show-AeroMeshBanner {
     Write-Host ""
@@ -53,8 +66,12 @@ function Find-ModelPath {
         return $ExplicitPath
     }
     
-    # fuck this bro...
-    # Dynamically scan models/ or current directory for any .gguf files (zero hardcoded filenames)
+    # Check for primary DeepSeek model first if present
+    if (Test-Path "models\DS.gguf") {
+        return "models/DS.gguf"
+    }
+
+    # Dynamically scan models/ or current directory for any other .gguf files
     $allGgufs = Get-ChildItem -Path @("models", ".") -Filter "*.gguf" -File -ErrorAction SilentlyContinue
     if ($allGgufs -and $allGgufs.Count -gt 0) {
         $first = $allGgufs[0]
@@ -185,7 +202,12 @@ if ($Role -eq "worker") {
     Write-Host "  Binding: $bindStr" -ForegroundColor Green
     Write-Host ""
 
-    cargo run --bin aeromesh -- worker --model "$detectedModel" --layers "$workerLayers" --port $workerPort
+    $aeroExe = Get-AeroMeshExe
+    if ($aeroExe) {
+        & $aeroExe worker --model "$detectedModel" --layers "$workerLayers" --port $workerPort
+    } else {
+        cargo run --release --bin aeromesh -- worker --model "$detectedModel" --layers "$workerLayers" --port $workerPort
+    }
     exit 0
 }
 
@@ -213,9 +235,13 @@ if ($Role -eq "all") {
     Write-Host "  Web UI:      $uiUrl" -ForegroundColor Cyan
     Write-Host ""
 
-    # Start Rust local mesh in background process
-    $cargoArgs = @("run", "--bin", "aeromesh", "--", "start", "--role", "all", "--model", "$detectedModel", "--port", "$apiPort")
-    $rustProc = Start-Process -FilePath "cargo" -ArgumentList $cargoArgs -PassThru -NoNewWindow
+    $aeroExe = Get-AeroMeshExe
+    if ($aeroExe) {
+        $rustProc = Start-Process -FilePath $aeroExe -ArgumentList @("start", "--role", "all", "--model", "$detectedModel", "--port", "$apiPort") -PassThru -NoNewWindow
+    } else {
+        $cargoArgs = @("run", "--release", "--bin", "aeromesh", "--", "start", "--role", "all", "--model", "$detectedModel", "--port", "$apiPort")
+        $rustProc = Start-Process -FilePath "cargo" -ArgumentList $cargoArgs -PassThru -NoNewWindow
+    }
 
     Start-Sleep -Milliseconds 2500
 
@@ -278,22 +304,27 @@ if ($Role -eq "coordinator") {
     Write-Host "  Web UI:      $uiUrl" -ForegroundColor Cyan
     Write-Host ""
 
+    $peerArg = @()
+    if ($Peers) { $peerArg = @("--peers", "$Peers") }
+    $aeroExe = Get-AeroMeshExe
+
     if ($NoUI) {
-        # Run Coordinator API in foreground without Web UI
-        $peerArg = @()
-        if ($Peers) { $peerArg = @("--peers", "$Peers") }
-        cargo run --bin aeromesh -- start --role coordinator --model "$detectedModel" --layers "$coordLayers" @peerArg --port $apiPort
+        if ($aeroExe) {
+            & $aeroExe start --role coordinator --model "$detectedModel" --layers "$coordLayers" @peerArg --port $apiPort
+        } else {
+            cargo run --release --bin aeromesh -- start --role coordinator --model "$detectedModel" --layers "$coordLayers" @peerArg --port $apiPort
+        }
         exit 0
     }
 
     # Start Coordinator API in background process
-    $cargoArgs = @("run", "--bin", "aeromesh", "--", "start", "--role", "coordinator", "--model", "$detectedModel", "--layers", "$coordLayers")
-    if ($Peers) {
-        $cargoArgs += @("--peers", "$Peers")
+    if ($aeroExe) {
+        $exeArgs = @("start", "--role", "coordinator", "--model", "$detectedModel", "--layers", "$coordLayers") + $peerArg + @("--port", "$apiPort")
+        $rustProc = Start-Process -FilePath $aeroExe -ArgumentList $exeArgs -PassThru -NoNewWindow
+    } else {
+        $cargoArgs = @("run", "--release", "--bin", "aeromesh", "--", "start", "--role", "coordinator", "--model", "$detectedModel", "--layers", "$coordLayers") + $peerArg + @("--port", "$apiPort")
+        $rustProc = Start-Process -FilePath "cargo" -ArgumentList $cargoArgs -PassThru -NoNewWindow
     }
-    $cargoArgs += @("--port", "$apiPort")
-
-    $rustProc = Start-Process -FilePath "cargo" -ArgumentList $cargoArgs -PassThru -NoNewWindow
 
     Start-Sleep -Milliseconds 2500
 

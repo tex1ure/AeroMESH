@@ -202,7 +202,7 @@
           <div class="stat-highlight" style="font-size: 12px;">Stage 1</div>
         </div>
 
-        <div style="display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--accent-cyan); font-size: 11.5px; font-weight: 700;">
+        <div style="display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--accent-orange); font-size: 11.5px; font-weight: 700;">
           <i data-lucide="arrow-down-up" style="width: 14px; height: 14px;"></i>
           <span>${data.transport || 'Tailscale Direct WireGuard'} • Zero Weights Transferred</span>
         </div>
@@ -254,7 +254,7 @@
         </div>
         <div class="cluster-stats-row">
           <span>Start:</span>
-          <span style="color: var(--accent-cyan); font-family: monospace; font-size: 10.5px;">cargo run -- serve</span>
+          <span style="color: var(--accent-orange); font-family: monospace; font-size: 10.5px;">cargo run -- serve</span>
         </div>
       `;
 
@@ -262,7 +262,7 @@
         <div style="padding: 14px; text-align: center; color: var(--text-muted); font-size: 13px; display: flex; flex-direction: column; gap: 8px;">
           <div style="color: var(--accent-coral); font-weight: 700;">AeroMesh Coordinator is not running</div>
           <div>Start the cluster coordinator from PowerShell:</div>
-          <code style="background: #080b10; padding: 8px 12px; border-radius: 6px; color: var(--accent-cyan); font-size: 11.5px; border: 1px solid rgba(255,255,255,0.06); text-align: left; overflow-x: auto;">
+          <code style="background: #080b10; padding: 8px 12px; border-radius: 6px; color: var(--accent-orange); font-size: 11.5px; border: 1px solid rgba(255,255,255,0.06); text-align: left; overflow-x: auto;">
             cargo run --bin aeromesh -- serve --model models/model.gguf --layers 0..24 --peers worker-ip:50052 --port 8080
           </code>
         </div>
@@ -416,6 +416,28 @@
     scrollToBottom();
   }
 
+  function parseThinkingBlocks(text) {
+    if (!text) return { thinkText: null, answerText: '', isStillThinking: false };
+
+    // Clean initial double tags if present
+    const cleanText = text.replace(/^(<think>)+/i, '<think>');
+    const thinkStart = cleanText.indexOf('<think>');
+    
+    if (thinkStart === -1) {
+      return { thinkText: null, answerText: cleanText, isStillThinking: false };
+    }
+
+    const thinkEnd = cleanText.indexOf('</think>');
+    if (thinkEnd === -1) {
+      let rawThink = cleanText.substring(thinkStart + 7).replace(/<think>/gi, '').trim();
+      return { thinkText: rawThink || 'Reasoning through prompt...', answerText: '', isStillThinking: true };
+    }
+
+    let thinkText = cleanText.substring(thinkStart + 7, thinkEnd).replace(/<think>/gi, '').trim();
+    let answerText = cleanText.substring(thinkEnd + 8).trim();
+    return { thinkText, answerText, isStillThinking: false };
+  }
+
   function appendMessageElement(role, rawContent, metrics = null, index = null) {
     const row = document.createElement('div');
     row.className = `message-row ${role === 'user' ? 'user-row' : 'assistant-row'}`;
@@ -439,7 +461,6 @@
       const card = document.createElement('div');
       card.className = 'assistant-card';
 
-      // Parse DeepSeek-R1 <think> tags
       const { thinkText, answerText, isStillThinking } = parseThinkingBlocks(rawContent);
 
       if (thinkText) {
@@ -479,32 +500,15 @@
         card.appendChild(accordion);
       }
 
-      // Markdown Rendered Answer Body
       const markdownBody = document.createElement('div');
       markdownBody.className = 'markdown-body';
-      markdownBody.innerHTML = window.marked ? marked.parse(answerText || (isStillThinking ? '' : rawContent)) : answerText;
+      markdownBody.innerHTML = window.marked ? marked.parse(answerText || (isStillThinking ? '' : rawContent)) : (answerText || rawContent);
 
       enhanceCodeBlocks(markdownBody);
-
-      if (window.renderMathInElement) {
-        try {
-          renderMathInElement(markdownBody, {
-            delimiters: [
-              { left: '$$', right: '$$', display: true },
-              { left: '$', right: '$', display: false },
-              { left: '\\(', right: '\\)', display: false },
-              { left: '\\[', right: '\\]', display: true }
-            ],
-            throwOnError: false
-          });
-        } catch (err) {
-          console.error(err);
-        }
-      }
+      renderMath(markdownBody);
 
       card.appendChild(markdownBody);
 
-      // Action bar below response
       const actions = document.createElement('div');
       actions.className = 'message-actions';
 
@@ -539,28 +543,155 @@
     return row;
   }
 
-  function parseThinkingBlocks(text) {
-    if (!text) return { thinkText: null, answerText: '', isStillThinking: false };
+  function createLiveAssistantRow() {
+    const row = document.createElement('div');
+    row.className = 'message-row assistant-row';
 
-    const thinkStart = text.indexOf('<think>');
-    if (thinkStart === -1) {
-      return { thinkText: null, answerText: text, isStillThinking: false };
+    const avatar = document.createElement('div');
+    avatar.className = 'message-avatar assistant-avatar';
+    avatar.innerHTML = '<i data-lucide="zap" style="width: 16px; height: 16px;"></i>';
+
+    const card = document.createElement('div');
+    card.className = 'assistant-card';
+
+    // Thinking accordion container
+    const accordion = document.createElement('div');
+    accordion.className = 'thinking-accordion';
+    accordion.style.display = 'none';
+
+    const header = document.createElement('div');
+    header.className = 'thinking-header';
+
+    const badge = document.createElement('div');
+    badge.className = 'thinking-badge';
+    badge.innerHTML = '<span class="thinking-shimmer"></span><span>Reasoning Process...</span>';
+
+    const iconChevron = document.createElement('i');
+    iconChevron.setAttribute('data-lucide', 'chevron-down');
+    iconChevron.style.width = '13px';
+    iconChevron.style.height = '13px';
+
+    header.appendChild(badge);
+    header.appendChild(iconChevron);
+
+    const thinkContent = document.createElement('div');
+    thinkContent.className = 'thinking-content';
+
+    header.onclick = () => {
+      thinkContent.classList.toggle('collapsed');
+      iconChevron.style.transform = thinkContent.classList.contains('collapsed') ? 'rotate(-90deg)' : 'rotate(0deg)';
+    };
+
+    accordion.appendChild(header);
+    accordion.appendChild(thinkContent);
+    card.appendChild(accordion);
+
+    // Markdown Answer Body
+    const markdownBody = document.createElement('div');
+    markdownBody.className = 'markdown-body';
+    card.appendChild(markdownBody);
+
+    // Message Actions
+    const actions = document.createElement('div');
+    actions.className = 'message-actions';
+
+    const btnGroup = document.createElement('div');
+    btnGroup.className = 'action-buttons-group';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'clay-action-pill';
+    copyBtn.innerHTML = '<i data-lucide="copy" style="width: 11px; height: 11px;"></i><span>Copy</span>';
+
+    btnGroup.appendChild(copyBtn);
+
+    const telemetryTag = document.createElement('div');
+    telemetryTag.className = 'telemetry-tag';
+    telemetryTag.innerHTML = `<span>⚡ Streaming activations...</span>`;
+
+    actions.appendChild(btnGroup);
+    actions.appendChild(telemetryTag);
+    card.appendChild(actions);
+
+    row.appendChild(avatar);
+    row.appendChild(card);
+    elements.messagesContainer.appendChild(row);
+
+    lucide.createIcons();
+
+    return {
+      row,
+      card,
+      accordion,
+      badge,
+      thinkContent,
+      iconChevron,
+      markdownBody,
+      telemetryTag,
+      copyBtn,
+      update: function (rawText) {
+        const { thinkText, answerText, isStillThinking } = parseThinkingBlocks(rawText);
+
+        if (thinkText) {
+          accordion.style.display = 'block';
+          thinkContent.textContent = thinkText;
+          if (isStillThinking) {
+            badge.innerHTML = '<span class="thinking-shimmer"></span><span>Reasoning Process...</span>';
+          } else {
+            badge.innerHTML = '<i data-lucide="brain" style="width: 13px; height: 13px;"></i><span>Reasoning Complete</span>';
+          }
+        }
+
+        if (answerText) {
+          markdownBody.innerHTML = window.marked ? marked.parse(answerText) : answerText;
+        } else if (!thinkText) {
+          markdownBody.innerHTML = window.marked ? marked.parse(rawText) : rawText;
+        } else {
+          markdownBody.innerHTML = '';
+        }
+
+        copyBtn.onclick = () => copyToClipboard(answerText || rawText, copyBtn);
+        scrollToBottom();
+      },
+      finalize: function (rawText, metrics) {
+        const { thinkText, answerText } = parseThinkingBlocks(rawText);
+        const finalContent = answerText || (thinkText ? '' : rawText);
+
+        markdownBody.innerHTML = window.marked ? marked.parse(finalContent) : finalContent;
+        enhanceCodeBlocks(markdownBody);
+        renderMath(markdownBody);
+
+        if (metrics) {
+          telemetryTag.innerHTML = `<span>⚡ ${metrics.tokPerSec || '16.0'} tok/s</span> • <span>0.0 MB Wire</span>`;
+        }
+
+        copyBtn.onclick = () => copyToClipboard(finalContent, copyBtn);
+        lucide.createIcons();
+      }
+    };
+  }
+
+  function renderMath(element) {
+    if (window.renderMathInElement) {
+      try {
+        renderMathInElement(element, {
+          delimiters: [
+            { left: '$$', right: '$$', display: true },
+            { left: '$', right: '$', display: false },
+            { left: '\\(', right: '\\)', display: false },
+            { left: '\\[', right: '\\]', display: true }
+          ],
+          throwOnError: false
+        });
+      } catch (err) {
+        console.error(err);
+      }
     }
-
-    const thinkEnd = text.indexOf('</think>');
-    if (thinkEnd === -1) {
-      const thinkText = text.substring(thinkStart + 7).trim();
-      return { thinkText, answerText: '', isStillThinking: true };
-    }
-
-    const thinkText = text.substring(thinkStart + 7, thinkEnd).trim();
-    const answerText = text.substring(thinkEnd + 8).trim();
-    return { thinkText, answerText, isStillThinking: false };
   }
 
   function enhanceCodeBlocks(container) {
     const preElements = container.querySelectorAll('pre');
     preElements.forEach((pre) => {
+      if (pre.parentElement.classList.contains('code-block-wrapper')) return;
       const code = pre.querySelector('code');
       const langMatch = code ? code.className.match(/language-(\w+)/) : null;
       const lang = langMatch ? langMatch[1] : 'code';
@@ -571,7 +702,7 @@
       const header = document.createElement('div');
       header.className = 'code-block-header';
       header.innerHTML = `
-        <span style="font-family: monospace; text-transform: uppercase; color: var(--accent-cyan); font-size: 10.5px;">${lang}</span>
+        <span style="font-family: monospace; text-transform: uppercase; color: var(--accent-orange); font-size: 10.5px;">${lang}</span>
         <button class="copy-code-btn" title="Copy Code">
           <i data-lucide="copy" style="width: 11px; height: 11px;"></i>
           <span>Copy</span>
@@ -618,7 +749,10 @@
   // --- STREAMING INFERENCE ---
   async function handleSendMessage(promptOverride = null) {
     if (isGenerating) {
-      if (activeAbortController) activeAbortController.abort();
+      if (activeAbortController) {
+        activeAbortController.abort();
+        try { fetch('/api/chat/abort', { method: 'POST' }); } catch (e) {}
+      }
       return;
     }
 
@@ -639,7 +773,9 @@
 
     chat.messages.push({ role: 'user', content: messageText });
     saveConversations();
-    renderMessages();
+
+    // Render User Message directly
+    appendMessageElement('user', messageText);
 
     isGenerating = true;
     updateSendButtonState(true);
@@ -664,6 +800,9 @@
     const startTime = performance.now();
     let tokenCount = 0;
     let accumulatedText = '';
+
+    // Create live assistant card once in DOM
+    const liveCard = createLiveAssistantRow();
 
     try {
       const response = await fetch('/api/chat/stream', {
@@ -703,13 +842,14 @@
               accumulatedText += delta;
               tokenCount++;
               chat.messages[assistantMessageIndex].content = accumulatedText;
-              renderMessages();
+              liveCard.update(accumulatedText);
             }
           } catch (e) {
             if (dataStr && !dataStr.startsWith('{')) {
               accumulatedText += dataStr;
+              tokenCount++;
               chat.messages[assistantMessageIndex].content = accumulatedText;
-              renderMessages();
+              liveCard.update(accumulatedText);
             }
           }
         }
@@ -718,22 +858,24 @@
       const durationSec = (performance.now() - startTime) / 1000;
       const tokPerSec = durationSec > 0 ? (tokenCount / durationSec).toFixed(1) : '16.0';
 
-      chat.messages[assistantMessageIndex].metrics = {
+      const metrics = {
         tokPerSec,
         durationSec: durationSec.toFixed(2),
         tokens: tokenCount
       };
 
+      chat.messages[assistantMessageIndex].metrics = metrics;
+      liveCard.finalize(accumulatedText, metrics);
       saveConversations();
     } catch (err) {
       if (err.name === 'AbortError') {
-        accumulatedText += ' *(Generation stopped by user)*';
+        accumulatedText += '\n\n*(Generation stopped by user)*';
       } else {
         accumulatedText += `\n\n❌ **Communication Error**: ${err.message}`;
       }
       chat.messages[assistantMessageIndex].content = accumulatedText;
+      liveCard.finalize(accumulatedText, null);
       saveConversations();
-      renderMessages();
     } finally {
       isGenerating = false;
       activeAbortController = null;

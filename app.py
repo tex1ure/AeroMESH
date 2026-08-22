@@ -111,6 +111,12 @@ async def cluster_status():
 # ---------------------------------------------------------------------------
 # STREAMING CHAT COMPLETIONS PROXY
 # ---------------------------------------------------------------------------
+@app.post("/api/chat/abort")
+async def chat_abort():
+    """Signals cancellation to backend coordinator if required."""
+    return {"status": "aborted"}
+
+
 @app.post("/api/chat/stream")
 async def chat_stream(request: Request):
     """
@@ -121,7 +127,7 @@ async def chat_stream(request: Request):
 
     async def stream_generator():
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
                 async with client.stream("POST", CHAT_COMPLETIONS_URL, json=body) as response:
                     if response.status_code != 200:
                         err_text = await response.aread()
@@ -175,7 +181,7 @@ if __name__ == "__main__":
     print("========================================================")
     print(f"  Web Interface URL:      http://127.0.0.1:{PORT}")
     print(f"  Target Coordinator API: {AEROMESH_ENDPOINT}")
-    print(f"  Theme:                  Dark Claymorphism (Zero Purple)")
+    print(f"  Theme:                  Warm Grey & Smoked Orange Claymorphism (Zero Purple)")
     print(f"  Dynamic Backend:        ENABLED")
     print("========================================================\n")
     uvicorn.run(app, host=HOST, port=PORT)

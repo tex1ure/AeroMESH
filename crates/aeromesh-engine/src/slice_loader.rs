@@ -425,3 +425,325 @@ mod tests {
         assert_eq!(extract_layer_index("output_norm.weight"), None);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Native llama.cpp Pipeline Context Instance
+// ---------------------------------------------------------------------------
+
+use crate::llama_ffi::*;
+use std::ffi::{c_char, CString};
+
+pub struct LlamaPipelineInstance {
+    model: *mut LlamaModel,
+    ctx: *mut LlamaContext,
+    vocab: *const LlamaVocab,
+    pub sampler: *mut LlamaSampler,
+    pub slice_config: LayerSliceConfig,
+    pub hidden_dim: usize,
+    pub total_layers: usize,
+    pub n_ctx: usize,
+}
+
+unsafe impl Send for LlamaPipelineInstance {}
+
+impl LlamaPipelineInstance {
+    pub fn open(
+        model_path: &Path,
+        slice_config: LayerSliceConfig,
+        n_gpu_layers: i32,
+        n_ctx: u32,
+    ) -> Result<Self> {
+        ensure_llama_initialized();
+
+        let path_str = model_path.to_str().context("Invalid model path string")?;
+        let c_path = CString::new(path_str)?;
+
+        let assigned_layers = slice_config.layer_count() as i32;
+        let mut mparams = unsafe { llama_model_default_params() };
+        mparams.n_gpu_layers = if n_gpu_layers > 0 {
+            n_gpu_layers.min(assigned_layers)
+        } else {
+            0
+        };
+
+        let model = unsafe { llama_model_load_from_file(c_path.as_ptr(), mparams) };
+        if model.is_null() {
+            bail!("Failed to load GGUF model via llama.cpp from {:?}", model_path);
+        }
+
+        let vocab = unsafe { llama_model_get_vocab(model) };
+        if vocab.is_null() {
+            unsafe { llama_model_free(model) };
+            bail!("Failed to get model vocabulary from GGUF model");
+        }
+
+        let hidden_dim = unsafe { llama_model_n_embd(model) } as usize;
+        let total_layers = unsafe { llama_model_n_layer(model) } as usize;
+
+        let mut cparams = unsafe { llama_context_default_params() };
+        cparams.n_ctx = if n_ctx > 0 { n_ctx } else { 4096 };
+        cparams.n_batch = 512;
+        cparams.n_ubatch = 512;
+        cparams.embeddings = true;
+        cparams.offload_kqv = true;
+
+        let ctx = unsafe { llama_init_from_model(model, cparams) };
+        if ctx.is_null() {
+            unsafe { llama_model_free(model) };
+            bail!("Failed to initialize llama_context for model {:?}", model_path);
+        }
+
+        let sparams = unsafe { llama_sampler_chain_default_params() };
+        let sampler = unsafe { llama_sampler_chain_init(sparams) };
+        unsafe {
+            llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, 1.18, 0.05, 0.05));
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1));
+            llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7));
+            llama_sampler_chain_add(sampler, llama_sampler_init_dist(42));
+        }
+
+        info!(
+            model = %model_path.display(),
+            layers = %format!("{}..={}", slice_config.layer_start, slice_config.layer_end),
+            hidden_dim = hidden_dim,
+            total_layers = total_layers,
+            n_ctx = cparams.n_ctx,
+            "✅ Loaded native llama.cpp pipeline context instance with penalty sampler"
+        );
+
+        Ok(Self {
+            model,
+            ctx,
+            vocab,
+            sampler,
+            slice_config,
+            hidden_dim,
+            total_layers,
+            n_ctx: cparams.n_ctx as usize,
+        })
+    }
+
+    pub fn tokenize(&self, text: &str, add_special: bool) -> Result<Vec<LlamaToken>> {
+        let c_text = CString::new(text)?;
+        let max_tokens = (text.len() + 16).max(128) as i32;
+        let mut tokens = vec![0 as LlamaToken; max_tokens as usize];
+
+        let n_tokens = unsafe {
+            llama_tokenize(
+                self.vocab,
+                c_text.as_ptr(),
+                text.len() as i32,
+                tokens.as_mut_ptr(),
+                max_tokens,
+                add_special,
+                true,
+            )
+        };
+
+        if n_tokens < 0 {
+            let req_size = (-n_tokens) as usize;
+            tokens.resize(req_size, 0);
+            let n2 = unsafe {
+                llama_tokenize(
+                    self.vocab,
+                    c_text.as_ptr(),
+                    text.len() as i32,
+                    tokens.as_mut_ptr(),
+                    req_size as i32,
+                    add_special,
+                    true,
+                )
+            };
+            if n2 < 0 {
+                bail!("Tokenization failed for input text");
+            }
+            tokens.truncate(n2 as usize);
+        } else {
+            tokens.truncate(n_tokens as usize);
+        }
+
+        Ok(tokens)
+    }
+
+    pub fn token_to_piece(&self, token: LlamaToken) -> Result<Vec<u8>> {
+        let mut buf = [0u8; 128];
+        let n = unsafe {
+            llama_token_to_piece(
+                self.vocab,
+                token,
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len() as i32,
+                0,
+                true,
+            )
+        };
+        if n < 0 {
+            let req_size = (-n) as usize;
+            let mut big_buf = vec![0u8; req_size];
+            let n2 = unsafe {
+                llama_token_to_piece(
+                    self.vocab,
+                    token,
+                    big_buf.as_mut_ptr() as *mut c_char,
+                    req_size as i32,
+                    0,
+                    true,
+                )
+            };
+            if n2 < 0 {
+                bail!("Token piece extraction failed");
+            }
+            big_buf.truncate(n2 as usize);
+            Ok(big_buf)
+        } else {
+            Ok(buf[..n as usize].to_vec())
+        }
+    }
+
+    pub fn token_to_piece_str(&self, token: LlamaToken) -> String {
+        self.token_to_piece(token)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn is_eog(&self, token: LlamaToken) -> bool {
+        unsafe { llama_vocab_is_eog(self.vocab, token) }
+    }
+
+    pub fn clear_kv_cache(&self) {
+        unsafe {
+            let mem = llama_get_memory(self.ctx);
+            if !mem.is_null() {
+                llama_memory_clear(mem, true);
+            }
+            if !self.sampler.is_null() {
+                llama_sampler_reset(self.sampler);
+            }
+        }
+    }
+
+    /// Stage 1: Evaluate input tokens through local layer slice, extracting intermediate activation matrix [seq_len * hidden_dim].
+    pub fn evaluate_tokens_to_activations(
+        &mut self,
+        tokens: &[LlamaToken],
+        start_pos: u32,
+    ) -> Result<Vec<f32>> {
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let n_tokens = tokens.len() as i32;
+        let mut batch = unsafe { llama_batch_init(n_tokens, 0, 1) };
+        batch.n_tokens = n_tokens;
+
+        for (i, &t) in tokens.iter().enumerate() {
+            unsafe {
+                *batch.token.add(i) = t;
+                *batch.pos.add(i) = (start_pos as i32) + (i as i32);
+                *batch.n_seq_id.add(i) = 1;
+                *(*batch.seq_id.add(i)) = 0;
+                *batch.logits.add(i) = 1;
+            }
+        }
+
+        let res = unsafe { llama_decode(self.ctx, batch) };
+        unsafe { llama_batch_free(batch) };
+
+        if res != 0 {
+            bail!("llama_decode failed in Stage 1 forward pass (code {})", res);
+        }
+
+        // Extract intermediate activation embeddings for all tokens in batch
+        let mut activations = Vec::with_capacity((n_tokens as usize) * self.hidden_dim);
+        for i in 0..n_tokens {
+            let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
+            if embd_ptr.is_null() {
+                bail!("Failed to get embeddings at index {} from llama_context", i);
+            }
+            let slice = unsafe { std::slice::from_raw_parts(embd_ptr, self.hidden_dim) };
+            activations.extend_from_slice(slice);
+        }
+
+        Ok(activations)
+    }
+
+    /// Stage 2: Inject incoming intermediate activation matrix [seq_len * hidden_dim], compute through downstream layers + LM Head.
+    pub fn evaluate_activations_to_logits(
+        &mut self,
+        activations: &[f32],
+        seq_len: u32,
+        start_pos: u32,
+    ) -> Result<()> {
+        ensure!(
+            activations.len() == (seq_len as usize) * self.hidden_dim,
+            "Activation size mismatch: expected {} floats, got {}",
+            (seq_len as usize) * self.hidden_dim,
+            activations.len()
+        );
+
+        let n_tokens = seq_len as i32;
+        let mut batch = unsafe { llama_batch_init(n_tokens, self.hidden_dim as i32, 1) };
+        batch.n_tokens = n_tokens;
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                activations.as_ptr(),
+                batch.embd,
+                activations.len(),
+            );
+        }
+
+        for i in 0..n_tokens {
+            unsafe {
+                *batch.pos.add(i as usize) = (start_pos as i32) + i;
+                *batch.n_seq_id.add(i as usize) = 1;
+                *(*batch.seq_id.add(i as usize)) = 0;
+                *batch.logits.add(i as usize) = if i == n_tokens - 1 { 1 } else { 0 };
+            }
+        }
+
+        let res = unsafe { llama_decode(self.ctx, batch) };
+        unsafe { llama_batch_free(batch) };
+
+        if res != 0 {
+            bail!("llama_decode failed in Stage 2 activation forward pass (code {})", res);
+        }
+
+        Ok(())
+    }
+
+    /// Samples next token from the latest logits computed by Stage 2, applying repetition penalties and accepting the token.
+    pub fn sample_next_token(
+        &mut self,
+        _temperature: f32,
+        _top_p: f32,
+        _seed: u32,
+    ) -> Result<LlamaToken> {
+        let token_id = unsafe { llama_sampler_sample(self.sampler, self.ctx, -1) };
+        unsafe {
+            llama_sampler_accept(self.sampler, token_id);
+        }
+        Ok(token_id)
+    }
+}
+
+impl Drop for LlamaPipelineInstance {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.sampler.is_null() {
+                llama_sampler_free(self.sampler);
+                self.sampler = std::ptr::null_mut();
+            }
+            if !self.ctx.is_null() {
+                llama_free(self.ctx);
+                self.ctx = std::ptr::null_mut();
+            }
+            if !self.model.is_null() {
+                llama_model_free(self.model);
+                self.model = std::ptr::null_mut();
+            }
+        }
+    }
+}

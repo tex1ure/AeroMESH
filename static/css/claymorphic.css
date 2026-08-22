@@ -1,61 +1,61 @@
 /* ==========================================================================
-   AEROMESH LUXURY DARK CLAYMORPHISM DESIGN SYSTEM
-   Theme: High-End Obsidian Slate 3D Claymorphism
-   Accents: Cyber Cyan (#00f0ff), Emerald Mint (#00e699), Solar Amber (#f59e0b), Coral (#f43f5e)
+   AEROMESH INDUSTRIAL DARK CLAYMORPHISM DESIGN SYSTEM
+   Theme: Warm Graphite Grey & Greyish Terracotta Orange
+   Accents: Smoked Clay Orange (#e58244), Warm Amber (#d49a5b), Muted Sage (#4ade80)
    ========================================================================== */
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
-  /* Surface Layers (Deep Obsidian Slate Palette) */
-  --bg-app: #070a0f;
-  --bg-sidebar: #0b0f17;
-  --bg-surface: #111722;
-  --bg-surface-elevated: #161e2c;
-  --bg-surface-hover: #1b2536;
-  --bg-surface-float: #1f2a3c;
-  --bg-inset: #090c13;
-  --bg-code: #080b10;
+  /* Surface Layers (Deep Charcoal & Graphite Grey Palette) */
+  --bg-app: #0e0f12;
+  --bg-sidebar: #131418;
+  --bg-surface: #181a20;
+  --bg-surface-elevated: #20222a;
+  --bg-surface-hover: #262933;
+  --bg-surface-float: #2d303c;
+  --bg-inset: #111216;
+  --bg-code: #0f1014;
 
   /* Claymorphic 3D Shadow Physics */
-  --clay-shadow-card: 0 16px 36px -6px rgba(0, 0, 0, 0.75), 0 6px 16px -3px rgba(0, 0, 0, 0.6);
-  --clay-shadow-button: 0 8px 20px -3px rgba(0, 0, 0, 0.65), 0 3px 8px -2px rgba(0, 0, 0, 0.5);
+  --clay-shadow-card: 0 16px 36px -6px rgba(0, 0, 0, 0.75), 0 6px 16px -3px rgba(0, 0, 0, 0.55);
+  --clay-shadow-button: 0 8px 18px -3px rgba(0, 0, 0, 0.65), 0 3px 8px -2px rgba(0, 0, 0, 0.45);
   --clay-shadow-pill: 0 4px 12px -2px rgba(0, 0, 0, 0.5);
-  --clay-shadow-floating: 0 24px 48px -8px rgba(0, 0, 0, 0.85), 0 10px 24px -4px rgba(0, 0, 0, 0.7);
+  --clay-shadow-floating: 0 24px 48px -8px rgba(0, 0, 0, 0.85), 0 10px 24px -4px rgba(0, 0, 0, 0.65);
   --clay-shadow-pressed: 0 2px 4px rgba(0, 0, 0, 0.6), inset 1px 1px 3px rgba(255, 255, 255, 0.08);
 
   /* Specular Micro-Bevels (Inner Light/Shade for Inflatable 3D Look) */
-  --clay-bevel-surface: inset 1px 1px 2px rgba(255, 255, 255, 0.12), inset -1px -1px 3px rgba(0, 0, 0, 0.6);
+  --clay-bevel-surface: inset 1px 1px 2px rgba(255, 255, 255, 0.12), inset -1px -1px 3px rgba(0, 0, 0, 0.65);
   --clay-bevel-elevated: inset 1px 1px 2.5px rgba(255, 255, 255, 0.16), inset -1.5px -1.5px 4px rgba(0, 0, 0, 0.75);
   --clay-bevel-recessed: inset 2px 3px 8px rgba(0, 0, 0, 0.85), inset -1px -1px 3px rgba(255, 255, 255, 0.04);
-  --clay-bevel-cyan: inset 1px 1px 3px rgba(255, 255, 255, 0.4), inset -1px -1px 3px rgba(0, 0, 0, 0.5);
+  --clay-bevel-orange: inset 1px 1px 3px rgba(255, 255, 255, 0.4), inset -1px -1px 3px rgba(0, 0, 0, 0.5);
 
   /* Subtle Crisp Borders */
-  --border-subtle: 1px solid rgba(255, 255, 255, 0.06);
-  --border-hover: 1px solid rgba(0, 240, 255, 0.35);
-  --border-cyan-dim: 1px solid rgba(0, 240, 255, 0.2);
+  --border-subtle: 1px solid rgba(255, 255, 255, 0.07);
+  --border-hover: 1px solid rgba(229, 130, 68, 0.4);
+  --border-orange-dim: 1px solid rgba(229, 130, 68, 0.22);
 
-  /* Accents */
-  --accent-cyan: #00f0ff;
-  --accent-cyan-hover: #38bdf8;
-  --accent-cyan-dim: rgba(0, 240, 255, 0.12);
-  --accent-cyan-glow: 0 0 24px rgba(0, 240, 255, 0.3);
+  /* Greyish Orange & Smoked Terracotta Accents */
+  --accent-orange: #e58244;
+  --accent-orange-hover: #f2965c;
+  --accent-orange-dim: rgba(229, 130, 68, 0.14);
+  --accent-orange-glow: 0 0 24px rgba(229, 130, 68, 0.3);
 
-  --accent-mint: #00e699;
-  --accent-mint-dim: rgba(0, 230, 153, 0.12);
-  --accent-mint-glow: 0 0 16px rgba(0, 230, 153, 0.35);
+  --accent-amber: #d49a5b;
+  --accent-amber-dim: rgba(212, 154, 91, 0.14);
 
-  --accent-amber: #f59e0b;
-  --accent-amber-dim: rgba(245, 158, 11, 0.12);
+  --accent-mint: #4ade80;
+  --accent-mint-dim: rgba(74, 222, 128, 0.14);
+  --accent-mint-glow: 0 0 16px rgba(74, 222, 128, 0.3);
 
-  --accent-coral: #f43f5e;
-  --accent-coral-dim: rgba(244, 63, 94, 0.15);
+  --accent-coral: #f87171;
+  --accent-coral-dim: rgba(248, 113, 113, 0.15);
 
   /* Typography Colors */
-  --text-main: #f8fafc;
-  --text-muted: #94a3b8;
-  --text-dim: #64748b;
-  --text-inverse: #070a0f;
+  --text-main: #f3f4f6;
+  --text-muted: #9ca3af;
+  --text-dim: #6b7280;
+  --text-inverse: #0e0f12;
 
   /* Curves & Radii */
   --radius-xs: 8px;
@@ -92,7 +92,7 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Background Ambient Lighting */
+/* Warm Ambient Graphite/Orange Glow */
 body::before {
   content: "";
   position: fixed;
@@ -100,7 +100,20 @@ body::before {
   right: -100px;
   width: 700px;
   height: 700px;
-  background: radial-gradient(circle, rgba(0, 240, 255, 0.04) 0%, rgba(0, 230, 153, 0.015) 45%, transparent 70%);
+  background: radial-gradient(circle, rgba(229, 130, 68, 0.04) 0%, rgba(212, 154, 91, 0.015) 45%, transparent 70%);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  bottom: -200px;
+  left: -150px;
+  width: 650px;
+  height: 650px;
+  background: radial-gradient(circle, rgba(212, 154, 91, 0.03) 0%, transparent 60%);
   border-radius: 50%;
   pointer-events: none;
   z-index: 0;
@@ -115,12 +128,12 @@ body::before {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #192230;
+  background: #252832;
   border-radius: var(--radius-pill);
   box-shadow: inset 1px 1px 2px rgba(255, 255, 255, 0.08);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #253347;
+  background: #343846;
 }
 
 /* ==========================================================================
@@ -137,7 +150,7 @@ body::before {
 }
 
 /* ==========================================================================
-   SIDEBAR (Collapsible Obsidian Clay Drawer)
+   SIDEBAR (Collapsible Charcoal Grey Clay Drawer)
    ========================================================================== */
 
 #sidebar {
@@ -180,13 +193,13 @@ body::before {
   width: 34px;
   height: 34px;
   border-radius: var(--radius-sm);
-  background: linear-gradient(135deg, #182333, #0f1520);
+  background: linear-gradient(135deg, #282a33, #191b22);
   box-shadow: var(--clay-shadow-button), var(--clay-bevel-surface);
-  border: 1px solid rgba(0, 240, 255, 0.25);
+  border: 1px solid rgba(229, 130, 68, 0.3);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--accent-cyan);
+  color: var(--accent-orange);
 }
 
 .brand-title {
@@ -206,9 +219,9 @@ body::before {
   letter-spacing: 0.5px;
   padding: 2px 6px;
   border-radius: var(--radius-pill);
-  background: var(--accent-cyan-dim);
-  color: var(--accent-cyan);
-  border: 1px solid rgba(0, 240, 255, 0.3);
+  background: var(--accent-orange-dim);
+  color: var(--accent-orange);
+  border: 1px solid rgba(229, 130, 68, 0.35);
 }
 
 /* Clay Action Buttons */
@@ -234,7 +247,7 @@ body::before {
 
 .clay-btn:hover {
   background: var(--bg-surface-hover);
-  border-color: rgba(0, 240, 255, 0.3);
+  border-color: rgba(229, 130, 68, 0.35);
   transform: translateY(-2px);
   box-shadow: 0 10px 24px -4px rgba(0, 0, 0, 0.7), var(--clay-bevel-elevated);
 }
@@ -246,9 +259,9 @@ body::before {
 
 .btn-new-chat {
   width: 100%;
-  background: linear-gradient(135deg, #182232, #101622);
-  border: 1px solid rgba(0, 240, 255, 0.3);
-  color: var(--accent-cyan);
+  background: linear-gradient(135deg, #242732, #1a1c24);
+  border: 1px solid rgba(229, 130, 68, 0.35);
+  color: var(--accent-orange);
   font-weight: 600;
   padding: 11px 16px;
   border-radius: var(--radius-lg);
@@ -256,10 +269,10 @@ body::before {
 }
 
 .btn-new-chat:hover {
-  background: linear-gradient(135deg, #1e2a3d, #141c2a);
-  border-color: var(--accent-cyan);
+  background: linear-gradient(135deg, #2d313e, #20232d);
+  border-color: var(--accent-orange);
   color: #fff;
-  box-shadow: var(--clay-shadow-card), var(--accent-cyan-glow);
+  box-shadow: var(--clay-shadow-card), var(--accent-orange-glow);
 }
 
 /* Recessed Search Bar */
@@ -338,7 +351,7 @@ body::before {
   background: var(--bg-surface-elevated);
   box-shadow: var(--clay-shadow-button), var(--clay-bevel-elevated);
   color: #fff;
-  border: 1px solid rgba(0, 240, 255, 0.3);
+  border: 1px solid rgba(229, 130, 68, 0.35);
 }
 
 .chat-history-item .chat-title-text {
@@ -376,7 +389,7 @@ body::before {
   color: var(--accent-coral);
 }
 
-/* Sidebar Footer & Live Cluster Card */
+/* Sidebar Footer & Dynamic Cluster Card */
 .sidebar-footer {
   padding: 12px 14px;
   border-top: var(--border-subtle);
@@ -422,7 +435,7 @@ body::before {
 
 .status-dot.offline {
   background-color: var(--accent-coral);
-  box-shadow: 0 0 12px rgba(244, 63, 94, 0.4);
+  box-shadow: 0 0 12px rgba(248, 113, 113, 0.4);
   animation: none;
 }
 
@@ -439,12 +452,12 @@ body::before {
 }
 
 .stat-highlight {
-  color: var(--accent-cyan);
+  color: var(--accent-orange);
   font-weight: 600;
 }
 
 /* ==========================================================================
-   MAIN VIEWPORT & TOP BAR
+   MAIN VIEWPORT & TOP NAV BAR
    ========================================================================== */
 
 #main-stage {
@@ -464,7 +477,7 @@ body::before {
   align-items: center;
   justify-content: space-between;
   border-bottom: var(--border-subtle);
-  background: rgba(11, 15, 23, 0.85);
+  background: rgba(19, 20, 24, 0.85);
   backdrop-filter: blur(12px);
   z-index: 10;
 }
@@ -491,8 +504,8 @@ body::before {
 }
 
 .toggle-sidebar-btn:hover {
-  color: var(--accent-cyan);
-  border-color: rgba(0, 240, 255, 0.3);
+  color: var(--accent-orange);
+  border-color: rgba(229, 130, 68, 0.35);
 }
 
 .model-selector-container {
@@ -507,7 +520,7 @@ body::before {
   border-radius: var(--radius-pill);
   background: var(--bg-surface-elevated);
   box-shadow: var(--clay-shadow-pill), var(--clay-bevel-surface);
-  border: var(--border-cyan-dim);
+  border: var(--border-orange-dim);
   color: var(--text-main);
   font-size: 13px;
   font-weight: 600;
@@ -517,7 +530,7 @@ body::before {
 }
 
 .model-selector-pill:hover {
-  border-color: var(--accent-cyan);
+  border-color: var(--accent-orange);
 }
 
 .model-dropdown-menu {
@@ -554,7 +567,7 @@ body::before {
 
 .model-dropdown-item:hover, .model-dropdown-item.active {
   background: var(--bg-surface-elevated);
-  color: var(--accent-cyan);
+  color: var(--accent-orange);
 }
 
 .top-right-group {
@@ -616,13 +629,13 @@ body::before {
   width: 70px;
   height: 70px;
   border-radius: var(--radius-lg);
-  background: linear-gradient(145deg, #1c2838, #101722);
-  box-shadow: var(--clay-shadow-card), var(--clay-bevel-elevated), var(--accent-cyan-glow);
-  border: 1px solid rgba(0, 240, 255, 0.35);
+  background: linear-gradient(145deg, #292c38, #181a22);
+  box-shadow: var(--clay-shadow-card), var(--clay-bevel-elevated), var(--accent-orange-glow);
+  border: 1px solid rgba(229, 130, 68, 0.35);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--accent-cyan);
+  color: var(--accent-orange);
   animation: hero-float 4s ease-in-out infinite alternate;
 }
 
@@ -639,7 +652,7 @@ body::before {
 }
 
 .hero-title span {
-  background: linear-gradient(135deg, var(--accent-cyan), var(--accent-mint));
+  background: linear-gradient(135deg, var(--accent-orange), var(--accent-amber));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
@@ -652,7 +665,7 @@ body::before {
   margin-top: 4px;
 }
 
-/* 4 Prompt Cards Grid */
+/* 4 Prompt Suggestion Cards */
 .hero-suggestions-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -677,7 +690,7 @@ body::before {
 
 .suggestion-card:hover {
   background: var(--bg-surface-elevated);
-  border-color: rgba(0, 240, 255, 0.35);
+  border-color: rgba(229, 130, 68, 0.35);
   transform: translateY(-3px);
   box-shadow: 0 16px 32px -6px rgba(0, 0, 0, 0.8), var(--clay-bevel-elevated);
 }
@@ -690,7 +703,7 @@ body::before {
 .suggestion-tag {
   font-size: 11px;
   font-weight: 700;
-  color: var(--accent-cyan);
+  color: var(--accent-orange);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   display: flex;
@@ -737,15 +750,15 @@ body::before {
 }
 
 .assistant-avatar {
-  background: linear-gradient(135deg, #172332, #0e1620);
-  color: var(--accent-cyan);
-  border: 1px solid rgba(0, 240, 255, 0.25);
+  background: linear-gradient(135deg, #262935, #161820);
+  color: var(--accent-orange);
+  border: 1px solid rgba(229, 130, 68, 0.3);
 }
 
 .user-avatar {
-  background: linear-gradient(135deg, #192230, #101720);
-  color: var(--accent-mint);
-  border: 1px solid rgba(0, 230, 153, 0.25);
+  background: linear-gradient(135deg, #242630, #171820);
+  color: var(--accent-amber);
+  border: 1px solid rgba(212, 154, 91, 0.3);
 }
 
 /* User Message Bubble */
@@ -753,8 +766,8 @@ body::before {
   max-width: 78%;
   padding: 13px 18px;
   border-radius: 18px 18px 4px 18px;
-  background: linear-gradient(145deg, #192332, #121924);
-  border: 1px solid rgba(0, 240, 255, 0.2);
+  background: linear-gradient(145deg, #232632, #181a22);
+  border: 1px solid rgba(229, 130, 68, 0.22);
   box-shadow: var(--clay-shadow-card), var(--clay-bevel-surface);
   color: var(--text-main);
   font-size: 14.5px;
@@ -807,14 +820,14 @@ body::before {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: var(--accent-cyan);
+  color: var(--accent-orange);
 }
 
 .thinking-shimmer {
   display: inline-block;
   width: 11px;
   height: 11px;
-  border: 2px solid var(--accent-cyan);
+  border: 2px solid var(--accent-orange);
   border-top-color: transparent;
   border-radius: 50%;
   animation: spin 0.9s linear infinite;
@@ -827,7 +840,7 @@ body::before {
 .thinking-content {
   padding: 10px 12px 12px 12px;
   font-size: 13px;
-  color: #94a3b8;
+  color: #9ca3af;
   line-height: 1.6;
   border-top: 1px solid rgba(255, 255, 255, 0.03);
   white-space: pre-wrap;
@@ -870,7 +883,7 @@ body::before {
 }
 
 .markdown-body blockquote {
-  border-left: 3px solid var(--accent-cyan);
+  border-left: 3px solid var(--accent-orange);
   padding: 6px 14px;
   margin: 10px 0;
   background: var(--bg-inset);
@@ -893,7 +906,7 @@ body::before {
   align-items: center;
   justify-content: space-between;
   padding: 7px 12px;
-  background: #0f141d;
+  background: #14151b;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   font-size: 11.5px;
   font-weight: 600;
@@ -917,8 +930,8 @@ body::before {
 }
 
 .copy-code-btn:hover {
-  color: var(--accent-cyan);
-  border-color: rgba(0, 240, 255, 0.3);
+  color: var(--accent-orange);
+  border-color: rgba(229, 130, 68, 0.35);
 }
 
 .copy-code-btn.copied {
@@ -945,7 +958,7 @@ body::before {
   background: var(--bg-inset);
   box-shadow: var(--clay-bevel-recessed);
   border: 1px solid rgba(255, 255, 255, 0.05);
-  color: var(--accent-cyan);
+  color: var(--accent-orange);
   font-family: 'JetBrains Mono', Consolas, monospace;
   font-size: 12.5px;
 }
@@ -981,8 +994,8 @@ body::before {
 }
 
 .clay-action-pill:hover {
-  color: var(--accent-cyan);
-  border-color: rgba(0, 240, 255, 0.3);
+  color: var(--accent-orange);
+  border-color: rgba(229, 130, 68, 0.35);
 }
 
 .telemetry-tag {
@@ -1045,7 +1058,7 @@ body::before {
   gap: 5px;
   padding: 4px 10px;
   border-radius: var(--radius-pill);
-  background: rgba(18, 25, 36, 0.9);
+  background: rgba(24, 26, 32, 0.9);
   box-shadow: var(--clay-shadow-pill), var(--clay-bevel-surface);
   border: var(--border-subtle);
   color: var(--text-muted);
@@ -1058,21 +1071,21 @@ body::before {
 }
 
 .clay-tool-pill:hover {
-  color: var(--accent-cyan);
-  border-color: rgba(0, 240, 255, 0.3);
+  color: var(--accent-orange);
+  border-color: rgba(229, 130, 68, 0.35);
 }
 
 .clay-tool-pill.active {
-  background: linear-gradient(135deg, #172230, #101722);
-  border-color: var(--accent-cyan);
-  color: var(--accent-cyan);
+  background: linear-gradient(135deg, #252834, #1b1d24);
+  border-color: var(--accent-orange);
+  color: var(--accent-orange);
 }
 
 /* Input Capsule */
 .input-capsule {
   width: 100%;
   border-radius: var(--radius-xl);
-  background: linear-gradient(145deg, #141c28, #0e141f);
+  background: linear-gradient(145deg, #1d2028, #14151b);
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: var(--clay-shadow-floating), var(--clay-bevel-elevated);
   padding: 9px 12px 9px 16px;
@@ -1083,8 +1096,8 @@ body::before {
 }
 
 .input-capsule:focus-within {
-  border-color: rgba(0, 240, 255, 0.4);
-  box-shadow: var(--clay-shadow-floating), var(--clay-bevel-elevated), 0 0 20px rgba(0, 240, 255, 0.12);
+  border-color: rgba(229, 130, 68, 0.45);
+  box-shadow: var(--clay-shadow-floating), var(--clay-bevel-elevated), 0 0 20px rgba(229, 130, 68, 0.15);
 }
 
 .textarea-row {
@@ -1117,10 +1130,10 @@ body::before {
   height: 38px;
   min-width: 38px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #00f0ff, #0284c7);
+  background: linear-gradient(135deg, #e58244, #c96b30);
   border: none;
-  box-shadow: 0 4px 12px rgba(0, 240, 255, 0.35), var(--clay-bevel-cyan);
-  color: #070a0f;
+  box-shadow: 0 4px 12px rgba(229, 130, 68, 0.4), var(--clay-bevel-orange);
+  color: #0e0f12;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1130,7 +1143,7 @@ body::before {
 
 .send-btn-clay:hover {
   transform: translateY(-2px) scale(1.05);
-  box-shadow: 0 6px 18px rgba(0, 240, 255, 0.5), var(--clay-bevel-cyan);
+  box-shadow: 0 6px 18px rgba(229, 130, 68, 0.55), var(--clay-bevel-orange);
 }
 
 .send-btn-clay:active {
@@ -1138,8 +1151,8 @@ body::before {
 }
 
 .stop-btn-clay {
-  background: linear-gradient(135deg, #f43f5e, #be123c) !important;
-  box-shadow: 0 0 16px rgba(244, 63, 94, 0.4), var(--clay-bevel-cyan) !important;
+  background: linear-gradient(135deg, #f87171, #dc2626) !important;
+  box-shadow: 0 0 16px rgba(248, 113, 113, 0.4), var(--clay-bevel-orange) !important;
   color: #fff !important;
   animation: pulse-stop 1.5s infinite alternate;
 }

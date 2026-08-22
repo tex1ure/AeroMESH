@@ -42,23 +42,24 @@ impl ActivationDtype {
 }
 
 /// Binary frame header for high-speed P2P activation vector streaming with session & KV tracking.
-/// Fixed size: 38 bytes (endian-safe BigEndian serialization).
+/// Fixed size: 42 bytes (endian-safe BigEndian serialization).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActivationHeader {
     pub magic: [u8; 4],          // b"AERO"
     pub version: u16,           // 2
     pub session_id: u64,        // Unique multi-turn chat session ID
     pub sequence_id: u64,       // Token generation sequence counter
+    pub sequence_length: u32,   // S: Number of tokens in sequence (1 for decode, >1 for prefill)
     pub token_position: u32,    // Context position offset in KV-cache (pos)
     pub layer_index: u16,       // Boundary layer index (e.g. 24)
-    pub hidden_dim: u32,        // Hidden dimension (e.g. 4096)
+    pub hidden_dim: u32,        // Hidden dimension (e.g. 4096 / 5120)
     pub dtype: u8,              // 0 = FP32, 1 = FP16, 2 = BF16
     pub flags: u8,              // Bitmask: FLAG_CLEAR_KV (0x01), FLAG_IS_PROMPT (0x02), etc.
-    pub payload_bytes: u32,     // Length of payload following header
+    pub payload_bytes: u32,     // Length of payload following header (S * hidden_dim * sizeof(dtype))
 }
 
 impl ActivationHeader {
-    pub const SIZE: usize = 38;
+    pub const SIZE: usize = 42;
 
     pub fn encode(&self, out: &mut [u8]) {
         assert!(out.len() >= Self::SIZE);
@@ -66,12 +67,13 @@ impl ActivationHeader {
         BigEndian::write_u16(&mut out[4..6], self.version);
         BigEndian::write_u64(&mut out[6..14], self.session_id);
         BigEndian::write_u64(&mut out[14..22], self.sequence_id);
-        BigEndian::write_u32(&mut out[22..26], self.token_position);
-        BigEndian::write_u16(&mut out[26..28], self.layer_index);
-        BigEndian::write_u32(&mut out[28..32], self.hidden_dim);
-        out[32] = self.dtype;
-        out[33] = self.flags;
-        BigEndian::write_u32(&mut out[34..38], self.payload_bytes);
+        BigEndian::write_u32(&mut out[22..26], self.sequence_length);
+        BigEndian::write_u32(&mut out[26..30], self.token_position);
+        BigEndian::write_u16(&mut out[30..32], self.layer_index);
+        BigEndian::write_u32(&mut out[32..36], self.hidden_dim);
+        out[36] = self.dtype;
+        out[37] = self.flags;
+        BigEndian::write_u32(&mut out[38..42], self.payload_bytes);
     }
 
     pub fn decode(src: &[u8]) -> Result<Self> {
@@ -85,18 +87,20 @@ impl ActivationHeader {
 
         let session_id = BigEndian::read_u64(&src[6..14]);
         let sequence_id = BigEndian::read_u64(&src[14..22]);
-        let token_position = BigEndian::read_u32(&src[22..26]);
-        let layer_index = BigEndian::read_u16(&src[26..28]);
-        let hidden_dim = BigEndian::read_u32(&src[28..32]);
-        let dtype = src[32];
-        let flags = src[33];
-        let payload_bytes = BigEndian::read_u32(&src[34..38]);
+        let sequence_length = BigEndian::read_u32(&src[22..26]);
+        let token_position = BigEndian::read_u32(&src[26..30]);
+        let layer_index = BigEndian::read_u16(&src[30..32]);
+        let hidden_dim = BigEndian::read_u32(&src[32..36]);
+        let dtype = src[36];
+        let flags = src[37];
+        let payload_bytes = BigEndian::read_u32(&src[38..42]);
 
         Ok(Self {
             magic,
             version,
             session_id,
             sequence_id,
+            sequence_length,
             token_position,
             layer_index,
             hidden_dim,
@@ -123,6 +127,7 @@ impl ActivationFrame {
     pub fn new(
         session_id: u64,
         sequence_id: u64,
+        sequence_length: u32,
         token_position: u32,
         layer_index: u16,
         hidden_dim: u32,
@@ -130,11 +135,13 @@ impl ActivationFrame {
         flags: u8,
         payload: Bytes,
     ) -> Result<Self> {
-        let expected_size = (hidden_dim as usize) * dtype.bytes_per_element();
+        let expected_size = (sequence_length as usize) * (hidden_dim as usize) * dtype.bytes_per_element();
         ensure!(
             payload.len() == expected_size,
-            "Payload length mismatch: expected {} bytes, got {}",
+            "Payload length mismatch: expected {} bytes (seq_len={}, hidden_dim={}), got {}",
             expected_size,
+            sequence_length,
+            hidden_dim,
             payload.len()
         );
 
@@ -143,6 +150,7 @@ impl ActivationFrame {
             version: PROTOCOL_VERSION,
             session_id,
             sequence_id,
+            sequence_length,
             token_position,
             layer_index,
             hidden_dim,
@@ -162,6 +170,28 @@ impl ActivationFrame {
         activations: &[f32],
         flags: u8,
     ) -> Self {
+        Self::from_f32_matrix(
+            session_id,
+            sequence_id,
+            1,
+            token_position,
+            layer_index,
+            activations.len() as u32,
+            activations,
+            flags,
+        )
+    }
+
+    pub fn from_f32_matrix(
+        session_id: u64,
+        sequence_id: u64,
+        sequence_length: u32,
+        token_position: u32,
+        layer_index: u16,
+        hidden_dim: u32,
+        activations: &[f32],
+        flags: u8,
+    ) -> Self {
         let mut bytes = BytesMut::with_capacity(activations.len() * 4);
         for &val in activations {
             let b = val.to_bits();
@@ -175,9 +205,10 @@ impl ActivationFrame {
             version: PROTOCOL_VERSION,
             session_id,
             sequence_id,
+            sequence_length,
             token_position,
             layer_index,
-            hidden_dim: activations.len() as u32,
+            hidden_dim,
             dtype: ActivationDtype::Fp32 as u8,
             flags,
             payload_bytes: bytes.len() as u32,
@@ -500,6 +531,7 @@ mod tests {
 
         assert_eq!(frame.header.session_id, 999);
         assert_eq!(frame.header.sequence_id, 42);
+        assert_eq!(frame.header.sequence_length, 1);
         assert_eq!(frame.header.token_position, 128);
         assert_eq!(frame.header.layer_index, 24);
         assert_eq!(frame.header.hidden_dim, 4);
@@ -515,6 +547,38 @@ mod tests {
         assert_eq!(decoded.header, frame.header);
         let decoded_f32 = decoded.to_f32_vec().unwrap();
         assert_eq!(decoded_f32, original_data);
+    }
+
+    #[test]
+    fn test_activation_frame_multi_token_matrix() {
+        // 3 tokens, hidden_dim = 4 -> 12 floats
+        let matrix_data = vec![
+            1.0f32, 2.0, 3.0, 4.0,   // Token 0
+            5.0, 6.0, 7.0, 8.0,       // Token 1
+            9.0, 10.0, 11.0, 12.0,    // Token 2
+        ];
+        let frame = ActivationFrame::from_f32_matrix(
+            1001, // session_id
+            0,    // sequence_id
+            3,    // sequence_length
+            0,    // token_position
+            24,   // layer_index
+            4,    // hidden_dim
+            &matrix_data,
+            FLAG_IS_PROMPT,
+        );
+
+        assert_eq!(frame.header.sequence_length, 3);
+        assert_eq!(frame.header.hidden_dim, 4);
+        assert_eq!(frame.payload.len(), 3 * 4 * 4); // 48 bytes
+
+        let encoded = frame.encode();
+        let mut cursor = std::io::Cursor::new(encoded);
+        let decoded = ActivationFrame::decode_sync(&mut cursor).unwrap();
+
+        assert_eq!(decoded.header.sequence_length, 3);
+        assert_eq!(decoded.header.hidden_dim, 4);
+        assert_eq!(decoded.to_f32_vec().unwrap(), matrix_data);
     }
 
     #[tokio::test]
