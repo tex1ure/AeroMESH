@@ -71,7 +71,7 @@ pub fn resolve_model_path<P: AsRef<Path>>(input_path: Option<P>) -> Result<PathB
             if let Ok(entries) = std::fs::read_dir(candidate_dir) {
                 for entry in entries.flatten() {
                     let p = entry.path();
-                    if p.is_file() && p.extension().map_or(false, |ext| ext == "gguf") {
+                    if p.is_file() && p.extension().is_some_and(|ext| ext == "gguf") {
                         info!(found = %p.display(), "Auto-discovered model file");
                         return Ok(p);
                     }

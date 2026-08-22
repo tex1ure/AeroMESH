@@ -148,10 +148,9 @@ impl EngineSupervisor {
 
         for line in stderr_str.lines() {
             let trimmed = line.trim();
-            if trimmed.contains("RPC") || trimmed.contains("CUDA") || trimmed.contains("offload") || trimmed.contains("device") || trimmed.contains("remote") || trimmed.contains("backend") {
-                if !trimmed.contains("DEBUG") && !trimmed.is_empty() {
-                    rpc_devices.push(trimmed.to_string());
-                }
+            if (trimmed.contains("RPC") || trimmed.contains("CUDA") || trimmed.contains("offload") || trimmed.contains("device") || trimmed.contains("remote") || trimmed.contains("backend"))
+                && !trimmed.contains("DEBUG") && !trimmed.is_empty() {
+                rpc_devices.push(trimmed.to_string());
             }
             if trimmed.contains("eval time") || trimmed.contains("prompt eval time") || trimmed.contains("total time") || trimmed.contains("tokens per second") {
                 perf_metrics.push(trimmed.to_string());

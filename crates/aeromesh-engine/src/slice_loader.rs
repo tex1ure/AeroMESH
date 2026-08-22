@@ -291,13 +291,8 @@ impl GgufSliceLoader {
                     slice.layer_range().contains(&layer)
                 } else {
                     // Global non-layer tensors
-                    if slice.is_first_stage && (t.name.contains("token_embd") || t.name.contains("embed")) {
-                        true
-                    } else if slice.is_last_stage && (t.name.contains("output") || t.name.contains("norm")) {
-                        true
-                    } else {
-                        false
-                    }
+                    (slice.is_first_stage && (t.name.contains("token_embd") || t.name.contains("embed")))
+                        || (slice.is_last_stage && (t.name.contains("output") || t.name.contains("norm")))
                 }
             })
             .collect()
@@ -320,7 +315,7 @@ impl GgufSliceLoader {
     /// Computes balanced layer partitions for N pipeline nodes.
     pub fn compute_balanced_splits(&self, num_nodes: usize) -> Vec<LayerSliceConfig> {
         let num_nodes = num_nodes.max(1);
-        let layers_per_node = (self.total_layers + num_nodes - 1) / num_nodes;
+        let layers_per_node = self.total_layers.div_ceil(num_nodes);
         let mut splits = Vec::with_capacity(num_nodes);
 
         let mut current_start = 0;

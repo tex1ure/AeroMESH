@@ -137,6 +137,7 @@ impl PipelineWorkerService {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_worker_connection(
     socket: &mut TcpStream,
     peer_addr: SocketAddr,
@@ -230,7 +231,7 @@ async fn handle_worker_connection(
             active_session_id = frame.header.session_id;
         }
 
-        current_kv_pos = frame.header.token_position;
+        let current_kv_pos = frame.header.token_position;
         let _activations = frame.to_f32_vec()?;
         let seq_id = frame.header.sequence_id;
 
@@ -302,7 +303,7 @@ impl PipelineCoordinatorClient {
         } else {
             let num_nodes = worker_addrs.len() + 1;
             let splits = loader.compute_balanced_splits(num_nodes);
-            splits.get(0).cloned().unwrap_or(
+            splits.first().cloned().unwrap_or(
                 LayerSliceConfig::new(0, total_layers.saturating_sub(1) / 2, total_layers)?,
             )
         };
@@ -595,6 +596,7 @@ impl PipelineHttpServer {
             .route("/api/chat", post(handle_chat_completions))
             .route("/health", get(handle_health))
             .route("/v1/models", get(handle_models))
+            .route("/api/cluster/status", get(handle_cluster_status))
             .layer(CorsLayer::permissive())
             .with_state(self.state.clone());
 
@@ -634,6 +636,36 @@ async fn handle_models(State(state): State<Arc<AppState>>) -> impl IntoResponse 
             "owned_by": "aeromesh",
             "permission": []
         }]
+    })))
+}
+
+async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let coord = state.coordinator.lock().await;
+    let local_start = coord.local_slice.layer_start;
+    let local_end = coord.local_slice.layer_end;
+    let total_layers = coord.loader.total_layers;
+    let hidden_dim = coord.loader.hidden_dim;
+    let arch = coord.loader.architecture.clone();
+    let workers = coord.worker_addrs.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+    let model_name = state.model_name.clone();
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "status": "ok",
+        "service": "AeroMesh Zero-Weight Pipeline",
+        "connected": true,
+        "version": env!("CARGO_PKG_VERSION"),
+        "model_name": model_name,
+        "architecture": arch,
+        "hidden_dim": hidden_dim,
+        "total_layers": total_layers,
+        "local_stage": {
+            "role": "Coordinator (Stage 1)",
+            "layer_start": local_start,
+            "layer_end": local_end
+        },
+        "worker_nodes": workers,
+        "wire_weights_mb": 0.0,
+        "transport": "Tailscale Direct WireGuard"
     })))
 }
 

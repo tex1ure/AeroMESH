@@ -193,7 +193,7 @@ impl TailscaleInspector {
                         }
                     }
 
-                    let cluster_ready = rpc_online && is_direct && rtt_ms.map_or(false, |r| r <= 150.0);
+                    let cluster_ready = rpc_online && is_direct && rtt_ms.is_some_and(|r| r <= 150.0);
 
                     nodes.push(DiscoveredNodeStatus {
                         host_name: peer.host_name,

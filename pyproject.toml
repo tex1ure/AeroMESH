@@ -5,7 +5,9 @@ description = "AI Cluster UI with RPC backend"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "gradio>=4.0.0",
-    "requests>=2.28.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.22.0",
     "httpx>=0.24.0",
+    "requests>=2.28.0",
+    "gradio>=4.0.0",
 ]

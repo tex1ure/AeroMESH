@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AeroMesh • Distributed LLM Cluster Interface</title>
+  
+  <!-- Favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2300f0ff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polygon points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>">
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <!-- Marked.js for Markdown Rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <!-- Highlight.js for Syntax Highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+  <!-- KaTeX for LaTeX Math Support -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+
+  <!-- Custom Luxury Dark Claymorphic CSS -->
+  <link rel="stylesheet" href="/static/css/claymorphic.css">
+</head>
+<body>
+
+<div id="app-container">
+
+  <!-- ====================================================================
+       COLLAPSIBLE SIDEBAR
+       ==================================================================== -->
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <div class="brand-row">
+        <div class="brand-badge">
+          <div class="brand-icon">
+            <i data-lucide="zap"></i>
+          </div>
+          <div>
+            <div class="brand-title">AeroMESH <span class="brand-tag">P2P MESH</span></div>
+          </div>
+        </div>
+        <button id="sidebar-close-btn" class="toggle-sidebar-btn" title="Toggle Sidebar" style="display: none;">
+          <i data-lucide="panel-left-close"></i>
+        </button>
+      </div>
+
+      <button id="btn-new-chat" class="clay-btn btn-new-chat">
+        <i data-lucide="plus" style="width: 17px; height: 17px;"></i>
+        <span>New Chat</span>
+      </button>
+    </div>
+
+    <!-- Search Recessed Box -->
+    <div class="search-container">
+      <div class="recessed-search">
+        <i data-lucide="search" style="width: 14px; height: 14px; color: var(--text-dim);"></i>
+        <input type="text" id="search-input" placeholder="Search conversations...">
+      </div>
+    </div>
+
+    <!-- Conversation History List -->
+    <div class="sidebar-history" id="history-container">
+      <div class="history-section-title">Recent Conversations</div>
+      <div id="chat-list-today"></div>
+    </div>
+
+    <!-- Dynamic Cluster Telemetry Card in Sidebar Footer -->
+    <div class="sidebar-footer">
+      <div class="cluster-telemetry-card" id="sidebar-telemetry-card">
+        <div class="cluster-card-header">
+          <div class="cluster-status-indicator">
+            <span class="status-dot" id="sidebar-status-dot"></span>
+            <span id="cluster-status-label">Checking Cluster...</span>
+          </div>
+          <span style="font-size: 11px; font-weight: 700; color: var(--accent-cyan);" id="cluster-wire-transfer">0.0 MB Wire</span>
+        </div>
+        <div id="cluster-stats-dynamic" style="display: flex; flex-direction: column; gap: 4px; margin-top: 2px;">
+          <!-- Dynamically filled by JS from backend API -->
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 8px;">
+        <button id="btn-open-telemetry" class="clay-btn" style="flex: 1; padding: 7px 12px; font-size: 12px;">
+          <i data-lucide="activity" style="width: 14px; height: 14px; color: var(--accent-cyan);"></i>
+          <span>Cluster HUD</span>
+        </button>
+        <button id="btn-clear-all" class="clay-btn" style="padding: 7px 12px; font-size: 12px; color: var(--text-dim);" title="Clear all local conversations">
+          <i data-lucide="trash-2" style="width: 14px; height: 14px;"></i>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ====================================================================
+       MAIN STAGE (Spread Chat Viewport)
+       ==================================================================== -->
+  <main id="main-stage">
+
+    <!-- Top Navigation Bar -->
+    <header class="top-nav">
+      <div class="top-left-group">
+        <button id="sidebar-toggle-btn" class="toggle-sidebar-btn" title="Toggle Sidebar">
+          <i data-lucide="panel-left"></i>
+        </button>
+
+        <div class="model-selector-container">
+          <div class="model-selector-pill" id="model-selector-btn">
+            <i data-lucide="cpu" style="width: 15px; height: 15px; color: var(--accent-cyan);"></i>
+            <span id="active-model-name">Loading Model...</span>
+            <i data-lucide="chevron-down" style="width: 13px; height: 13px; color: var(--text-dim);"></i>
+          </div>
+          <div class="model-dropdown-menu" id="model-dropdown-menu"></div>
+        </div>
+      </div>
+
+      <div class="top-right-group">
+        <div class="cluster-pill-badge" id="live-cluster-badge">
+          <span class="status-dot" id="top-status-dot"></span>
+          <span id="top-status-text">Connecting...</span>
+        </div>
+
+        <button id="btn-reset-session" class="clay-btn" style="padding: 5px 12px; font-size: 12px;" title="Flush KV cache for clean multi-turn session">
+          <i data-lucide="sparkles" style="width: 13px; height: 13px; color: var(--accent-cyan);"></i>
+          <span>Sync KV</span>
+        </button>
+
+        <button id="btn-export-chat" class="clay-btn" style="padding: 5px 10px; font-size: 12px;" title="Export chat history as Markdown">
+          <i data-lucide="download" style="width: 13px; height: 13px;"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Chat Message Container -->
+    <div id="chat-viewport">
+      <div class="chat-inner" id="chat-inner">
+
+        <!-- Hero State (Displayed when chat is empty) -->
+        <div id="hero-state">
+          <div class="hero-emblem">
+            <i data-lucide="zap" style="width: 34px; height: 34px;"></i>
+          </div>
+          <div>
+            <h1 class="hero-title">AeroMESH <span>Cluster</span></h1>
+            <p class="hero-subtitle" id="hero-model-subtitle">
+              Fault-tolerant distributed inference across heterogeneous GPUs with <strong>0.0 MB model weights transferred over the network</strong>.
+            </p>
+          </div>
+
+          <div class="hero-suggestions-grid">
+            <div class="suggestion-card" data-prompt="How does AeroMesh achieve zero-weight activation streaming across Tailscale?">
+              <div class="suggestion-tag">
+                <i data-lucide="network" style="width: 12px; height: 12px;"></i>
+                <span>Zero-Weight Pipeline</span>
+              </div>
+              <div class="suggestion-text">How does AeroMesh achieve zero-weight activation streaming across Tailscale?</div>
+            </div>
+
+            <div class="suggestion-card" data-prompt="Analyze Byzantine fault tolerance in decentralized GPU clusters step-by-step.">
+              <div class="suggestion-tag">
+                <i data-lucide="brain-circuit" style="width: 12px; height: 12px;"></i>
+                <span>Deep Reasoning</span>
+              </div>
+              <div class="suggestion-text">Analyze Byzantine fault tolerance in decentralized GPU clusters step-by-step.</div>
+            </div>
+
+            <div class="suggestion-card" data-prompt="Write a high-throughput CUDA tensor core activation forwarding loop in Rust.">
+              <div class="suggestion-tag">
+                <i data-lucide="code-2" style="width: 12px; height: 12px;"></i>
+                <span>CUDA & Systems Code</span>
+              </div>
+              <div class="suggestion-text">Write a high-throughput CUDA tensor core activation forwarding loop in Rust.</div>
+            </div>
+
+            <div class="suggestion-card" data-prompt="Compare Tailscale Direct WireGuard vs DERP Relay latency for distributed LLM inference.">
+              <div class="suggestion-tag">
+                <i data-lucide="activity" style="width: 12px; height: 12px;"></i>
+                <span>Network Analysis</span>
+              </div>
+              <div class="suggestion-text">Compare Tailscale Direct WireGuard vs DERP Relay latency for distributed LLM inference.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Dynamic Messages Container -->
+        <div id="messages-container" style="display: flex; flex-direction: column; gap: 20px; width: 100%;"></div>
+
+      </div>
+    </div>
+
+    <!-- ====================================================================
+         FLOATING CLAYMORPHIC BOTTOM INPUT DOCK
+         ==================================================================== -->
+    <div class="bottom-input-anchor">
+      <div class="input-dock-container">
+
+        <!-- Toolbar Pills Row -->
+        <div class="input-toolbar-row">
+          <div class="toolbar-pills">
+            <div class="clay-tool-pill active" id="pill-reasoning" title="Toggle DeepSeek-R1 reasoning foldout">
+              <i data-lucide="brain" style="width: 12px; height: 12px;"></i>
+              <span>Reasoning Mode</span>
+            </div>
+
+            <div class="clay-tool-pill" id="pill-tokens" title="Set token output budget">
+              <i data-lucide="sliders" style="width: 12px; height: 12px;"></i>
+              <span id="max-tokens-label">Max Tokens: 256</span>
+            </div>
+
+            <div class="clay-tool-pill" id="pill-clearkv" title="Clear KV Cache on next generation">
+              <i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i>
+              <span>Reset KV on Send</span>
+            </div>
+          </div>
+
+          <div style="font-size: 11px; color: var(--text-dim);">
+            <span><strong>Enter ↵</strong> to send, <strong>Shift+Enter</strong> for newline</span>
+          </div>
+        </div>
+
+        <!-- Main Floating Clay Input Capsule -->
+        <div class="input-capsule">
+          <div class="textarea-row">
+            <textarea
+              id="chat-input"
+              rows="1"
+              placeholder="Ask anything or prompt the AeroMesh cluster..."
+              autocomplete="off"
+            ></textarea>
+            
+            <button id="send-btn" class="send-btn-clay" title="Send Prompt (Enter)">
+              <i data-lucide="arrow-up" style="width: 18px; height: 18px; stroke-width: 2.5;"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="input-footer-disclaimer" id="footer-disclaimer">
+          ⚡ AeroMesh Zero-Weight Pipeline • Activations streamed via Tailscale Direct WireGuard • 0.0 MB Weights on Wire
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+
+</div>
+
+<!-- ====================================================================
+     DYNAMIC CLUSTER TELEMETRY & TOPOLOGY MODAL
+     ==================================================================== -->
+<div class="modal-backdrop" id="telemetry-modal">
+  <div class="clay-modal">
+    <div class="modal-header">
+      <div class="modal-title">
+        <i data-lucide="cpu" style="color: var(--accent-cyan);"></i>
+        <span>AeroMesh Cluster Topology</span>
+      </div>
+      <button class="modal-close-btn" id="modal-close-btn">
+        <i data-lucide="x"></i>
+      </button>
+    </div>
+
+    <p style="font-size: 13px; color: var(--text-muted);" id="modal-description">
+      Dynamic cluster node status and layer slice allocation queried directly from the backend coordinator:
+    </p>
+
+    <div class="cluster-diagram" id="modal-nodes-container">
+      <!-- Dynamically filled by JS from /api/cluster/status -->
+    </div>
+
+    <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 4px;">
+      <div style="font-size: 12px; color: var(--text-dim); display: flex; align-items: center; gap: 6px;">
+        <span class="status-dot" id="modal-status-dot"></span>
+        <span id="modal-cluster-status">Connecting to coordinator...</span>
+      </div>
+      <button class="clay-btn" id="modal-probe-btn" style="padding: 5px 12px; font-size: 11.5px;">
+        <i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i>
+        <span>Refresh Status</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Application Script -->
+<script src="/static/js/app.js"></script>
+
+</body>
+</html>

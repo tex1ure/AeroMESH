@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::{info, warn};
@@ -143,6 +144,29 @@ enum Commands {
         /// Port to bind HTTP API server
         #[arg(long, default_value_t = 8080)]
         port: u16,
+    },
+
+    /// Unified 1-Click Cluster Launcher (Worker, Coordinator API, or Full Local Mesh)
+    Start {
+        /// Cluster role: "worker", "coordinator", or "all" (local demo mesh)
+        #[arg(long, default_value = "coordinator")]
+        role: String,
+
+        /// Path to GGUF model file (auto-discovers in models/ if omitted)
+        #[arg(long)]
+        model: Option<PathBuf>,
+
+        /// Layer range (e.g. "0..24" for coordinator, "25..48" for worker, or "auto")
+        #[arg(long)]
+        layers: Option<String>,
+
+        /// Comma-separated peer addresses for coordinator (e.g. 100.101.147.24:50052)
+        #[arg(long)]
+        peers: Option<String>,
+
+        /// Port to bind (50052 for worker, 8080 for coordinator API)
+        #[arg(long)]
+        port: Option<u16>,
     },
 }
 
@@ -376,6 +400,102 @@ async fn main() -> Result<()> {
             let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, custom_slice)?;
             let server = PipelineHttpServer::new(client, model_name);
             server.run(&host, port).await?;
+        }
+
+        Commands::Start {
+            role,
+            model,
+            layers,
+            peers,
+            port,
+        } => {
+            let role_clean = role.trim().to_lowercase();
+            let model_path = resolve_model_path(model.as_ref())?;
+            let loader = GgufSliceLoader::open(&model_path)?;
+            let total_layers = loader.total_layers;
+            let mid = total_layers / 2;
+
+            match role_clean.as_str() {
+                "worker" => {
+                    let bind_port = port.unwrap_or(50052);
+                    let slice_config = if let Some(l_str) = layers {
+                        parse_layer_range(&l_str, total_layers)?
+                    } else {
+                        LayerSliceConfig::new(mid, total_layers.saturating_sub(1), total_layers)?
+                    };
+
+                    info!("🚀 Starting AeroMesh Zero-Weight Worker Node on port {}...", bind_port);
+                    let service = PipelineWorkerService::new(&model_path, slice_config)?;
+                    service.run_server("0.0.0.0", bind_port).await?;
+                }
+                "coordinator" => {
+                    let api_port = port.unwrap_or(8080);
+                    let slice_config = if let Some(l_str) = layers {
+                        parse_layer_range(&l_str, total_layers)?
+                    } else {
+                        LayerSliceConfig::new(0, mid.saturating_sub(1), total_layers)?
+                    };
+
+                    let peer_list: Vec<String> = peers
+                        .as_ref()
+                        .map(|p| p.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                        .unwrap_or_default();
+
+                    let worker_addrs: Vec<SocketAddr> = peer_list
+                        .iter()
+                        .filter_map(|p| p.parse::<SocketAddr>().ok())
+                        .collect();
+
+                    let model_name = model_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "aeromesh-model".to_string());
+
+                    info!("🚀 Starting AeroMesh Zero-Weight Coordinator & API Server on port {}...", api_port);
+                    let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, Some(slice_config))?;
+                    let server = PipelineHttpServer::new(client, model_name);
+                    server.run("0.0.0.0", api_port).await?;
+                }
+                "all" => {
+                    let worker_port = 50052;
+                    let api_port = port.unwrap_or(8080);
+                    let worker_slice = LayerSliceConfig::new(mid, total_layers.saturating_sub(1), total_layers)?;
+                    let coord_slice = LayerSliceConfig::new(0, mid.saturating_sub(1), total_layers)?;
+
+                    println!("\n========================================================");
+                    println!("   AEROMESH FULL LOCAL MESH INITIALIZING");
+                    println!("========================================================");
+                    println!("  Model:            {}", model_path.display());
+                    println!("  Stage 1 (Coord):  Layers 0..{} (API: http://127.0.0.1:{})", mid.saturating_sub(1), api_port);
+                    println!("  Stage 2 (Worker): Layers {}..{} (Port: {})", mid, total_layers.saturating_sub(1), worker_port);
+                    println!("  Zero-Weight wire: 0.0 MB transferred (Local Loopback)");
+                    println!("========================================================\n");
+
+                    // Spawn worker in background task
+                    let worker_model = model_path.clone();
+                    tokio::spawn(async move {
+                        if let Ok(service) = PipelineWorkerService::new(&worker_model, worker_slice) {
+                            let _ = service.run_server("127.0.0.1", worker_port).await;
+                        }
+                    });
+
+                    // Wait 300ms for worker listener
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+
+                    let worker_addr: SocketAddr = format!("127.0.0.1:{}", worker_port).parse().unwrap();
+                    let model_name = model_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "aeromesh-model".to_string());
+
+                    let client = PipelineCoordinatorClient::new(&model_path, vec![worker_addr], Some(coord_slice))?;
+                    let server = PipelineHttpServer::new(client, model_name);
+                    server.run("0.0.0.0", api_port).await?;
+                }
+                _ => {
+                    anyhow::bail!("Invalid start role: '{}'. Expected 'worker', 'coordinator', or 'all'", role);
+                }
+            }
         }
 
         Commands::Coordinator {

@@ -119,6 +119,7 @@ pub struct ActivationFrame {
 }
 
 impl ActivationFrame {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: u64,
         sequence_id: u64,
