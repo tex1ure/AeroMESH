@@ -6,7 +6,14 @@ use tokio::io::AsyncReadExt;
 
 pub const ACTIVATION_MAGIC: [u8; 4] = *b"AERO";
 pub const TOKEN_RESP_MAGIC: [u8; 4] = *b"ATOK";
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const HANDSHAKE_REQ_MAGIC: [u8; 4] = *b"AHSK";
+pub const HANDSHAKE_RESP_MAGIC: [u8; 4] = *b"AHSR";
+pub const PROTOCOL_VERSION: u16 = 2;
+
+// Flags for ActivationHeader
+pub const FLAG_CLEAR_KV: u8 = 0x01;
+pub const FLAG_IS_PROMPT: u8 = 0x02;
+pub const FLAG_EOS_SIGNAL: u8 = 0x04;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,32 +41,37 @@ impl ActivationDtype {
     }
 }
 
-/// Binary frame header for high-speed P2P activation vector streaming.
-/// Fixed size: 26 bytes (endian-safe BigEndian serialization).
+/// Binary frame header for high-speed P2P activation vector streaming with session & KV tracking.
+/// Fixed size: 38 bytes (endian-safe BigEndian serialization).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActivationHeader {
-    pub magic: [u8; 4],      // b"AERO"
-    pub version: u16,       // 1
-    pub sequence_id: u64,   // Token generation sequence counter
-    pub layer_index: u16,   // Boundary layer index (e.g. 24)
-    pub hidden_dim: u32,    // Hidden dimension (e.g. 4096)
-    pub dtype: u8,          // 0 = FP32, 1 = FP16, 2 = BF16
-    pub payload_bytes: u32, // Length of payload following header
+    pub magic: [u8; 4],          // b"AERO"
+    pub version: u16,           // 2
+    pub session_id: u64,        // Unique multi-turn chat session ID
+    pub sequence_id: u64,       // Token generation sequence counter
+    pub token_position: u32,    // Context position offset in KV-cache (pos)
+    pub layer_index: u16,       // Boundary layer index (e.g. 24)
+    pub hidden_dim: u32,        // Hidden dimension (e.g. 4096)
+    pub dtype: u8,              // 0 = FP32, 1 = FP16, 2 = BF16
+    pub flags: u8,              // Bitmask: FLAG_CLEAR_KV (0x01), FLAG_IS_PROMPT (0x02), etc.
+    pub payload_bytes: u32,     // Length of payload following header
 }
 
 impl ActivationHeader {
-    pub const SIZE: usize = 26;
+    pub const SIZE: usize = 38;
 
     pub fn encode(&self, out: &mut [u8]) {
         assert!(out.len() >= Self::SIZE);
         out[0..4].copy_from_slice(&self.magic);
         BigEndian::write_u16(&mut out[4..6], self.version);
-        BigEndian::write_u64(&mut out[6..14], self.sequence_id);
-        BigEndian::write_u16(&mut out[14..16], self.layer_index);
-        BigEndian::write_u32(&mut out[16..20], self.hidden_dim);
-        out[20] = self.dtype;
-        out[21] = 0; // reserved padding byte
-        BigEndian::write_u32(&mut out[22..26], self.payload_bytes);
+        BigEndian::write_u64(&mut out[6..14], self.session_id);
+        BigEndian::write_u64(&mut out[14..22], self.sequence_id);
+        BigEndian::write_u32(&mut out[22..26], self.token_position);
+        BigEndian::write_u16(&mut out[26..28], self.layer_index);
+        BigEndian::write_u32(&mut out[28..32], self.hidden_dim);
+        out[32] = self.dtype;
+        out[33] = self.flags;
+        BigEndian::write_u32(&mut out[34..38], self.payload_bytes);
     }
 
     pub fn decode(src: &[u8]) -> Result<Self> {
@@ -71,21 +83,31 @@ impl ActivationHeader {
         let version = BigEndian::read_u16(&src[4..6]);
         ensure!(version == PROTOCOL_VERSION, "Unsupported activation protocol version: {}", version);
 
-        let sequence_id = BigEndian::read_u64(&src[6..14]);
-        let layer_index = BigEndian::read_u16(&src[14..16]);
-        let hidden_dim = BigEndian::read_u32(&src[16..20]);
-        let dtype = src[20];
-        let payload_bytes = BigEndian::read_u32(&src[22..26]);
+        let session_id = BigEndian::read_u64(&src[6..14]);
+        let sequence_id = BigEndian::read_u64(&src[14..22]);
+        let token_position = BigEndian::read_u32(&src[22..26]);
+        let layer_index = BigEndian::read_u16(&src[26..28]);
+        let hidden_dim = BigEndian::read_u32(&src[28..32]);
+        let dtype = src[32];
+        let flags = src[33];
+        let payload_bytes = BigEndian::read_u32(&src[34..38]);
 
         Ok(Self {
             magic,
             version,
+            session_id,
             sequence_id,
+            token_position,
             layer_index,
             hidden_dim,
             dtype,
+            flags,
             payload_bytes,
         })
+    }
+
+    pub fn has_flag(&self, flag: u8) -> bool {
+        (self.flags & flag) != 0
     }
 }
 
@@ -98,10 +120,13 @@ pub struct ActivationFrame {
 
 impl ActivationFrame {
     pub fn new(
+        session_id: u64,
         sequence_id: u64,
+        token_position: u32,
         layer_index: u16,
         hidden_dim: u32,
         dtype: ActivationDtype,
+        flags: u8,
         payload: Bytes,
     ) -> Result<Self> {
         let expected_size = (hidden_dim as usize) * dtype.bytes_per_element();
@@ -115,10 +140,13 @@ impl ActivationFrame {
         let header = ActivationHeader {
             magic: ACTIVATION_MAGIC,
             version: PROTOCOL_VERSION,
+            session_id,
             sequence_id,
+            token_position,
             layer_index,
             hidden_dim,
             dtype: dtype as u8,
+            flags,
             payload_bytes: payload.len() as u32,
         };
 
@@ -126,9 +154,12 @@ impl ActivationFrame {
     }
 
     pub fn from_f32_slice(
+        session_id: u64,
         sequence_id: u64,
+        token_position: u32,
         layer_index: u16,
         activations: &[f32],
+        flags: u8,
     ) -> Self {
         let mut bytes = BytesMut::with_capacity(activations.len() * 4);
         for &val in activations {
@@ -141,10 +172,13 @@ impl ActivationFrame {
         let header = ActivationHeader {
             magic: ACTIVATION_MAGIC,
             version: PROTOCOL_VERSION,
+            session_id,
             sequence_id,
+            token_position,
             layer_index,
             hidden_dim: activations.len() as u32,
             dtype: ActivationDtype::Fp32 as u8,
+            flags,
             payload_bytes: bytes.len() as u32,
         };
 
@@ -171,7 +205,6 @@ impl ActivationFrame {
                 let mut result = Vec::with_capacity(count);
                 for i in 0..count {
                     let half_bits = BigEndian::read_u16(&self.payload[i * 2..(i + 1) * 2]);
-                    // Standard FP16 to FP32 conversion
                     let f = half_to_float(half_bits);
                     result.push(f);
                 }
@@ -228,9 +261,136 @@ impl ActivationFrame {
     }
 }
 
+/// Initial Handshake Request sent from Coordinator to Worker to verify matching tensor shapes and layer slices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandshakeRequest {
+    pub version: u16,
+    pub model_architecture: String,
+    pub hidden_dim: u32,
+    pub total_layers: u32,
+    pub worker_layer_start: u32,
+    pub worker_layer_end: u32,
+    pub checksum_prefix: String,
+}
+
+impl HandshakeRequest {
+    pub fn encode(&self) -> Bytes {
+        let arch_bytes = self.model_architecture.as_bytes();
+        let csum_bytes = self.checksum_prefix.as_bytes();
+        let mut buf = BytesMut::with_capacity(32 + arch_bytes.len() + csum_bytes.len());
+
+        buf.extend_from_slice(&HANDSHAKE_REQ_MAGIC);
+        buf.extend_from_slice(&self.version.to_be_bytes());
+        buf.extend_from_slice(&self.hidden_dim.to_be_bytes());
+        buf.extend_from_slice(&self.total_layers.to_be_bytes());
+        buf.extend_from_slice(&self.worker_layer_start.to_be_bytes());
+        buf.extend_from_slice(&self.worker_layer_end.to_be_bytes());
+
+        buf.extend_from_slice(&(arch_bytes.len() as u32).to_be_bytes());
+        buf.extend_from_slice(arch_bytes);
+
+        buf.extend_from_slice(&(csum_bytes.len() as u32).to_be_bytes());
+        buf.extend_from_slice(csum_bytes);
+
+        buf.freeze()
+    }
+
+    pub async fn decode_async<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Self> {
+        let mut magic = [0u8; 4];
+        reader.read_exact(&mut magic).await?;
+        ensure!(magic == HANDSHAKE_REQ_MAGIC, "Invalid handshake request magic: {:?}", magic);
+
+        let version = reader.read_u16().await?;
+        ensure!(version == PROTOCOL_VERSION, "Protocol version mismatch in handshake");
+
+        let hidden_dim = reader.read_u32().await?;
+        let total_layers = reader.read_u32().await?;
+        let worker_layer_start = reader.read_u32().await?;
+        let worker_layer_end = reader.read_u32().await?;
+
+        let arch_len = reader.read_u32().await? as usize;
+        let mut arch_buf = vec![0u8; arch_len];
+        reader.read_exact(&mut arch_buf).await?;
+        let model_architecture = String::from_utf8(arch_buf)?;
+
+        let csum_len = reader.read_u32().await? as usize;
+        let mut csum_buf = vec![0u8; csum_len];
+        reader.read_exact(&mut csum_buf).await?;
+        let checksum_prefix = String::from_utf8(csum_buf)?;
+
+        Ok(Self {
+            version,
+            model_architecture,
+            hidden_dim,
+            total_layers,
+            worker_layer_start,
+            worker_layer_end,
+            checksum_prefix,
+        })
+    }
+}
+
+/// Handshake Response returned by Worker node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandshakeResponse {
+    pub version: u16,
+    pub accepted: bool,
+    pub error_message: String,
+}
+
+impl HandshakeResponse {
+    pub fn ok() -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            accepted: true,
+            error_message: String::new(),
+        }
+    }
+
+    pub fn err<S: Into<String>>(msg: S) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            accepted: false,
+            error_message: msg.into(),
+        }
+    }
+
+    pub fn encode(&self) -> Bytes {
+        let msg_bytes = self.error_message.as_bytes();
+        let mut buf = BytesMut::with_capacity(16 + msg_bytes.len());
+        buf.extend_from_slice(&HANDSHAKE_RESP_MAGIC);
+        buf.extend_from_slice(&self.version.to_be_bytes());
+        buf.extend_from_slice(&[if self.accepted { 1 } else { 0 }]);
+        buf.extend_from_slice(&(msg_bytes.len() as u32).to_be_bytes());
+        buf.extend_from_slice(msg_bytes);
+        buf.freeze()
+    }
+
+    pub async fn decode_async<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Self> {
+        let mut magic = [0u8; 4];
+        reader.read_exact(&mut magic).await?;
+        ensure!(magic == HANDSHAKE_RESP_MAGIC, "Invalid handshake response magic: {:?}", magic);
+
+        let version = reader.read_u16().await?;
+        let accepted = reader.read_u8().await? != 0;
+        let msg_len = reader.read_u32().await? as usize;
+
+        let mut msg_buf = vec![0u8; msg_len];
+        reader.read_exact(&mut msg_buf).await?;
+        let error_message = String::from_utf8(msg_buf)?;
+
+        Ok(Self {
+            version,
+            accepted,
+            error_message,
+        })
+    }
+}
+
 /// Token response frame streamed from final stage worker back to coordinator.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenResponseFrame {
+    pub session_id: u64,
     pub sequence_id: u64,
     pub token_id: i32,
     pub is_eos: bool,
@@ -239,13 +399,14 @@ pub struct TokenResponseFrame {
 }
 
 impl TokenResponseFrame {
-    pub const HEADER_SIZE: usize = 4 + 2 + 8 + 4 + 1 + 4 + 4; // 27 bytes
+    pub const HEADER_SIZE: usize = 4 + 2 + 8 + 8 + 4 + 1 + 4 + 4; // 35 bytes
 
     pub fn encode(&self) -> Bytes {
         let text_bytes = self.token_text.as_bytes();
         let mut buf = BytesMut::with_capacity(Self::HEADER_SIZE + text_bytes.len());
         buf.extend_from_slice(&TOKEN_RESP_MAGIC);
         buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        buf.extend_from_slice(&self.session_id.to_be_bytes());
         buf.extend_from_slice(&self.sequence_id.to_be_bytes());
         buf.extend_from_slice(&self.token_id.to_be_bytes());
         buf.extend_from_slice(&[if self.is_eos { 1 } else { 0 }]);
@@ -263,6 +424,7 @@ impl TokenResponseFrame {
         let version = reader.read_u16().await?;
         ensure!(version == PROTOCOL_VERSION, "Unsupported token response protocol version: {}", version);
 
+        let session_id = reader.read_u64().await?;
         let sequence_id = reader.read_u64().await?;
         let token_id = reader.read_i32().await?;
         let is_eos = reader.read_u8().await? != 0;
@@ -275,6 +437,7 @@ impl TokenResponseFrame {
         let token_text = String::from_utf8(text_buf)?;
 
         Ok(Self {
+            session_id,
             sequence_id,
             token_id,
             is_eos,
@@ -294,7 +457,6 @@ fn half_to_float(h: u16) -> f32 {
         if mant == 0 {
             f32::from_bits(sign << 31)
         } else {
-            // Subnormal
             let mut m = mant;
             let mut e = 0;
             while (m & 0x0400) == 0 {
@@ -308,9 +470,9 @@ fn half_to_float(h: u16) -> f32 {
         }
     } else if exp == 31 {
         if mant == 0 {
-            f32::from_bits((sign << 31) | (0xff << 23)) // Inf
+            f32::from_bits((sign << 31) | (0xff << 23))
         } else {
-            f32::from_bits((sign << 31) | (0xff << 23) | (mant << 13)) // NaN
+            f32::from_bits((sign << 31) | (0xff << 23) | (mant << 13))
         }
     } else {
         let f_exp = (exp + (127 - 15)) << 23;
@@ -324,15 +486,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_activation_frame_binary_fidelity() {
+    fn test_activation_frame_binary_fidelity_v2() {
         let original_data = vec![0.1234f32, -45.67f32, 100.0f32, 0.0001f32];
-        let frame = ActivationFrame::from_f32_slice(42, 24, &original_data);
+        let frame = ActivationFrame::from_f32_slice(
+            999, // session_id
+            42,  // sequence_id
+            128, // token_position
+            24,  // layer_index
+            &original_data,
+            FLAG_CLEAR_KV | FLAG_IS_PROMPT,
+        );
 
+        assert_eq!(frame.header.session_id, 999);
         assert_eq!(frame.header.sequence_id, 42);
+        assert_eq!(frame.header.token_position, 128);
         assert_eq!(frame.header.layer_index, 24);
         assert_eq!(frame.header.hidden_dim, 4);
-        assert_eq!(frame.header.dtype, ActivationDtype::Fp32 as u8);
-        assert_eq!(frame.header.payload_bytes, 16);
+        assert_eq!(frame.header.flags, FLAG_CLEAR_KV | FLAG_IS_PROMPT);
+        assert!(frame.header.has_flag(FLAG_CLEAR_KV));
 
         let encoded = frame.encode();
         assert_eq!(encoded.len(), ActivationHeader::SIZE + 16);
@@ -346,8 +517,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_handshake_roundtrip() {
+        let req = HandshakeRequest {
+            version: PROTOCOL_VERSION,
+            model_architecture: "llama".to_string(),
+            hidden_dim: 4096,
+            total_layers: 48,
+            worker_layer_start: 25,
+            worker_layer_end: 47,
+            checksum_prefix: "a1b2c3d4".to_string(),
+        };
+
+        let encoded = req.encode();
+        let mut cursor = std::io::Cursor::new(encoded);
+        let decoded = HandshakeRequest::decode_async(&mut cursor).await.unwrap();
+        assert_eq!(decoded, req);
+
+        let resp = HandshakeResponse::ok();
+        let resp_enc = resp.encode();
+        let mut resp_cursor = std::io::Cursor::new(resp_enc);
+        let resp_dec = HandshakeResponse::decode_async(&mut resp_cursor).await.unwrap();
+        assert_eq!(resp_dec, resp);
+    }
+
+    #[tokio::test]
     async fn test_token_response_roundtrip() {
         let token_resp = TokenResponseFrame {
+            session_id: 12345,
             sequence_id: 101,
             token_id: 4892,
             is_eos: false,

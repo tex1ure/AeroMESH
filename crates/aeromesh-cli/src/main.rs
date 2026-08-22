@@ -8,7 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use aeromesh_core::tailscale::TailscaleInspector;
 use aeromesh_engine::{
     inspect_gguf_file, resolve_model_path, EngineSupervisor, GgufSliceLoader,
-    LayerSliceConfig, PipelineCoordinatorClient, PipelineWorkerService,
+    LayerSliceConfig, PipelineCoordinatorClient, PipelineHttpServer, PipelineWorkerService,
 };
 
 #[derive(Parser, Debug)]
@@ -78,7 +78,7 @@ enum Commands {
         #[arg(long)]
         model: Option<PathBuf>,
 
-        /// Layer range for this worker stage (e.g. "16..32" or "auto")
+        /// Layer range for this worker stage (e.g. "25..48" or "16..32" or "auto")
         #[arg(long)]
         layers: Option<String>,
 
@@ -87,31 +87,62 @@ enum Commands {
         cache: bool,
     },
 
-    /// Run the multi-node cluster coordinator
+    /// Run the multi-node cluster coordinator (CLI prompt or persistent HTTP server)
     Coordinator {
         /// Path to GGUF model file (e.g. models/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf)
         #[arg(long)]
         model: Option<PathBuf>,
 
-        /// Comma-separated list of remote RPC peer addresses (e.g. 100.122.125.95:50052)
+        /// Specific layer range for the coordinator (e.g. "0..24")
+        #[arg(long)]
+        layers: Option<String>,
+
+        /// Comma-separated list of remote worker peer addresses (e.g. 100.101.147.24:50052)
         #[arg(long)]
         peers: Option<String>,
 
-        /// Execution mode: "rpc" (CUDA RPC backend across cluster GPUs) or "pipeline" (P2P activation streaming)
-        #[arg(long, default_value = "rpc")]
+        /// Execution mode: "pipeline" (0.0 MB wire transfer) or "rpc" (CUDA RPC backend)
+        #[arg(long, default_value = "pipeline")]
         mode: String,
 
         /// Number of layers to offload to GPU (-1 for all, RPC mode)
         #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
         ngl: i32,
 
-        /// Prompt text to execute
+        /// Prompt text to execute (when not running in --serve mode)
         #[arg(long, default_value = "Write a short sentence about distributed GPU clusters.")]
         prompt: String,
 
-        /// Maximum tokens to generate (pipeline mode)
+        /// Maximum tokens to generate
         #[arg(long, default_value_t = 64)]
         max_tokens: usize,
+
+        /// Run as a persistent OpenAI-compatible HTTP API server on specified port (e.g. 8080)
+        #[arg(long)]
+        serve: Option<u16>,
+    },
+
+    /// Launch persistent OpenAI-compatible HTTP API server for Gradio & Web Clients (Zero-Weight Pipeline)
+    Serve {
+        /// Path to GGUF model file
+        #[arg(long)]
+        model: Option<PathBuf>,
+
+        /// Specific layer range for the coordinator (e.g. "0..24")
+        #[arg(long)]
+        layers: Option<String>,
+
+        /// Comma-separated list of remote worker peer addresses (e.g. 100.101.147.24:50052)
+        #[arg(long)]
+        peers: Option<String>,
+
+        /// Host to bind HTTP API server
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+
+        /// Port to bind HTTP API server
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
     },
 }
 
@@ -310,13 +341,52 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Serve {
+            model,
+            layers,
+            peers,
+            host,
+            port,
+        } => {
+            let model_path = resolve_model_path(model.as_ref())?;
+            let loader = GgufSliceLoader::open(&model_path)?;
+            let total_layers = loader.total_layers;
+
+            let custom_slice = if let Some(l_str) = layers {
+                Some(parse_layer_range(&l_str, total_layers)?)
+            } else {
+                None
+            };
+
+            let peer_list: Vec<String> = peers
+                .as_ref()
+                .map(|p| p.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default();
+
+            let worker_addrs: Vec<SocketAddr> = peer_list
+                .iter()
+                .filter_map(|p| p.parse::<SocketAddr>().ok())
+                .collect();
+
+            let model_name = model_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "aeromesh-model".to_string());
+
+            let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, custom_slice)?;
+            let server = PipelineHttpServer::new(client, model_name);
+            server.run(&host, port).await?;
+        }
+
         Commands::Coordinator {
             model,
+            layers,
             peers,
             mode,
             ngl,
             prompt,
             max_tokens,
+            serve,
         } => {
             println!("\n========================================================");
             println!("   AEROMESH DISTRIBUTED COORDINATOR INITIALIZING");
@@ -326,6 +396,15 @@ async fn main() -> Result<()> {
             info!("Step 1/3: Verifying model file...");
             let model_path = resolve_model_path(model.as_ref())?;
             let meta = inspect_gguf_file(&model_path)?;
+            let model_loader = GgufSliceLoader::open(&model_path)?;
+            let total_layers = model_loader.total_layers;
+
+            let custom_slice = if let Some(l_str) = layers {
+                Some(parse_layer_range(&l_str, total_layers)?)
+            } else {
+                None
+            };
+
             info!(
                 model = %model_path.display(),
                 tensors = meta.tensor_count,
@@ -383,13 +462,27 @@ async fn main() -> Result<()> {
             }
             println!("========================================================\n");
 
-            // Step 3: Launch inference execution
+            // Step 3: Check if --serve was requested
+            if let Some(serve_port) = serve {
+                let worker_sock_addrs: Vec<SocketAddr> = approved_peers.iter().map(|(_, _, addr)| *addr).collect();
+                let model_name = model_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "aeromesh-model".to_string());
+
+                let client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs, custom_slice)?;
+                let server = PipelineHttpServer::new(client, model_name);
+                server.run("0.0.0.0", serve_port).await?;
+                return Ok(());
+            }
+
+            // Step 4: CLI Single prompt execution
             if mode.eq_ignore_ascii_case("pipeline") && !approved_peers.is_empty() {
                 // Native Zero-Weight P2P Activation Streaming Mode
                 info!("Step 3/3: Dispatching via Native Zero-Weight Pipeline Engine...");
                 let worker_sock_addrs: Vec<SocketAddr> = approved_peers.iter().map(|(_, _, addr)| *addr).collect();
-                let mut client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs)?;
-                let (_output_text, perf_metrics) = client.run_pipeline_completion(&prompt, max_tokens).await?;
+                let mut client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs, custom_slice)?;
+                let (_output_text, perf_metrics) = client.run_pipeline_completion(&prompt, max_tokens, 1, true, None).await?;
 
                 println!("\n--- CLUSTER PERFORMANCE METRICS ---");
                 for metric in &perf_metrics {
