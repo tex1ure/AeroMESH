@@ -442,6 +442,7 @@ pub struct LlamaPipelineInstance {
     pub hidden_dim: usize,
     pub total_layers: usize,
     pub n_ctx: usize,
+    pub decode_buf: Vec<f32>,
 }
 
 unsafe impl Send for LlamaPipelineInstance {}
@@ -458,10 +459,9 @@ impl LlamaPipelineInstance {
         let path_str = model_path.to_str().context("Invalid model path string")?;
         let c_path = CString::new(path_str)?;
 
-        let assigned_layers = slice_config.layer_count() as i32;
         let mut mparams = unsafe { llama_model_default_params() };
         mparams.n_gpu_layers = if n_gpu_layers > 0 {
-            n_gpu_layers.min(assigned_layers)
+            n_gpu_layers
         } else {
             0
         };
@@ -480,12 +480,13 @@ impl LlamaPipelineInstance {
         let hidden_dim = unsafe { llama_model_n_embd(model) } as usize;
         let total_layers = unsafe { llama_model_n_layer(model) } as usize;
 
+        let physical_threads = std::thread::available_parallelism()
+            .map(|n| (n.get() / 2).max(1))
+            .unwrap_or(4) as i32;
+
         let mut cparams = unsafe { llama_context_default_params() };
         cparams.n_ctx = if n_ctx > 0 { n_ctx } else { 4096 };
-        cparams.n_batch = 512;
-        cparams.n_ubatch = 512;
         cparams.embeddings = true;
-        cparams.offload_kqv = true;
 
         let ctx = unsafe { llama_init_from_model(model, cparams) };
         if ctx.is_null() {
@@ -509,7 +510,9 @@ impl LlamaPipelineInstance {
             hidden_dim = hidden_dim,
             total_layers = total_layers,
             n_ctx = cparams.n_ctx,
-            "✅ Loaded native llama.cpp pipeline context instance with penalty sampler"
+            n_threads = physical_threads,
+            gpu_layers = mparams.n_gpu_layers,
+            "✅ Loaded native llama.cpp pipeline context instance with penalty sampler & full CUDA offload"
         );
 
         Ok(Self {
@@ -521,6 +524,7 @@ impl LlamaPipelineInstance {
             hidden_dim,
             total_layers,
             n_ctx: cparams.n_ctx as usize,
+            decode_buf: vec![0.0f32; hidden_dim],
         })
     }
 
@@ -630,8 +634,21 @@ impl LlamaPipelineInstance {
         tokens: &[LlamaToken],
         start_pos: u32,
     ) -> Result<Vec<f32>> {
+        let mut activations = Vec::with_capacity(tokens.len() * self.hidden_dim);
+        self.evaluate_tokens_to_activations_into(tokens, start_pos, &mut activations)?;
+        Ok(activations)
+    }
+
+    /// Stage 1 In-Place: Evaluate tokens directly into pre-allocated buffer without hot-loop heap allocations.
+    pub fn evaluate_tokens_to_activations_into(
+        &mut self,
+        tokens: &[LlamaToken],
+        start_pos: u32,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
         if tokens.is_empty() {
-            return Ok(Vec::new());
+            out.clear();
+            return Ok(());
         }
 
         let n_tokens = tokens.len() as i32;
@@ -655,18 +672,29 @@ impl LlamaPipelineInstance {
             bail!("llama_decode failed in Stage 1 forward pass (code {})", res);
         }
 
-        // Extract intermediate activation embeddings for all tokens in batch
-        let mut activations = Vec::with_capacity((n_tokens as usize) * self.hidden_dim);
+        // Explicit CUDA Stream Synchronization to ensure clean host memory reads
+        unsafe { llama_synchronize(self.ctx) };
+
+        let total_floats = (n_tokens as usize) * self.hidden_dim;
+        if out.len() != total_floats {
+            out.resize(total_floats, 0.0);
+        }
+
         for i in 0..n_tokens {
             let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
             if embd_ptr.is_null() {
                 bail!("Failed to get embeddings at index {} from llama_context", i);
             }
-            let slice = unsafe { std::slice::from_raw_parts(embd_ptr, self.hidden_dim) };
-            activations.extend_from_slice(slice);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    embd_ptr,
+                    out.as_mut_ptr().add((i as usize) * self.hidden_dim),
+                    self.hidden_dim,
+                );
+            }
         }
 
-        Ok(activations)
+        Ok(())
     }
 
     /// Stage 2: Inject incoming intermediate activation matrix [seq_len * hidden_dim], compute through downstream layers + LM Head.
@@ -711,6 +739,9 @@ impl LlamaPipelineInstance {
             bail!("llama_decode failed in Stage 2 activation forward pass (code {})", res);
         }
 
+        // Explicit CUDA Stream Synchronization
+        unsafe { llama_synchronize(self.ctx) };
+
         Ok(())
     }
 
@@ -727,10 +758,9 @@ impl LlamaPipelineInstance {
         }
         Ok(token_id)
     }
-}
 
-impl Drop for LlamaPipelineInstance {
-    fn drop(&mut self) {
+    /// Explicitly frees the llama context, model, and sampler from GPU/CPU memory.
+    pub fn close(&mut self) {
         unsafe {
             if !self.sampler.is_null() {
                 llama_sampler_free(self.sampler);
@@ -745,5 +775,11 @@ impl Drop for LlamaPipelineInstance {
                 self.model = std::ptr::null_mut();
             }
         }
+    }
+}
+
+impl Drop for LlamaPipelineInstance {
+    fn drop(&mut self) {
+        self.close();
     }
 }

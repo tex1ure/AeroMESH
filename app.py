@@ -85,6 +85,20 @@ async def get_models():
     }
 
 
+@app.post("/api/model/switch")
+@app.post("/v1/models/load")
+async def switch_model(payload: dict):
+    """
+    Proxies model switch requests directly to the AeroMesh coordinator.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{AEROMESH_ENDPOINT}/api/model/switch", json=payload)
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
 @app.get("/api/cluster/status")
 async def cluster_status():
     """

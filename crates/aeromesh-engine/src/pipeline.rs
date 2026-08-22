@@ -228,6 +228,44 @@ impl PipelineCoordinatorClient {
         })
     }
 
+    pub fn switch_model<P: AsRef<Path>>(&mut self, new_model_path: P) -> Result<()> {
+        let path_ref = new_model_path.as_ref();
+        if !path_ref.exists() {
+            bail!("Model file not found at {:?}", path_ref);
+        }
+
+        let loader = GgufSliceLoader::open(path_ref)?;
+        let total_layers = loader.total_layers;
+        let num_nodes = self.worker_addrs.len() + 1;
+        let splits = loader.compute_balanced_splits(num_nodes);
+        let local_slice = splits.first().cloned().unwrap_or(
+            LayerSliceConfig::new(0, total_layers.saturating_sub(1) / 2, total_layers)?,
+        );
+
+        let ngl = local_slice.layer_count() as i32;
+        // Explicitly release old model VRAM before loading new model
+        self.instance.close();
+
+        let instance = LlamaPipelineInstance::open(path_ref, local_slice.clone(), ngl, 4096)?;
+        let hidden_dim = instance.hidden_dim;
+
+        self.model_path = path_ref.to_path_buf();
+        self.local_slice = local_slice;
+        self.instance = instance;
+        self.hidden_dim = hidden_dim;
+        self.total_layers = total_layers;
+        self.active_stream = None;
+
+        info!(
+            model = %self.model_path.display(),
+            hidden_dim = self.hidden_dim,
+            total_layers = self.total_layers,
+            "🔄 Switched active model in coordinator"
+        );
+
+        Ok(())
+    }
+
     pub async fn ensure_connected(&mut self) -> Result<()> {
         if self.active_stream.is_some() || self.worker_addrs.is_empty() {
             return Ok(());
@@ -366,18 +404,16 @@ impl PipelineCoordinatorClient {
         total_tokens += 1;
         let mut current_token_id = first_token_id;
         let mut current_pos = prompt_len;
+        let mut decode_act_buf = vec![0.0f32; self.hidden_dim];
 
-        // Step 3: Autoregressive Decode Loop (S = 1)
+        // Step 3: Autoregressive Decode Loop (S = 1, Zero Heap Churn)
         if !is_first_eos {
             for seq_id in 1..max_tokens {
                 let decode_tokens = [current_token_id];
-                let decode_activations = match self.instance.evaluate_tokens_to_activations(&decode_tokens, current_pos) {
-                    Ok(act) => act,
-                    Err(e) => {
-                        self.active_stream = None;
-                        bail!("Stage 1 decode forward pass error: {}", e);
-                    }
-                };
+                if let Err(e) = self.instance.evaluate_tokens_to_activations_into(&decode_tokens, current_pos, &mut decode_act_buf) {
+                    self.active_stream = None;
+                    bail!("Stage 1 decode forward pass error: {}", e);
+                }
 
                 // Sample next token ID
                 let next_token_id = self.instance.sample_next_token(0.7, 0.9, seq_id as u32)?;
@@ -394,7 +430,7 @@ impl PipelineCoordinatorClient {
                         current_pos,
                         self.local_slice.layer_end as u16,
                         self.hidden_dim as u32,
-                        &decode_activations,
+                        &decode_act_buf,
                         0,
                     );
                     let frame_bytes = decode_frame.encode();

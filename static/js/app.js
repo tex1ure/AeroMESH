@@ -109,7 +109,8 @@
         const data = await resp.json();
         availableModels = data.data || [];
         if (availableModels.length > 0) {
-          activeModel = availableModels[0].id;
+          const activeItem = availableModels.find((m) => m.is_active);
+          activeModel = activeItem ? activeItem.id : (activeModel || availableModels[0].id);
           elements.activeModelName.textContent = activeModel;
         } else {
           elements.activeModelName.textContent = 'No Models Discovered';
@@ -135,11 +136,33 @@
       const item = document.createElement('div');
       item.className = `model-dropdown-item ${m.id === activeModel ? 'active' : ''}`;
       item.innerHTML = `<span>${m.id}</span> ${m.id === activeModel ? '<i data-lucide="check" style="width: 13px; height: 13px;"></i>' : ''}`;
-      item.onclick = () => {
+      item.onclick = async () => {
+        if (activeModel === m.id) {
+          elements.modelDropdownMenu.classList.remove('active');
+          return;
+        }
         activeModel = m.id;
-        elements.activeModelName.textContent = activeModel;
+        elements.activeModelName.textContent = `Loading ${activeModel}...`;
         elements.modelDropdownMenu.classList.remove('active');
         renderModelDropdown();
+
+        try {
+          const resp = await fetch('/api/model/switch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: m.id })
+          });
+          if (resp.ok) {
+            elements.activeModelName.textContent = activeModel;
+            await fetchClusterStatus();
+          } else {
+            console.error('Failed to switch model on coordinator');
+            elements.activeModelName.textContent = activeModel;
+          }
+        } catch (e) {
+          console.error('Error switching model:', e);
+          elements.activeModelName.textContent = activeModel;
+        }
       };
       elements.modelDropdownMenu.appendChild(item);
     });

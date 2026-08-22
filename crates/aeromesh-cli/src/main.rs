@@ -427,7 +427,8 @@ async fn main() -> Result<()> {
                     };
 
                     info!("🚀 Starting AeroMesh Zero-Weight Worker Node on port {}...", bind_port);
-                    let service = PipelineWorkerService::new(&model_path, slice_config, 99)?;
+                    let ngl = slice_config.layer_count() as i32;
+                    let service = PipelineWorkerService::new(&model_path, slice_config, ngl)?;
                     service.run_server("0.0.0.0", bind_port).await?;
                 }
                 "coordinator" => {
@@ -454,7 +455,8 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|| "aeromesh-model".to_string());
 
                     info!("🚀 Starting AeroMesh Zero-Weight Coordinator & API Server on port {}...", api_port);
-                    let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, Some(slice_config), 99)?;
+                    let ngl = slice_config.layer_count() as i32;
+                    let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, Some(slice_config), ngl)?;
                     let server = PipelineHttpServer::new(client, model_name);
                     server.run("0.0.0.0", api_port).await?;
                 }
@@ -473,10 +475,13 @@ async fn main() -> Result<()> {
                     println!("  Zero-Weight wire: 0.0 MB transferred (Local Loopback)");
                     println!("========================================================\n");
 
+                    let worker_ngl = worker_slice.layer_count() as i32;
+                    let coord_ngl = coord_slice.layer_count() as i32;
+
                     // Spawn worker in background task
                     let worker_model = model_path.clone();
                     tokio::spawn(async move {
-                        if let Ok(service) = PipelineWorkerService::new(&worker_model, worker_slice, 99) {
+                        if let Ok(service) = PipelineWorkerService::new(&worker_model, worker_slice, worker_ngl) {
                             let _ = service.run_server("127.0.0.1", worker_port).await;
                         }
                     });
@@ -490,7 +495,7 @@ async fn main() -> Result<()> {
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "aeromesh-model".to_string());
 
-                    let client = PipelineCoordinatorClient::new(&model_path, vec![worker_addr], Some(coord_slice), 99)?;
+                    let client = PipelineCoordinatorClient::new(&model_path, vec![worker_addr], Some(coord_slice), coord_ngl)?;
                     let server = PipelineHttpServer::new(client, model_name);
                     server.run("0.0.0.0", api_port).await?;
                 }

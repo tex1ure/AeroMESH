@@ -199,6 +199,7 @@ extern "C" {
 
     pub fn llama_get_memory(ctx: *const LlamaContext) -> *mut c_void;
     pub fn llama_memory_clear(mem: *mut c_void, data: bool);
+    pub fn llama_synchronize(ctx: *mut LlamaContext);
 }
 
 static INIT_BACKEND_ONCE: Once = Once::new();

@@ -233,6 +233,15 @@ if ($Role -eq "all") {
     Write-Host "  Coordinator: $coordUrl" -ForegroundColor Green
     Write-Host "  Worker:      127.0.0.1:50052 (Stage 2 Loopback)" -ForegroundColor Yellow
     Write-Host "  Web UI:      $uiUrl" -ForegroundColor Cyan
+
+    $modelFileObj = Get-Item $detectedModel -ErrorAction SilentlyContinue
+    if ($modelFileObj -and $modelFileObj.Length -gt 4.5GB) {
+        $sizeGb = [math]::Round($modelFileObj.Length / 1GB, 2)
+        Write-Host ""
+        Write-Host "  ⚠️  [Single-Host GPU VRAM Advisory]:" -ForegroundColor DarkYellow
+        Write-Host "     Model size is ${sizeGb} GB. Running dual nodes simultaneously on a single 8 GB GPU requires ~$([math]::Round($sizeGb * 2, 1)) GB VRAM." -ForegroundColor Yellow
+        Write-Host "     For peak 40+ tok/s speeds, deploy across 2 separate laptops or use models/test.gguf (3.3 GB) locally." -ForegroundColor Gray
+    }
     Write-Host ""
 
     $aeroExe = Get-AeroMeshExe

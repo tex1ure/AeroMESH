@@ -145,7 +145,7 @@ pub struct ChatCompletionChunk {
 
 pub struct AppState {
     pub coordinator: Mutex<PipelineCoordinatorClient>,
-    pub model_name: String,
+    pub model_name: Mutex<String>,
 }
 
 pub struct PipelineHttpServer {
@@ -157,7 +157,7 @@ impl PipelineHttpServer {
         Self {
             state: Arc::new(AppState {
                 coordinator: Mutex::new(coordinator),
-                model_name,
+                model_name: Mutex::new(model_name),
             }),
         }
     }
@@ -169,6 +169,8 @@ impl PipelineHttpServer {
             .route("/api/chat/stream", post(handle_chat_completions))
             .route("/health", get(handle_health))
             .route("/v1/models", get(handle_models))
+            .route("/api/model/switch", post(handle_switch_model))
+            .route("/v1/models/load", post(handle_switch_model))
             .route("/api/cluster/status", get(handle_cluster_status))
             .layer(CorsLayer::permissive())
             .with_state(self.state.clone());
@@ -187,17 +189,87 @@ async fn handle_health() -> &'static str {
     "OK"
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SwitchModelRequest {
+    pub model: String,
+}
+
+async fn handle_switch_model(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SwitchModelRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let model_req = req.model.trim().to_string();
+    let model_path = if std::path::Path::new(&model_req).exists() {
+        std::path::PathBuf::from(&model_req)
+    } else if std::path::Path::new("models").join(&model_req).exists() {
+        std::path::Path::new("models").join(&model_req)
+    } else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Model '{}' not found in models/ directory", model_req),
+        ));
+    };
+
+    info!(target = %model_path.display(), "Switching coordinator active model...");
+    let mut coord = state.coordinator.lock().await;
+    if let Err(e) = coord.switch_model(&model_path) {
+        error!(error = %e, "Failed to switch model");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to switch model: {}", e),
+        ));
+    }
+
+    let actual_name = model_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or(model_req);
+
+    let mut mn = state.model_name.lock().await;
+    *mn = actual_name.clone();
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "active_model": actual_name,
+        "total_layers": coord.total_layers,
+        "hidden_dim": coord.hidden_dim
+    })))
+}
+
 async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let mut model_list = Vec::new();
+    let current_model = state.model_name.lock().await.clone();
+
+    // Check models directory
+    if let Ok(entries) = std::fs::read_dir("models") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                model_list.push(serde_json::json!({
+                    "id": name,
+                    "object": "model",
+                    "created": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+                    "owned_by": "local_disk",
+                    "is_active": name == current_model
+                }));
+            }
+        }
+    }
+
+    if model_list.is_empty() {
+        model_list.push(serde_json::json!({
+            "id": current_model,
+            "object": "model",
+            "created": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            "owned_by": "aeromesh-cluster",
+            "is_active": true
+        }));
+    }
+
     Json(serde_json::json!({
         "object": "list",
-        "data": [
-            {
-                "id": state.model_name,
-                "object": "model",
-                "created": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-                "owned_by": "aeromesh-cluster"
-            }
-        ]
+        "data": model_list
     }))
 }
 
@@ -205,9 +277,11 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
     let client = state.coordinator.lock().await;
     let local_slice = &client.local_slice;
     let workers: Vec<String> = client.worker_addrs.iter().map(|w| w.to_string()).collect();
+    let current_model = state.model_name.lock().await.clone();
 
     Json(serde_json::json!({
         "cluster_status": "ONLINE",
+        "active_model": current_model,
         "coordinator": {
             "model": client.model_path.to_string_lossy(),
             "local_layers": format!("{}..={}", local_slice.layer_start, local_slice.layer_end),
@@ -241,6 +315,23 @@ async fn handle_chat_completions(
             .as_millis() as u64
     });
 
+    // Auto-switch model if request specifies a different model
+    if let Some(ref target_model) = req.model {
+        let current_mn = state.model_name.lock().await.clone();
+        if target_model != &current_mn && (target_model.ends_with(".gguf") || std::path::Path::new("models").join(target_model).exists()) {
+            let model_path = if std::path::Path::new(target_model).exists() {
+                std::path::PathBuf::from(target_model)
+            } else {
+                std::path::Path::new("models").join(target_model)
+            };
+            let mut coord = state.coordinator.lock().await;
+            if let Ok(()) = coord.switch_model(&model_path) {
+                let mut mn = state.model_name.lock().await;
+                *mn = target_model.clone();
+            }
+        }
+    }
+
     if is_streaming {
         let (token_tx, token_rx) = mpsc::channel::<Vec<u8>>(128);
         let state_clone = state.clone();
@@ -255,7 +346,7 @@ async fn handle_chat_completions(
             }
         });
 
-        let model_name = state.model_name.clone();
+        let model_name = state.model_name.lock().await.clone();
         let stream = ReceiverStream::new(token_rx);
 
         let mut accumulator = Utf8StreamAccumulator::new();
@@ -284,6 +375,7 @@ async fn handle_chat_completions(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
+        let current_model = state.model_name.lock().await.clone();
         let mut client = state.coordinator.lock().await;
         match client
             .generate_pipeline(&prompt, max_tokens, temp, top_p, session_id, None)
@@ -294,7 +386,7 @@ async fn handle_chat_completions(
                     id: format!("chatcmpl-{}", session_id),
                     object: "chat.completion".to_string(),
                     created: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-                    model: state.model_name.clone(),
+                    model: current_model,
                     choices: vec![ChatChoice {
                         index: 0,
                         message: ChatMessage {
