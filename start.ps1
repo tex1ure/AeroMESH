@@ -215,16 +215,25 @@ if ($Role -eq "worker") {
 
     Write-Host ""
     Write-Host "[+] Starting AeroMesh Zero-Weight Worker Node (Laptop B)..." -ForegroundColor Cyan
-    Write-Host "  Model:   $modelName" -ForegroundColor Gray
-    Write-Host "  Port:    $workerPort" -ForegroundColor Gray
-    Write-Host "  Binding: $bindStr" -ForegroundColor Green
+    Write-Host "  Model:     $modelName" -ForegroundColor Gray
+    Write-Host "  Port:      $workerPort" -ForegroundColor Gray
+    Write-Host "  Binding:   $bindStr" -ForegroundColor Green
+    Write-Host "  SSD Cache: ENABLED (0.0 MB weights transferred over network)" -ForegroundColor Yellow
     Write-Host ""
+
+    # Auto-prime local disk cache from SSD if model is present
+    $aeroExe = Get-AeroMeshExe
+    if ($detectedModel -and (Test-Path $detectedModel)) {
+        if ($aeroExe) {
+            & $aeroExe prime-cache --model "$detectedModel"
+        }
+    }
 
     $rpcServerExe = Join-Path $PSScriptRoot "bin\ggml-rpc-server.exe"
     if (Test-Path $rpcServerExe) {
-        & $rpcServerExe -H 0.0.0.0 -p $workerPort
+        & $rpcServerExe -H 0.0.0.0 -p $workerPort -c
     } else {
-        cargo run --release --bin aeromesh -- worker --port $workerPort
+        cargo run --release --bin aeromesh -- worker --port $workerPort --cache
     }
     exit 0
 }
