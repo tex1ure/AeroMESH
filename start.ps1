@@ -94,12 +94,34 @@ function Get-PythonCommand {
     return ""
 }
 
-function Get-TailscaleIPv4 {
+function Get-ClusterNodeIPs {
+    $ips = @()
+    # 1. Check ZeroTier
+    try {
+        $ztIPs = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -match "ZeroTier" } | Select-Object -ExpandProperty IPAddress
+        foreach ($zt in $ztIPs) {
+            $ips += "ZeroTier: $zt"
+        }
+    } catch {}
+
+    # 2. Check Tailscale
     if (Get-Command tailscale -ErrorAction SilentlyContinue) {
         try {
-            $ip = (tailscale ip -4 2>$null).Trim()
-            if ($ip) { return $ip }
+            $ts = (tailscale ip -4 2>$null).Trim()
+            if ($ts) { $ips += "Tailscale: $ts" }
         } catch {}
+    }
+
+    # 3. Check LAN (Wi-Fi / Ethernet)
+    try {
+        $lanIPs = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notmatch "^127\." -and $_.InterfaceAlias -notmatch "vEthernet|VirtualBox|VMware|Loopback|ZeroTier" } | Select-Object -ExpandProperty IPAddress
+        foreach ($lan in $lanIPs) {
+            $ips += "LAN: $lan"
+        }
+    } catch {}
+
+    if ($ips.Count -gt 0) {
+        return ($ips -join " | ")
     }
     return "127.0.0.1"
 }
@@ -115,11 +137,11 @@ if ($detectedModel) {
     $modelName = [System.IO.Path]::GetFileName($detectedModel)
 }
 
-$localTailscaleIP = Get-TailscaleIPv4
+$localNodeIPs = Get-ClusterNodeIPs
 
 Write-Host ""
-Write-Host "  [-] Local Tailscale IP:  " -NoNewline -ForegroundColor Gray
-Write-Host "$localTailscaleIP" -ForegroundColor Green
+Write-Host "  [-] Local Network IPs:   " -NoNewline -ForegroundColor Gray
+Write-Host "$localNodeIPs" -ForegroundColor Green
 Write-Host "  [-] Detected Model:      " -NoNewline -ForegroundColor Gray
 Write-Host "$modelName" -ForegroundColor Yellow
 Write-Host "  [-] Wire Weight Transfer:" -NoNewline -ForegroundColor Gray
@@ -291,11 +313,15 @@ if ($Role -eq "coordinator") {
     # Check for Peer IP if not supplied
     if (-not $Peers) {
         Write-Host ""
-        Write-Host "Enter the Worker Tailscale Address (example: 100.101.147.24:50052):" -ForegroundColor Yellow
+        Write-Host "Enter the Worker Address (ZeroTier / LAN / Tailscale IP:Port, example: 10.78.133.107:50052):" -ForegroundColor Yellow
         $enteredPeer = Read-Host "Worker Peer IP:Port"
         if ($enteredPeer) {
             $Peers = $enteredPeer.Trim()
         }
+    }
+
+    if ($Peers -and -not $Peers.Contains(":")) {
+        $Peers = "$($Peers.Trim()):50052"
     }
 
     $coordUrl = "http://127.0.0.1:" + $apiPort
