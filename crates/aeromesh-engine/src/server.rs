@@ -99,7 +99,7 @@ pub struct ChatCompletionRequest {
 }
 
 fn default_max_tokens() -> Option<usize> {
-    Some(256)
+    Some(2048)
 }
 
 #[derive(Debug, Serialize)]

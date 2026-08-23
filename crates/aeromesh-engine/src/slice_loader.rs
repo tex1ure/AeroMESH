@@ -487,6 +487,10 @@ impl LlamaPipelineInstance {
         let mut cparams = unsafe { llama_context_default_params() };
         cparams.n_ctx = if n_ctx > 0 { n_ctx } else { 4096 };
         cparams.embeddings = true;
+        cparams.n_threads = physical_threads;
+        cparams.n_threads_batch = physical_threads;
+        cparams.offload_kqv = true;
+        cparams.op_offload = true;
 
         let ctx = unsafe { llama_init_from_model(model, cparams) };
         if ctx.is_null() {

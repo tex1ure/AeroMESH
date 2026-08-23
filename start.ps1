@@ -94,13 +94,38 @@ function Get-PythonCommand {
     return ""
 }
 
-function Get-TailscaleIPv4 {
+function Get-ClusterMeshIPv4 {
+    # 1. Check ZeroTier CLI
+    if (Get-Command "zerotier-cli" -ErrorAction SilentlyContinue) {
+        try {
+            $ztInfo = (zerotier-cli listnetworks 2>$null)
+            $match = [regex]::Match($ztInfo, '(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/\d+')
+            if ($match.Success) {
+                return $match.Groups[1].Value
+            }
+        } catch {}
+    }
+
+    # 2. Check ZeroTier / Tailscale Network Adapters in Windows
+    $adapter = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "*ZeroTier*", "*Tailscale*" -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "169.254*" -and $_.IPAddress -notlike "127.*" } | Select-Object -First 1
+    if ($adapter -and $adapter.IPAddress) {
+        return $adapter.IPAddress
+    }
+
+    # 3. Check Tailscale CLI
     if (Get-Command tailscale -ErrorAction SilentlyContinue) {
         try {
             $ip = (tailscale ip -4 2>$null).Trim()
             if ($ip) { return $ip }
         } catch {}
     }
+
+    # 4. Fallback to Primary Active Non-Loopback IPv4
+    $localIp = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254*" } | Select-Object -First 1
+    if ($localIp -and $localIp.IPAddress) {
+        return $localIp.IPAddress
+    }
+
     return "127.0.0.1"
 }
 
@@ -115,15 +140,15 @@ if ($detectedModel) {
     $modelName = [System.IO.Path]::GetFileName($detectedModel)
 }
 
-$localTailscaleIP = Get-TailscaleIPv4
+$localMeshIP = Get-ClusterMeshIPv4
 
 Write-Host ""
-Write-Host "  [-] Local Tailscale IP:  " -NoNewline -ForegroundColor Gray
-Write-Host "$localTailscaleIP" -ForegroundColor Green
+Write-Host "  [-] Cluster Node IP:     " -NoNewline -ForegroundColor Gray
+Write-Host "$localMeshIP" -ForegroundColor Green
 Write-Host "  [-] Detected Model:      " -NoNewline -ForegroundColor Gray
 Write-Host "$modelName" -ForegroundColor Yellow
 Write-Host "  [-] Wire Weight Transfer:" -NoNewline -ForegroundColor Gray
-Write-Host " 0.0 MB (P2P Activation Streaming)" -ForegroundColor Cyan
+Write-Host " 0.0 MB (ZeroTier / P2P Activation Streaming)" -ForegroundColor Cyan
 Write-Host "------------------------------------------------------------------------" -ForegroundColor DarkGray
 
 if (-not $Role) {
