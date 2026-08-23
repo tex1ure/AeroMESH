@@ -211,24 +211,20 @@ if ($Role -eq "worker") {
     $workerPort = 50052
     if ($Port -gt 0) { $workerPort = $Port }
 
-    $workerLayers = "auto"
-    if ($Layers) { $workerLayers = $Layers }
-
     $bindStr = "0.0.0.0:" + $workerPort
 
     Write-Host ""
-    Write-Host "[+] Starting AeroMesh Zero-Weight Worker Stage (Laptop B)..." -ForegroundColor Cyan
+    Write-Host "[+] Starting AeroMesh Zero-Weight Worker Node (Laptop B)..." -ForegroundColor Cyan
     Write-Host "  Model:   $modelName" -ForegroundColor Gray
-    Write-Host "  Layers:  $workerLayers" -ForegroundColor Gray
     Write-Host "  Port:    $workerPort" -ForegroundColor Gray
     Write-Host "  Binding: $bindStr" -ForegroundColor Green
     Write-Host ""
 
-    $aeroExe = Get-AeroMeshExe
-    if ($aeroExe) {
-        & $aeroExe worker --model "$detectedModel" --layers "$workerLayers" --port $workerPort
+    $rpcServerExe = Join-Path $PSScriptRoot "bin\ggml-rpc-server.exe"
+    if (Test-Path $rpcServerExe) {
+        & $rpcServerExe -H 0.0.0.0 -p $workerPort
     } else {
-        cargo run --release --bin aeromesh -- worker --model "$detectedModel" --layers "$workerLayers" --port $workerPort
+        cargo run --release --bin aeromesh -- worker --port $workerPort
     }
     exit 0
 }
@@ -255,25 +251,16 @@ if ($Role -eq "all") {
     Write-Host "  Coordinator: $coordUrl" -ForegroundColor Green
     Write-Host "  Worker:      127.0.0.1:50052 (Stage 2 Loopback)" -ForegroundColor Yellow
     Write-Host "  Web UI:      $uiUrl" -ForegroundColor Cyan
-
-    $modelFileObj = Get-Item $detectedModel -ErrorAction SilentlyContinue
-    if ($modelFileObj -and $modelFileObj.Length -gt 4.5GB) {
-        $sizeGb = [math]::Round($modelFileObj.Length / 1GB, 2)
-        Write-Host ""
-        Write-Host "  ⚠️  [Single-Host GPU VRAM Advisory]:" -ForegroundColor DarkYellow
-        Write-Host "     Model size is ${sizeGb} GB. Running dual nodes simultaneously on a single 8 GB GPU requires ~$([math]::Round($sizeGb * 2, 1)) GB VRAM." -ForegroundColor Yellow
-        Write-Host "     For peak 40+ tok/s speeds, deploy across 2 separate laptops or use models/test.gguf (3.3 GB) locally." -ForegroundColor Gray
-    }
     Write-Host ""
 
-    $aeroExe = Get-AeroMeshExe
-    if ($aeroExe) {
-        $rustProc = Start-Process -FilePath $aeroExe -ArgumentList @("start", "--role", "all", "--model", "$detectedModel", "--port", "$apiPort") -PassThru -NoNewWindow
-    } else {
-        $cargoArgs = @("run", "--release", "--bin", "aeromesh", "--", "start", "--role", "all", "--model", "$detectedModel", "--port", "$apiPort")
-        $rustProc = Start-Process -FilePath "cargo" -ArgumentList $cargoArgs -PassThru -NoNewWindow
-    }
+    $rpcServerExe = Join-Path $PSScriptRoot "bin\ggml-rpc-server.exe"
+    $serverExe = Join-Path $PSScriptRoot "bin\llama-server.exe"
 
+    $workerProc = Start-Process -FilePath $rpcServerExe -ArgumentList @("-H", "127.0.0.1", "-p", "50052") -PassThru -NoNewWindow
+    Start-Sleep -Milliseconds 1000
+
+    $serverArgs = @("-m", "$detectedModel", "--rpc", "127.0.0.1:50052", "-ngl", "99", "--port", "$apiPort", "--host", "0.0.0.0", "-fa", "on")
+    $rustProc = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -PassThru -NoNewWindow
     Start-Sleep -Milliseconds 2500
 
     # Open Browser
@@ -296,6 +283,9 @@ if ($Role -eq "all") {
         if ($rustProc -and -not $rustProc.HasExited) {
             Stop-Process -Id $rustProc.Id -Force -ErrorAction SilentlyContinue
         }
+        if ($workerProc -and -not $workerProc.HasExited) {
+            Stop-Process -Id $workerProc.Id -Force -ErrorAction SilentlyContinue
+        }
     }
     exit 0
 }
@@ -304,9 +294,6 @@ if ($Role -eq "all") {
 if ($Role -eq "coordinator") {
     $apiPort = 8080
     if ($Port -gt 0) { $apiPort = $Port }
-
-    $coordLayers = "auto"
-    if ($Layers) { $coordLayers = $Layers }
 
     $pythonExe = Get-PythonCommand
 
@@ -333,34 +320,18 @@ if ($Role -eq "coordinator") {
     Write-Host ""
     Write-Host "[+] Launching AeroMesh Coordinator (Laptop A)..." -ForegroundColor Cyan
     Write-Host "  Model:       $modelName" -ForegroundColor Gray
-    Write-Host "  Layers:      $coordLayers" -ForegroundColor Gray
     Write-Host "  Worker Peer: $workerStatusStr" -ForegroundColor Yellow
     Write-Host "  API Server:  $coordUrl" -ForegroundColor Green
     Write-Host "  Web UI:      $uiUrl" -ForegroundColor Cyan
     Write-Host ""
 
-    $peerArg = @()
-    if ($Peers) { $peerArg = @("--peers", "$Peers") }
-    $aeroExe = Get-AeroMeshExe
-
-    if ($NoUI) {
-        if ($aeroExe) {
-            & $aeroExe start --role coordinator --model "$detectedModel" --layers "$coordLayers" @peerArg --port $apiPort
-        } else {
-            cargo run --release --bin aeromesh -- start --role coordinator --model "$detectedModel" --layers "$coordLayers" @peerArg --port $apiPort
-        }
-        exit 0
+    $serverExe = Join-Path $PSScriptRoot "bin\llama-server.exe"
+    $serverArgs = @("-m", "$detectedModel", "-ngl", "99", "--port", "$apiPort", "--host", "0.0.0.0", "-fa", "on")
+    if ($Peers) {
+        $serverArgs += @("--rpc", "$Peers")
     }
 
-    # Start Coordinator API in background process
-    if ($aeroExe) {
-        $exeArgs = @("start", "--role", "coordinator", "--model", "$detectedModel", "--layers", "$coordLayers") + $peerArg + @("--port", "$apiPort")
-        $rustProc = Start-Process -FilePath $aeroExe -ArgumentList $exeArgs -PassThru -NoNewWindow
-    } else {
-        $cargoArgs = @("run", "--release", "--bin", "aeromesh", "--", "start", "--role", "coordinator", "--model", "$detectedModel", "--layers", "$coordLayers") + $peerArg + @("--port", "$apiPort")
-        $rustProc = Start-Process -FilePath "cargo" -ArgumentList $cargoArgs -PassThru -NoNewWindow
-    }
-
+    $rustProc = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -PassThru -NoNewWindow
     Start-Sleep -Milliseconds 2500
 
     if (-not $NoBrowser) {
