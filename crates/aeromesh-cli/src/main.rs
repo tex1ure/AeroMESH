@@ -420,8 +420,12 @@ async fn main() -> Result<()> {
             match role_clean.as_str() {
                 "worker" => {
                     let bind_port = port.unwrap_or(50052);
-                    let slice_config = if let Some(l_str) = layers {
-                        parse_layer_range(&l_str, total_layers)?
+                    let slice_config = if let Some(ref l_str) = layers {
+                        if l_str.eq_ignore_ascii_case("auto") {
+                            LayerSliceConfig::new(mid, total_layers.saturating_sub(1), total_layers)?
+                        } else {
+                            parse_layer_range(l_str, total_layers)?
+                        }
                     } else {
                         LayerSliceConfig::new(mid, total_layers.saturating_sub(1), total_layers)?
                     };
@@ -433,12 +437,6 @@ async fn main() -> Result<()> {
                 }
                 "coordinator" => {
                     let api_port = port.unwrap_or(8080);
-                    let slice_config = if let Some(l_str) = layers {
-                        parse_layer_range(&l_str, total_layers)?
-                    } else {
-                        LayerSliceConfig::new(0, mid.saturating_sub(1), total_layers)?
-                    };
-
                     let peer_list: Vec<String> = peers
                         .as_ref()
                         .map(|p| p.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
@@ -448,6 +446,24 @@ async fn main() -> Result<()> {
                         .iter()
                         .filter_map(|p| p.parse::<SocketAddr>().ok())
                         .collect();
+
+                    let slice_config = if let Some(ref l_str) = layers {
+                        if l_str.eq_ignore_ascii_case("auto") {
+                            if worker_addrs.is_empty() {
+                                LayerSliceConfig::new(0, total_layers.saturating_sub(1), total_layers)?
+                            } else {
+                                LayerSliceConfig::new(0, mid.saturating_sub(1), total_layers)?
+                            }
+                        } else {
+                            parse_layer_range(l_str, total_layers)?
+                        }
+                    } else {
+                        if worker_addrs.is_empty() {
+                            LayerSliceConfig::new(0, total_layers.saturating_sub(1), total_layers)?
+                        } else {
+                            LayerSliceConfig::new(0, mid.saturating_sub(1), total_layers)?
+                        }
+                    };
 
                     let model_name = model_path
                         .file_name()
@@ -657,8 +673,7 @@ async fn main() -> Result<()> {
 fn parse_layer_range(s: &str, total_layers: usize) -> Result<LayerSliceConfig> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("auto") {
-        let mid = total_layers / 2;
-        return LayerSliceConfig::new(mid, total_layers.saturating_sub(1), total_layers);
+        return LayerSliceConfig::new(0, total_layers.saturating_sub(1), total_layers);
     }
 
     if let Some((start_str, end_str)) = s.split_once("..=") {
