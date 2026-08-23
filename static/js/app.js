@@ -479,7 +479,7 @@
     } else {
       const avatar = document.createElement('div');
       avatar.className = 'message-avatar assistant-avatar';
-      avatar.innerHTML = '<i data-lucide="zap" style="width: 16px; height: 16px;"></i>';
+      avatar.innerHTML = '<img src="/static/assets/logo.svg" alt="AeroMESH" style="width: 20px; height: 20px; display: block;">';
 
       const card = document.createElement('div');
       card.className = 'assistant-card';
@@ -572,7 +572,7 @@
 
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar assistant-avatar';
-    avatar.innerHTML = '<i data-lucide="zap" style="width: 16px; height: 16px;"></i>';
+    avatar.innerHTML = '<img src="/static/assets/logo.svg" alt="AeroMESH" style="width: 20px; height: 20px; display: block;">';
 
     const card = document.createElement('div');
     card.className = 'assistant-card';
