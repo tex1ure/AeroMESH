@@ -811,12 +811,16 @@
       content: m.content
     }));
 
+    const numericSessionId = currentChatId
+      ? Math.abs(currentChatId.split('').reduce((acc, char) => ((acc << 5) - acc + char.charCodeAt(0)) | 0, 0)) || 1001
+      : 1001;
+
     const payload = {
       model: activeModel !== 'Loading...' && activeModel !== 'Coordinator Offline' ? activeModel : undefined,
       messages: formattedMessages,
       max_tokens: maxTokens,
       stream: true,
-      session_id: Date.now()
+      session_id: numericSessionId
     };
 
     activeAbortController = new AbortController();

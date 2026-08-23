@@ -67,8 +67,8 @@ function Find-ModelPath {
     }
     
     # Check for primary DeepSeek model first if present
-    if (Test-Path "models\DS.gguf") {
-        return "models/DS.gguf"
+    if (Test-Path "models\test.gguf") {
+        return "models/test.gguf"
     }
 
     # Dynamically scan models/ or current directory for any other .gguf files

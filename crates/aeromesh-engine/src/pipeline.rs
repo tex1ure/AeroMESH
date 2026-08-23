@@ -95,7 +95,53 @@ async fn handle_coordinator_connection(
         "Received HandshakeRequest from Coordinator"
     );
 
-    let is_last_stage = slice_config.is_last_stage;
+    let mut inst = instance.lock().await;
+    let mut current_slice = slice_config.clone();
+
+    // Auto-sync worker model if architecture or dimensions differ from coordinator
+    if inst.hidden_dim != req.hidden_dim as usize || inst.total_layers != req.total_layers as usize {
+        info!(
+            worker_hidden_dim = inst.hidden_dim,
+            coord_hidden_dim = req.hidden_dim,
+            worker_layers = inst.total_layers,
+            coord_layers = req.total_layers,
+            "🔄 Model mismatch detected between Coordinator and Worker. Auto-syncing Worker model..."
+        );
+
+        let mut matched = false;
+        let models_dir = Path::new("models");
+        if let Ok(entries) = std::fs::read_dir(models_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) == Some("gguf") {
+                    if let Ok(loader) = GgufSliceLoader::open(&p) {
+                        if loader.total_layers == req.total_layers as usize && loader.hidden_dim == req.hidden_dim {
+                            let new_slice = LayerSliceConfig::new(
+                                req.worker_layer_start as usize,
+                                req.worker_layer_end as usize,
+                                req.total_layers as usize,
+                            )?;
+                            let file_size_mb = std::fs::metadata(&p).map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
+                            let ngl = if file_size_mb <= 4500 { 999 } else { new_slice.layer_count() as i32 };
+
+                            inst.close();
+                            *inst = LlamaPipelineInstance::open(&p, new_slice.clone(), ngl, 4096)?;
+                            current_slice = new_slice;
+                            matched = true;
+                            info!(model = %p.display(), "✅ Worker auto-switched model to match Coordinator");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if !matched {
+            bail!("Worker could not find a local GGUF model matching hidden_dim={} total_layers={}", req.hidden_dim, req.total_layers);
+        }
+    }
+    drop(inst);
+
+    let is_last_stage = current_slice.is_last_stage;
     let resp = HandshakeResponse::ok();
     socket.write_all(&resp.encode()).await?;
     socket.flush().await?;
