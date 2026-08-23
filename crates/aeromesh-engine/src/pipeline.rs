@@ -95,12 +95,16 @@ impl PipelineWorkerService {
                                     }
 
                                     let eval_time_ms = start_time.elapsed().as_secs_f32() * 1000.0;
+                                    let next_token_id = inst.sample_next_token(0.7, 0.9, frame.header.sequence_id as u32).unwrap_or(0);
+                                    let is_eos = inst.is_eog(next_token_id);
+                                    let piece_str = inst.token_to_piece_str(next_token_id);
+
                                     let resp = TokenResponseFrame {
                                         session_id: frame.header.session_id,
                                         sequence_id: frame.header.sequence_id,
-                                        token_id: 0,
-                                        is_eos: false,
-                                        token_text: String::new(),
+                                        token_id: next_token_id as i32,
+                                        is_eos,
+                                        token_text: piece_str,
                                         eval_time_ms,
                                     };
 
@@ -246,12 +250,16 @@ async fn handle_coordinator_connection(
         let eval_time_ms = eval_duration.as_secs_f32() * 1000.0;
 
         if is_last_stage {
+            let next_token_id = inst.sample_next_token(0.7, 0.9, seq_id as u32)?;
+            let is_eos = inst.is_eog(next_token_id);
+            let piece_str = inst.token_to_piece_str(next_token_id);
+
             let resp = TokenResponseFrame {
                 session_id: active_session_id,
                 sequence_id: seq_id,
-                token_id: 0,
-                is_eos: false,
-                token_text: String::new(),
+                token_id: next_token_id as i32,
+                is_eos,
+                token_text: piece_str,
                 eval_time_ms,
             };
 
@@ -456,13 +464,8 @@ impl PipelineCoordinatorClient {
         let prefill_activations = self.instance.evaluate_tokens_to_activations(&prompt_tokens, 0)?;
         let prefill_time = prefill_start.elapsed();
 
-        let first_token_id = self.instance.sample_next_token(0.7, 0.9, 0)?;
-        let is_first_eos = self.instance.is_eog(first_token_id);
-        let piece_bytes = self.instance.token_to_piece(first_token_id).unwrap_or_default();
-        let first_token_text = String::from_utf8_lossy(&piece_bytes).to_string();
-
         // Stream Quantized Prefill Activation Frame [S * hidden_dim]
-        if let Some(ref mut transport) = self.transport {
+        let (first_token_id, is_first_eos, piece_bytes, first_token_text) = if let Some(ref mut transport) = self.transport {
             let prefill_frame = ActivationFrame::from_f32_matrix_quantized(
                 session_id,
                 0,
@@ -474,10 +477,24 @@ impl PipelineCoordinatorClient {
                 self.target_dtype,
                 FLAG_IS_PROMPT | FLAG_CLEAR_KV,
             );
-            if transport.send_activation(&prefill_frame).await.is_ok() {
-                let _ = transport.recv_response().await;
-            }
-        }
+            transport.send_activation(&prefill_frame).await?;
+            let resp = transport.recv_response().await?;
+            let tid = resp.token_id as i32;
+            let eos = resp.is_eos || self.instance.is_eog(tid);
+            let p_bytes = self.instance.token_to_piece(tid).unwrap_or_default();
+            let p_text = if !resp.token_text.is_empty() {
+                resp.token_text
+            } else {
+                String::from_utf8_lossy(&p_bytes).to_string()
+            };
+            (tid, eos, p_bytes, p_text)
+        } else {
+            let tid = self.instance.sample_next_token(0.7, 0.9, 0)?;
+            let eos = self.instance.is_eog(tid);
+            let p_bytes = self.instance.token_to_piece(tid).unwrap_or_default();
+            let p_text = String::from_utf8_lossy(&p_bytes).to_string();
+            (tid, eos, p_bytes, p_text)
+        };
 
         print!("{}", first_token_text);
         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -504,10 +521,10 @@ impl PipelineCoordinatorClient {
                     bail!("Stage 1 decode forward pass error: {}", e);
                 }
 
-                // Sample next token ID
-                let next_token_id = self.instance.sample_next_token(0.7, 0.9, seq_id as u32)?;
-                let token_piece_bytes = self.instance.token_to_piece(next_token_id).unwrap_or_default();
-                let token_text = String::from_utf8_lossy(&token_piece_bytes).to_string();
+                let next_token_id: i32;
+                let is_eos: bool;
+                let token_piece_bytes: Vec<u8>;
+                let token_text: String;
 
                 // Stream single-token quantized activation frame [1 * hidden_dim: 5.12 KB]
                 if let Some(ref mut transport) = self.transport {
@@ -522,16 +539,31 @@ impl PipelineCoordinatorClient {
                         self.target_dtype,
                         0,
                     );
-                    if transport.send_activation(&decode_frame).await.is_ok() {
-                        let _ = transport.recv_response().await;
-                    }
+                    transport.send_activation(&decode_frame).await?;
+                    let resp = transport.recv_response().await?;
+                    next_token_id = resp.token_id as i32;
+                    token_piece_bytes = self.instance.token_to_piece(next_token_id).unwrap_or_default();
+                    token_text = if !resp.token_text.is_empty() {
+                        resp.token_text
+                    } else {
+                        String::from_utf8_lossy(&token_piece_bytes).to_string()
+                    };
+                    is_eos = resp.is_eos
+                        || self.instance.is_eog(next_token_id)
+                        || token_text.contains("<|im_end|>")
+                        || token_text.contains("<|endoftext|>")
+                        || token_text.contains("<|eot_id|>")
+                        || token_text.contains("</s>");
+                } else {
+                    next_token_id = self.instance.sample_next_token(0.7, 0.9, seq_id as u32)?;
+                    token_piece_bytes = self.instance.token_to_piece(next_token_id).unwrap_or_default();
+                    token_text = String::from_utf8_lossy(&token_piece_bytes).to_string();
+                    is_eos = self.instance.is_eog(next_token_id)
+                        || token_text.contains("<|im_end|>")
+                        || token_text.contains("<|endoftext|>")
+                        || token_text.contains("<|eot_id|>")
+                        || token_text.contains("</s>");
                 }
-
-                let is_eos = self.instance.is_eog(next_token_id)
-                    || token_text.contains("<|im_end|>")
-                    || token_text.contains("<|endoftext|>")
-                    || token_text.contains("<|eot_id|>")
-                    || token_text.contains("</s>");
 
                 if is_eos {
                     break;
