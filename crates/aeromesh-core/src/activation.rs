@@ -18,7 +18,7 @@ pub const FLAG_EOS_SIGNAL: u8 = 0x04;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationDtype {
-    Fp32 = 0,
+    RawF32 = 0,
     Fp16 = 1,
     Bf16 = 2,
     Int8PerRow = 3,
@@ -28,7 +28,7 @@ pub enum ActivationDtype {
 impl ActivationDtype {
     pub fn from_u8(val: u8) -> Result<Self> {
         match val {
-            0 => Ok(Self::Fp32),
+            0 => Ok(Self::RawF32),
             1 => Ok(Self::Fp16),
             2 => Ok(Self::Bf16),
             3 => Ok(Self::Int8PerRow),
@@ -39,7 +39,7 @@ impl ActivationDtype {
 
     pub fn bytes_per_element(&self) -> usize {
         match self {
-            Self::Fp32 => 4,
+            Self::RawF32 => 4,
             Self::Fp16 | Self::Bf16 => 2,
             Self::Int8PerRow | Self::Fp8E4M3 => 1,
         }
@@ -47,7 +47,7 @@ impl ActivationDtype {
 }
 
 /// Binary frame header for high-speed P2P activation vector streaming with session & KV tracking.
-/// Fixed size: 42 bytes (endian-safe BigEndian serialization).
+/// Fixed size: 42 bytes (explicit BigEndian serialization, independent of compiler padding).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActivationHeader {
     pub magic: [u8; 4],          // b"AERO"
@@ -57,8 +57,8 @@ pub struct ActivationHeader {
     pub sequence_length: u32,   // S: Number of tokens in sequence (1 for decode, >1 for prefill)
     pub token_position: u32,    // Context position offset in KV-cache (pos)
     pub layer_index: u16,       // Boundary layer index (e.g. 24)
-    pub hidden_dim: u32,        // Hidden dimension (e.g. 4096 / 5120)
-    pub dtype: u8,              // 0 = FP32, 1 = FP16, 2 = BF16, 3 = INT8-Row, 4 = FP8-E4M3
+    pub hidden_dim: u32,        // Hidden dimension (e.g. 1536 / 4096 / 5120)
+    pub dtype: u8,              // 0 = RawF32, 1 = FP16, 2 = BF16, 3 = INT8-Row, 4 = FP8-E4M3
     pub flags: u8,              // Bitmask: FLAG_CLEAR_KV (0x01), FLAG_IS_PROMPT (0x02), etc.
     pub payload_bytes: u32,     // Length of payload following header
 }
@@ -82,7 +82,7 @@ impl ActivationHeader {
     }
 
     pub fn decode(src: &[u8]) -> Result<Self> {
-        ensure!(src.len() >= Self::SIZE, "Buffer too short for ActivationHeader");
+        ensure!(src.len() >= Self::SIZE, "Buffer too short for ActivationHeader (got {}, expected {})", src.len(), Self::SIZE);
         let mut magic = [0u8; 4];
         magic.copy_from_slice(&src[0..4]);
         ensure!(magic == ACTIVATION_MAGIC, "Invalid activation magic: {:?}", magic);
@@ -158,6 +158,32 @@ impl ActivationFrame {
         Ok(Self { header, payload })
     }
 
+    pub fn from_f32_matrix(
+        session_id: u64,
+        sequence_id: u64,
+        sequence_length: u32,
+        token_position: u32,
+        layer_index: u16,
+        hidden_dim: u32,
+        matrix: &[f32],
+    ) -> Self {
+        Self::from_f32_matrix_quantized(
+            session_id,
+            sequence_id,
+            sequence_length,
+            token_position,
+            layer_index,
+            hidden_dim,
+            matrix,
+            ActivationDtype::Int8PerRow,
+            0,
+        )
+    }
+
+    pub fn dequantize(&self, out: &mut [f32]) -> Result<()> {
+        self.dequantize_into(out)
+    }
+
     pub fn from_f32_matrix_quantized(
         session_id: u64,
         sequence_id: u64,
@@ -171,11 +197,11 @@ impl ActivationFrame {
     ) -> Self {
         let seq_len = sequence_length as usize;
         let d = hidden_dim as usize;
-        assert_eq!(matrix.len(), seq_len * d, "Matrix size mismatch");
+        assert_eq!(matrix.len(), seq_len * d, "Matrix size mismatch: expected {}, got {}", seq_len * d, matrix.len());
 
         match dtype {
             ActivationDtype::Int8PerRow => {
-                // Per-row layout: For each token s in [0, S): [scale_s: f32 (4B)][quant_data: i8 * d]
+                // Per-row layout: For each token s in [0, S): [scale_s: f32 (4B, LE)][quant_data: i8 * d]
                 let row_bytes = 4 + d;
                 let mut payload = BytesMut::with_capacity(seq_len * row_bytes);
 
@@ -184,17 +210,26 @@ impl ActivationFrame {
                     let mut max_abs = 0.0f32;
                     for &val in row {
                         let abs = val.abs();
-                        if abs > max_abs {
+                        if abs > max_abs && !abs.is_nan() {
                             max_abs = abs;
                         }
                     }
 
-                    let scale = max_abs / 127.0 + 1e-8;
+                    // Strict protection against underflow and divide-by-zero
+                    let scale = if max_abs > 1e-12 {
+                        max_abs / 127.0
+                    } else {
+                        1.0
+                    };
                     let inv_scale = 1.0 / scale;
 
                     payload.extend_from_slice(&scale.to_le_bytes());
                     for &val in row {
-                        let q = (val * inv_scale).round().clamp(-127.0, 127.0) as i8;
+                        let q = if max_abs > 1e-12 {
+                            (val * inv_scale).round().clamp(-127.0, 127.0) as i8
+                        } else {
+                            0i8
+                        };
                         payload.extend_from_slice(&(q as u8).to_le_bytes());
                     }
                 }
@@ -240,7 +275,7 @@ impl ActivationFrame {
                 Self { header, payload }
             }
             _ => {
-                // Default uncompressed FP32
+                // Raw uncompressed FP32 (endian-safe LittleEndian serialization)
                 let mut payload = BytesMut::with_capacity(matrix.len() * 4);
                 for &val in matrix {
                     payload.extend_from_slice(&val.to_le_bytes());
@@ -255,7 +290,7 @@ impl ActivationFrame {
                     token_position,
                     layer_index,
                     hidden_dim,
-                    dtype: ActivationDtype::Fp32 as u8,
+                    dtype: ActivationDtype::RawF32 as u8,
                     flags,
                     payload_bytes: payload.len() as u32,
                 };
@@ -268,12 +303,12 @@ impl ActivationFrame {
         let seq_len = self.header.sequence_length as usize;
         let d = self.header.hidden_dim as usize;
         let total_elements = seq_len * d;
-        ensure!(out.len() >= total_elements, "Output buffer too small for dequantization");
+        ensure!(out.len() >= total_elements, "Output buffer too small for dequantization (got {}, required {})", out.len(), total_elements);
 
         match ActivationDtype::from_u8(self.header.dtype)? {
             ActivationDtype::Int8PerRow => {
                 let row_bytes = 4 + d;
-                ensure!(self.payload.len() == seq_len * row_bytes, "Invalid INT8-per-row payload length");
+                ensure!(self.payload.len() == seq_len * row_bytes, "Invalid INT8-per-row payload length (got {}, expected {})", self.payload.len(), seq_len * row_bytes);
 
                 let mut offset = 0;
                 for s in 0..seq_len {
@@ -296,7 +331,7 @@ impl ActivationFrame {
                     out[i] = fp8_e4m3_to_f32(self.payload[i]);
                 }
             }
-            ActivationDtype::Fp32 => {
+            ActivationDtype::RawF32 => {
                 ensure!(self.payload.len() == total_elements * 4, "Invalid FP32 payload length");
                 for i in 0..total_elements {
                     let chunk: [u8; 4] = self.payload[i * 4..(i + 1) * 4].try_into()?;
@@ -369,7 +404,34 @@ impl ActivationFrame {
 }
 
 // ---------------------------------------------------------------------------
-// FP8 (E4M3) Conversion & Lookup Table
+// Tensor Diagnostic Metrics (L2 Norm, Mean, Head Preview)
+// ---------------------------------------------------------------------------
+
+pub fn compute_l2_norm(slice: &[f32]) -> f32 {
+    let mut sum_sq = 0.0f64;
+    for &v in slice {
+        sum_sq += (v as f64) * (v as f64);
+    }
+    sum_sq.sqrt() as f32
+}
+
+pub fn compute_mean(slice: &[f32]) -> f32 {
+    if slice.is_empty() {
+        return 0.0;
+    }
+    let mut sum = 0.0f64;
+    for &v in slice {
+        sum += v as f64;
+    }
+    (sum / (slice.len() as f64)) as f32
+}
+
+pub fn get_head_preview(slice: &[f32], n: usize) -> Vec<f32> {
+    slice.iter().take(n).copied().collect()
+}
+
+// ---------------------------------------------------------------------------
+// FP8 (E4M3) Conversion
 // ---------------------------------------------------------------------------
 
 pub fn f32_to_fp8_e4m3(val: f32) -> u8 {
@@ -387,7 +449,6 @@ pub fn f32_to_fp8_e4m3(val: f32) -> u8 {
 
     let target_exp = exp + 7;
     if target_exp <= 0 {
-        // Subnormal
         let shift = 1 - target_exp;
         if shift > 3 {
             return (sign << 7) as u8;
@@ -398,7 +459,7 @@ pub fn f32_to_fp8_e4m3(val: f32) -> u8 {
     }
 
     if target_exp >= 15 {
-        return ((sign << 7) | 0x7E) as u8; // Clamp to max normal
+        return ((sign << 7) | 0x7E) as u8;
     }
 
     let q_exp = (target_exp as u32) & 0x0F;
@@ -420,7 +481,6 @@ pub fn fp8_e4m3_to_f32(byte: u8) -> f32 {
     }
 
     if exp == 0 {
-        // Subnormal
         let val = (mant as f32) / 8.0 * (2.0f32.powi(-6));
         return if sign == 1 { -val } else { val };
     }
@@ -699,6 +759,22 @@ fn half_to_float(h: u16) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_raw_f32_fidelity() {
+        let hidden_dim = 1536;
+        let seq_len = 2;
+        let data = vec![1.2345f32; seq_len * hidden_dim];
+
+        let frame = ActivationFrame::from_f32_matrix_quantized(
+            123, 1, seq_len as u32, 0, 13, hidden_dim as u32,
+            &data, ActivationDtype::RawF32, 0,
+        );
+
+        let mut recovered = vec![0.0f32; data.len()];
+        frame.dequantize_into(&mut recovered).unwrap();
+        assert_eq!(data, recovered);
+    }
 
     #[test]
     fn test_per_row_quantization_accuracy_and_outlier_resilience() {

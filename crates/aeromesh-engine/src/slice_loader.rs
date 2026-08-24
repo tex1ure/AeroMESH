@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use memmap2::Mmap;
-use tracing::info;
+use tracing::{info, warn};
 
 /// GGUF Value Types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,9 +497,10 @@ impl LlamaPipelineInstance {
         let sparams = unsafe { llama_sampler_chain_default_params() };
         let sampler = unsafe { llama_sampler_chain_init(sparams) };
         unsafe {
-            llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, 1.18, 0.05, 0.05));
+            llama_sampler_chain_add(sampler, llama_sampler_init_penalties(512, 1.15, 0.20, 0.15));
             llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
             llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1));
+            llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
             llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7));
             llama_sampler_chain_add(sampler, llama_sampler_init_dist(42));
         }
@@ -752,6 +753,17 @@ impl LlamaPipelineInstance {
         _top_p: f32,
         _seed: u32,
     ) -> Result<LlamaToken> {
+        let logits_ptr = unsafe { llama_get_logits_ith(self.ctx, -1) };
+        if !logits_ptr.is_null() {
+            let n_vocab = unsafe { llama_vocab_n_tokens(self.vocab) } as usize;
+            let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab.min(256)) };
+            let has_invalid = logits_slice.iter().any(|v| v.is_nan() || v.is_infinite());
+            if has_invalid {
+                warn!("⚠️ Stage 2 output logits contain NaN/Inf! Resetting context memory.");
+                self.clear_kv_cache();
+            }
+        }
+
         let token_id = unsafe { llama_sampler_sample(self.sampler, self.ctx, -1) };
         unsafe {
             llama_sampler_accept(self.sampler, token_id);

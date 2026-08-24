@@ -168,6 +168,21 @@ enum Commands {
         #[arg(long)]
         port: Option<u16>,
     },
+
+    /// Slice a monolithic GGUF into Stage 1 (0..N) and Stage 2 (N..end) partition files
+    Slice {
+        /// Path to GGUF model file
+        #[arg(long)]
+        model: Option<PathBuf>,
+
+        /// Split layer index (e.g. 14)
+        #[arg(long, default_value_t = 14)]
+        split: usize,
+
+        /// Output directory for slice GGUFs
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -510,6 +525,26 @@ async fn main() -> Result<()> {
                     anyhow::bail!("Invalid start role: '{}'. Expected 'worker', 'coordinator', or 'all'", role);
                 }
             }
+        }
+
+        Commands::Slice { model, split, out_dir } => {
+            let model_path = resolve_model_path(model.as_ref())?;
+            let output_directory = out_dir.unwrap_or_else(|| {
+                model_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("models"))
+            });
+
+            info!("🔪 Partitioning GGUF model {:?} at layer boundary {}...", model_path, split);
+            let (stage1, stage2) = aeromesh_engine::slice_gguf_for_pipeline(&model_path, &output_directory, split)?;
+
+            println!("\n========================================================");
+            println!("   AEROMESH GGUF PARTITION SLICING COMPLETE");
+            println!("========================================================");
+            println!("  Source Model:    {}", model_path.display());
+            println!("  Stage 1 Model:   {} (Layers 0..{})", stage1.display(), split);
+            println!("  Stage 2 Model:   {} (Layers {}..end, Re-Indexed)", stage2.display(), split);
+            println!("  Identity RMSNorm: ENABLED on Stage 1 (Resolves Double Normalization)");
+            println!("  32-Byte Aligned:  YES");
+            println!("========================================================\n");
         }
 
         Commands::Coordinator {

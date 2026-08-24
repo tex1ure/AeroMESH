@@ -165,6 +165,7 @@ extern "C" {
     pub fn llama_vocab_is_control(vocab: *const LlamaVocab, token: LlamaToken) -> bool;
     pub fn llama_vocab_bos(vocab: *const LlamaVocab) -> LlamaToken;
     pub fn llama_vocab_eos(vocab: *const LlamaVocab) -> LlamaToken;
+    pub fn llama_vocab_n_tokens(vocab: *const LlamaVocab) -> i32;
 
     pub fn llama_batch_init(n_tokens: i32, embd: i32, n_seq_max: i32) -> LlamaBatch;
     pub fn llama_batch_free(batch: LlamaBatch);
