@@ -76,6 +76,7 @@ impl PipelineWorkerService {
                                     let start_time = Instant::now();
                                     let seq_len = frame.header.sequence_length.max(1);
                                     let start_pos = frame.header.token_position;
+                                    let seq_id = frame.header.sequence_id;
                                     let mut inst = instance_clone.lock().await;
 
                                     if frame.header.has_flag(FLAG_CLEAR_KV) {
@@ -100,12 +101,21 @@ impl PipelineWorkerService {
                                     }
 
                                     let eval_time_ms = start_time.elapsed().as_secs_f32() * 1000.0;
+                                    let next_token_id = inst.sample_next_token(0.7, 0.9, seq_id as u32).unwrap_or(0);
+                                    let piece_bytes = inst.token_to_piece(next_token_id).unwrap_or_default();
+                                    let token_text = String::from_utf8_lossy(&piece_bytes).to_string();
+                                    let is_eos = inst.is_eog(next_token_id)
+                                        || token_text.contains("<|im_end|>")
+                                        || token_text.contains("<|endoftext|>")
+                                        || token_text.contains("<|eot_id|>")
+                                        || token_text.contains("</s>");
+
                                     let resp = TokenResponseFrame {
                                         session_id: frame.header.session_id,
                                         sequence_id: frame.header.sequence_id,
-                                        token_id: 0,
-                                        is_eos: false,
-                                        token_text: String::new(),
+                                        token_id: next_token_id,
+                                        is_eos,
+                                        token_text,
                                         eval_time_ms,
                                     };
 
@@ -270,12 +280,22 @@ async fn handle_coordinator_connection(
         let eval_time_ms = eval_duration.as_secs_f32() * 1000.0;
 
         if is_last_stage {
+            // Sample actual token from Stage 2 LM Head logits
+            let next_token_id = inst.sample_next_token(0.7, 0.9, seq_id as u32)?;
+            let piece_bytes = inst.token_to_piece(next_token_id).unwrap_or_default();
+            let token_text = String::from_utf8_lossy(&piece_bytes).to_string();
+            let is_eos = inst.is_eog(next_token_id)
+                || token_text.contains("<|im_end|>")
+                || token_text.contains("<|endoftext|>")
+                || token_text.contains("<|eot_id|>")
+                || token_text.contains("</s>");
+
             let resp = TokenResponseFrame {
                 session_id: active_session_id,
                 sequence_id: seq_id,
-                token_id: 0,
-                is_eos: false,
-                token_text: String::new(),
+                token_id: next_token_id,
+                is_eos,
+                token_text,
                 eval_time_ms,
             };
 
@@ -525,10 +545,9 @@ impl PipelineCoordinatorClient {
         let prefill_activations = self.instance.evaluate_tokens_to_activations(&prompt_tokens, 0)?;
         let prefill_time = prefill_start.elapsed();
 
-        let first_token_id = self.instance.sample_next_token(0.7, 0.9, 0)?;
-        let is_first_eos = self.instance.is_eog(first_token_id);
-        let piece_bytes = self.instance.token_to_piece(first_token_id).unwrap_or_default();
-        let first_token_text = String::from_utf8_lossy(&piece_bytes).to_string();
+        let mut first_token_id = 0;
+        let mut first_token_text = String::new();
+        let mut is_first_eos = false;
 
         // Stream Quantized Prefill Activation Frame [S * hidden_dim]
         if let Some(ref mut transport) = self.transport {
@@ -544,8 +563,17 @@ impl PipelineCoordinatorClient {
                 FLAG_IS_PROMPT | FLAG_CLEAR_KV,
             );
             if transport.send_activation(&prefill_frame).await.is_ok() {
-                let _ = transport.recv_response().await;
+                if let Ok(resp) = transport.recv_response().await {
+                    first_token_id = resp.token_id;
+                    first_token_text = resp.token_text;
+                    is_first_eos = resp.is_eos;
+                }
             }
+        } else {
+            first_token_id = self.instance.sample_next_token(0.7, 0.9, 0)?;
+            is_first_eos = self.instance.is_eog(first_token_id);
+            let piece_bytes = self.instance.token_to_piece(first_token_id).unwrap_or_default();
+            first_token_text = String::from_utf8_lossy(&piece_bytes).to_string();
         }
 
         print!("{}", first_token_text);
@@ -553,7 +581,7 @@ impl PipelineCoordinatorClient {
 
         generated_text.push_str(&first_token_text);
         if let Some(ref tx) = token_tx {
-            if tx.send(piece_bytes).await.is_err() {
+            if tx.send(first_token_text.as_bytes().to_vec()).await.is_err() {
                 info!("🛑 Client disconnected / aborted during prefill. Halting generation loop.");
                 return Ok((generated_text, perf_metrics));
             }
@@ -573,10 +601,9 @@ impl PipelineCoordinatorClient {
                     bail!("Stage 1 decode forward pass error: {}", e);
                 }
 
-                // Sample next token ID
-                let next_token_id = self.instance.sample_next_token(0.7, 0.9, seq_id as u32)?;
-                let token_piece_bytes = self.instance.token_to_piece(next_token_id).unwrap_or_default();
-                let token_text = String::from_utf8_lossy(&token_piece_bytes).to_string();
+                let mut next_token_id = 0;
+                let mut token_text = String::new();
+                let mut is_eos = false;
 
                 // Stream single-token quantized activation frame [1 * hidden_dim: 1.50 KB or 5.12 KB]
                 if let Some(ref mut transport) = self.transport {
@@ -592,15 +619,22 @@ impl PipelineCoordinatorClient {
                         0,
                     );
                     if transport.send_activation(&decode_frame).await.is_ok() {
-                        let _ = transport.recv_response().await;
+                        if let Ok(resp) = transport.recv_response().await {
+                            next_token_id = resp.token_id;
+                            token_text = resp.token_text;
+                            is_eos = resp.is_eos;
+                        }
                     }
+                } else {
+                    next_token_id = self.instance.sample_next_token(0.7, 0.9, seq_id as u32)?;
+                    let token_piece_bytes = self.instance.token_to_piece(next_token_id).unwrap_or_default();
+                    token_text = String::from_utf8_lossy(&token_piece_bytes).to_string();
+                    is_eos = self.instance.is_eog(next_token_id)
+                        || token_text.contains("<|im_end|>")
+                        || token_text.contains("<|endoftext|>")
+                        || token_text.contains("<|eot_id|>")
+                        || token_text.contains("</s>");
                 }
-
-                let is_eos = self.instance.is_eog(next_token_id)
-                    || token_text.contains("<|im_end|>")
-                    || token_text.contains("<|endoftext|>")
-                    || token_text.contains("<|eot_id|>")
-                    || token_text.contains("</s>");
 
                 if is_eos {
                     break;
@@ -611,7 +645,7 @@ impl PipelineCoordinatorClient {
 
                 generated_text.push_str(&token_text);
                 if let Some(ref tx) = token_tx {
-                    if tx.send(token_piece_bytes).await.is_err() {
+                    if tx.send(token_text.as_bytes().to_vec()).await.is_err() {
                         info!("🛑 Client disconnected / aborted during decode. Halting generation loop.");
                         break;
                     }
