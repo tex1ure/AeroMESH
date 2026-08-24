@@ -13,3 +13,4 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
 byteorder = { workspace = true }
+memmap2 = "0.9"
