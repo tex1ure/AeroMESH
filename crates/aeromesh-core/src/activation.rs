@@ -756,6 +756,92 @@ fn half_to_float(h: u16) -> f32 {
     }
 }
 
+/// Telemetry stats computed by the Activation Boundary Watchdog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivationStats {
+    pub tag: String,
+    pub count: usize,
+    pub mean: f32,
+    pub variance: f32,
+    pub std_dev: f32,
+    pub min: f32,
+    pub max: f32,
+    pub l2_norm: f32,
+    pub has_nan: bool,
+    pub has_inf: bool,
+}
+
+/// Boundary Watchdog: Inspects intermediate activation tensors at node egress/ingress boundaries.
+pub fn inspect_activations(tag: &str, tensor: &[f32], shape: &[usize]) -> Result<ActivationStats> {
+    if tensor.is_empty() {
+        bail!("🚨 ActivationWatchdog [{}]: tensor buffer is empty! Shape: {:?}", tag, shape);
+    }
+
+    let mut sum = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    let mut has_nan = false;
+    let mut has_inf = false;
+
+    for &v in tensor {
+        if v.is_nan() {
+            has_nan = true;
+        } else if v.is_infinite() {
+            has_inf = true;
+        } else {
+            sum += v as f64;
+            sum_sq += (v as f64) * (v as f64);
+            if v < min { min = v; }
+            if v > max { max = v; }
+        }
+    }
+
+    let count = tensor.len();
+    let mean = (sum / count as f64) as f32;
+    let variance = ((sum_sq / count as f64) - (mean as f64 * mean as f64)).max(0.0) as f32;
+    let std_dev = variance.sqrt();
+    let l2_norm = sum_sq.sqrt() as f32;
+
+    if has_nan {
+        bail!("🚨 ActivationWatchdog [{}]: NaN detected in activation tensor! Shape: {:?}", tag, shape);
+    }
+    if has_inf {
+        bail!("🚨 ActivationWatchdog [{}]: Inf detected in activation tensor! Shape: {:?}", tag, shape);
+    }
+    if l2_norm == 0.0 {
+        tracing::warn!("⚠️ ActivationWatchdog [{}]: L2 norm is 0.0 (all-zero tensor)! Shape: {:?}", tag, shape);
+    }
+    if max.abs() > 100.0 || min.abs() > 100.0 {
+        tracing::warn!("⚠️ ActivationWatchdog [{}]: High activation magnitude detected: min={:.3}, max={:.3}", tag, min, max);
+    }
+
+    tracing::debug!(
+        tag = %tag,
+        count = count,
+        shape = ?shape,
+        mean = mean,
+        std_dev = std_dev,
+        min = min,
+        max = max,
+        l2_norm = l2_norm,
+        "🔍 ActivationWatchdog telemetry check passed"
+    );
+
+    Ok(ActivationStats {
+        tag: tag.to_string(),
+        count,
+        mean,
+        variance,
+        std_dev,
+        min,
+        max,
+        l2_norm,
+        has_nan,
+        has_inf,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,5 +907,21 @@ mod tests {
             let diff = (v - rec).abs();
             assert!(diff <= 0.5 * v.abs().max(0.1), "FP8 roundtrip error too large for {}", v);
         }
+    }
+
+    #[test]
+    fn test_activation_watchdog_telemetry() {
+        let clean_data = vec![1.0f32, -1.0, 2.0, -2.0, 0.5, -0.5];
+        let stats = inspect_activations("Test_Clean", &clean_data, &[1, 6]).unwrap();
+        assert_eq!(stats.count, 6);
+        assert!(!stats.has_nan);
+        assert!(!stats.has_inf);
+        assert!(stats.l2_norm > 0.0);
+
+        let nan_data = vec![1.0f32, f32::NAN, 2.0];
+        assert!(inspect_activations("Test_NaN", &nan_data, &[1, 3]).is_err());
+
+        let inf_data = vec![1.0f32, f32::INFINITY, 2.0];
+        assert!(inspect_activations("Test_Inf", &inf_data, &[1, 3]).is_err());
     }
 }

@@ -287,9 +287,14 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
             dequant_buf.resize(total_elements, 0.0f32);
             frame.dequantize_into(&mut dequant_buf)?;
 
-            let l2_norm = aeromesh_core::compute_l2_norm(&dequant_buf);
-            let mean_val = aeromesh_core::compute_mean(&dequant_buf);
-            tracing::debug!(seq_id, start_pos, l2 = l2_norm, mean = mean_val, "Worker received Stage 1 activation vector");
+            // Phase 1 Boundary Watchdog: Validate incoming activations
+            if let Err(e) = aeromesh_core::inspect_activations(
+                "Worker_Ingress",
+                &dequant_buf,
+                &[seq_len as usize, frame.header.hidden_dim as usize],
+            ) {
+                error!("🚨 Worker ingress watchdog assertion failed: {}", e);
+            }
 
             // Execute Stage 2 GEMM forward pass from incoming activations
             inst.evaluate_activations_to_logits(&dequant_buf, seq_len, start_pos)?;
@@ -583,6 +588,15 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         let prefill_activations = self.instance.evaluate_tokens_to_activations(&prompt_tokens, 0)?;
         let prefill_time = prefill_start.elapsed();
 
+        // Phase 1 Boundary Watchdog: Inspect Coordinator prefill egress activations
+        if let Err(e) = aeromesh_core::inspect_activations(
+            "Coordinator_Egress_Prefill",
+            &prefill_activations,
+            &[prompt_len as usize, self.hidden_dim],
+        ) {
+            tracing::error!("🚨 Coordinator prefill egress watchdog assertion failed: {}", e);
+        }
+
         let mut first_token_id = 0;
         let mut first_token_text = String::new();
         let mut is_first_eos = false;
@@ -637,6 +651,15 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 if let Err(e) = self.instance.evaluate_tokens_to_activations_into(&decode_tokens, current_pos, &mut decode_act_buf) {
                     self.transport = None;
                     bail!("Stage 1 decode forward pass error: {}", e);
+                }
+
+                // Phase 1 Boundary Watchdog: Inspect Coordinator decode egress activations
+                if let Err(e) = aeromesh_core::inspect_activations(
+                    "Coordinator_Egress_Decode",
+                    &decode_act_buf,
+                    &[1, self.hidden_dim],
+                ) {
+                    tracing::error!("🚨 Coordinator decode egress watchdog assertion failed: {}", e);
                 }
 
                 let mut next_token_id = 0;
