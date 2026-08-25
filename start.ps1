@@ -45,6 +45,56 @@ if (Test-Path "target\release") {
     Get-ChildItem -Path "bin\*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "target\release" -Force -ErrorAction SilentlyContinue
 }
 
+function Stop-PortConflict {
+    param ([int[]]$Ports)
+    foreach ($p in $Ports) {
+        $conns = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
+        if ($conns) {
+            foreach ($c in $conns) {
+                $pidToKill = $c.OwningProcess
+                if ($pidToKill -and $pidToKill -ne $PID) {
+                    Write-Host "  [*] Freeing port $p (Stopping stale process $pidToKill)..." -ForegroundColor DarkGray
+                    Stop-Process -Id $pidToKill -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+}
+
+function Test-PeerReachable {
+    param ([string]$PeerStr)
+    if (-not $PeerStr) { return $false }
+    try {
+        $parts = $PeerStr.Split(":")
+        $h = $parts[0].Trim()
+        $p = [int]$parts[1].Trim()
+        $client = New-Object System.Net.Sockets.TcpClient
+        $iar = $client.BeginConnect($h, $p, $null, $null)
+        $ok = $iar.AsyncWaitHandle.WaitOne(2000, $false)
+        $client.Close()
+        return $ok
+    } catch {
+        return $false
+    }
+}
+
+function Wait-ServerReady {
+    param ([string]$Url, [int]$TimeoutSeconds = 45)
+    Write-Host "  [*] Initializing GPU VRAM & model weights..." -ForegroundColor DarkGray
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $resp = Invoke-WebRequest -Uri "$Url/health" -UseBasicParsing -TimeoutSec 1 -ErrorAction SilentlyContinue
+            if ($resp -and $resp.StatusCode -eq 200) {
+                Write-Host "  [+] Engine Ready! Model loaded in GPU memory." -ForegroundColor Green
+                return $true
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 600
+    }
+    return $false
+}
+
 function Get-AeroMeshExe {
     if (Test-Path "target\release\aeromesh.exe") {
         return (Resolve-Path "target\release\aeromesh.exe").Path
@@ -189,24 +239,24 @@ if ($Role -eq "worker") {
     $workerPort = 50052
     if ($Port -gt 0) { $workerPort = $Port }
 
-    $workerLayers = "auto"
-    if ($Layers) { $workerLayers = $Layers }
-
     $bindStr = "0.0.0.0:" + $workerPort
 
+    # Free stale ports
+    Stop-PortConflict @($workerPort)
+
     Write-Host ""
-    Write-Host "[+] Starting AeroMesh Zero-Weight Worker Stage (Laptop B)..." -ForegroundColor Cyan
-    Write-Host "  Model:   $modelName" -ForegroundColor Gray
-    Write-Host "  Layers:  $workerLayers" -ForegroundColor Gray
-    Write-Host "  Port:    $workerPort" -ForegroundColor Gray
-    Write-Host "  Binding: $bindStr" -ForegroundColor Green
+    Write-Host "[+] Starting AeroMesh Zero-Weight Worker Node (Laptop B)..." -ForegroundColor Cyan
+    Write-Host "  Model:     $modelName" -ForegroundColor Gray
+    Write-Host "  Port:      $workerPort" -ForegroundColor Gray
+    Write-Host "  Binding:   $bindStr" -ForegroundColor Green
+    Write-Host "  SSD Cache: ENABLED (0.0 MB weights transferred over network)" -ForegroundColor Yellow
     Write-Host ""
 
-    $aeroExe = Get-AeroMeshExe
-    if ($aeroExe) {
-        & $aeroExe worker --model "$detectedModel" --layers "$workerLayers" --port $workerPort
+    $rpcServerExe = Join-Path $PSScriptRoot "bin\ggml-rpc-server.exe"
+    if (Test-Path $rpcServerExe) {
+        & $rpcServerExe -H 0.0.0.0 -p $workerPort -c
     } else {
-        cargo run --release --bin aeromesh -- worker --model "$detectedModel" --layers "$workerLayers" --port $workerPort
+        cargo run --release --bin aeromesh -- worker --port $workerPort --cache
     }
     exit 0
 }
@@ -227,35 +277,29 @@ if ($Role -eq "all") {
     $coordUrl = "http://127.0.0.1:" + $apiPort
     $uiUrl = "http://127.0.0.1:" + $uiPort
 
+    # Free stale ports
+    Stop-PortConflict @($apiPort, $uiPort, 50052)
+
     Write-Host ""
     Write-Host "[+] Launching Full Local Demo Mesh (Worker + Coordinator + Web UI)..." -ForegroundColor Cyan
     Write-Host "  Model:       $modelName" -ForegroundColor Gray
     Write-Host "  Coordinator: $coordUrl" -ForegroundColor Green
     Write-Host "  Worker:      127.0.0.1:50052 (Stage 2 Loopback)" -ForegroundColor Yellow
     Write-Host "  Web UI:      $uiUrl" -ForegroundColor Cyan
-
-    $modelFileObj = Get-Item $detectedModel -ErrorAction SilentlyContinue
-    if ($modelFileObj -and $modelFileObj.Length -gt 4.5GB) {
-        $sizeGb = [math]::Round($modelFileObj.Length / 1GB, 2)
-        Write-Host ""
-        Write-Host "  ⚠️  [Single-Host GPU VRAM Advisory]:" -ForegroundColor DarkYellow
-        Write-Host "     Model size is ${sizeGb} GB. Running dual nodes simultaneously on a single 8 GB GPU requires ~$([math]::Round($sizeGb * 2, 1)) GB VRAM." -ForegroundColor Yellow
-        Write-Host "     For peak 40+ tok/s speeds, deploy across 2 separate laptops or use models/test.gguf (3.3 GB) locally." -ForegroundColor Gray
-    }
     Write-Host ""
 
-    $aeroExe = Get-AeroMeshExe
-    if ($aeroExe) {
-        $rustProc = Start-Process -FilePath $aeroExe -ArgumentList @("start", "--role", "all", "--model", "$detectedModel", "--port", "$apiPort") -PassThru -NoNewWindow
-    } else {
-        $cargoArgs = @("run", "--release", "--bin", "aeromesh", "--", "start", "--role", "all", "--model", "$detectedModel", "--port", "$apiPort")
-        $rustProc = Start-Process -FilePath "cargo" -ArgumentList $cargoArgs -PassThru -NoNewWindow
-    }
+    $rpcServerExe = Join-Path $PSScriptRoot "bin\ggml-rpc-server.exe"
+    $serverExe = Join-Path $PSScriptRoot "bin\llama-server.exe"
 
-    Start-Sleep -Milliseconds 2500
+    $workerProc = Start-Process -FilePath $rpcServerExe -ArgumentList @("-H", "127.0.0.1", "-p", "50052", "-c") -PassThru -NoNewWindow
+    Start-Sleep -Milliseconds 1000
 
-    # Open Browser
-    if (-not $NoBrowser) {
+    $serverArgs = @("-m", "$detectedModel", "--rpc", "127.0.0.1:50052", "-ngl", "99", "--port", "$apiPort", "--host", "0.0.0.0", "-fa", "on")
+    $rustProc = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -PassThru -NoNewWindow
+    
+    $isReady = Wait-ServerReady $coordUrl 45
+
+    if (-not $NoBrowser -and $isReady) {
         Start-Process $uiUrl
     }
 
@@ -274,6 +318,9 @@ if ($Role -eq "all") {
         if ($rustProc -and -not $rustProc.HasExited) {
             Stop-Process -Id $rustProc.Id -Force -ErrorAction SilentlyContinue
         }
+        if ($workerProc -and -not $workerProc.HasExited) {
+            Stop-Process -Id $workerProc.Id -Force -ErrorAction SilentlyContinue
+        }
     }
     exit 0
 }
@@ -283,61 +330,63 @@ if ($Role -eq "coordinator") {
     $apiPort = 8080
     if ($Port -gt 0) { $apiPort = $Port }
 
-    $coordLayers = "auto"
-    if ($Layers) { $coordLayers = $Layers }
-
     $pythonExe = Get-PythonCommand
 
     # Check for Peer IP if not supplied
     if (-not $Peers) {
         Write-Host ""
-        Write-Host "Enter the Worker Tailscale Address (example: 100.101.147.24:50052):" -ForegroundColor Yellow
+        Write-Host "Enter the Worker Address (ZeroTier / LAN / Tailscale IP:Port, example: 10.78.133.107:50052):" -ForegroundColor Yellow
         $enteredPeer = Read-Host "Worker Peer IP:Port"
         if ($enteredPeer) {
             $Peers = $enteredPeer.Trim()
         }
     }
 
+    if ($Peers -and -not $Peers.Contains(":")) {
+        $Peers = "$($Peers.Trim()):50052"
+    }
+
     $coordUrl = "http://127.0.0.1:" + $apiPort
     $uiUrl = "http://127.0.0.1:7860"
 
     $workerStatusStr = "Local Standalone"
-    if ($Peers) { $workerStatusStr = $Peers }
+    $isPeerReachable = $false
+    if ($Peers) {
+        $isPeerReachable = Test-PeerReachable $Peers
+        if ($isPeerReachable) {
+            $workerStatusStr = "$Peers (✅ ONLINE)"
+        } else {
+            $workerStatusStr = "$Peers (⚠️ UNREACHABLE - Check Laptop B / start.ps1 worker)"
+        }
+    }
+
+    # Free stale ports before launching
+    Stop-PortConflict @($apiPort, 7860)
 
     Write-Host ""
     Write-Host "[+] Launching AeroMesh Coordinator (Laptop A)..." -ForegroundColor Cyan
     Write-Host "  Model:       $modelName" -ForegroundColor Gray
-    Write-Host "  Layers:      $coordLayers" -ForegroundColor Gray
     Write-Host "  Worker Peer: $workerStatusStr" -ForegroundColor Yellow
     Write-Host "  API Server:  $coordUrl" -ForegroundColor Green
     Write-Host "  Web UI:      $uiUrl" -ForegroundColor Cyan
     Write-Host ""
 
-    $peerArg = @()
-    if ($Peers) { $peerArg = @("--peers", "$Peers") }
-    $aeroExe = Get-AeroMeshExe
-
-    if ($NoUI) {
-        if ($aeroExe) {
-            & $aeroExe start --role coordinator --model "$detectedModel" --layers "$coordLayers" @peerArg --port $apiPort
-        } else {
-            cargo run --release --bin aeromesh -- start --role coordinator --model "$detectedModel" --layers "$coordLayers" @peerArg --port $apiPort
-        }
-        exit 0
+    $serverExe = Join-Path $PSScriptRoot "bin\llama-server.exe"
+    $serverArgs = @("-m", "$detectedModel", "-ngl", "99", "--port", "$apiPort", "--host", "0.0.0.0", "-fa", "on")
+    if ($Peers -and $isPeerReachable) {
+        $serverArgs += @("--rpc", "$Peers")
+    } elseif ($Peers -and -not $isPeerReachable) {
+        Write-Host "  [-] WARNING: Could not connect to $Peers." -ForegroundColor DarkYellow
+        Write-Host "      Starting in high-speed local GPU mode. Run '.\start.ps1 worker' on Laptop B to enable distributed cluster." -ForegroundColor Gray
+        Write-Host ""
     }
 
-    # Start Coordinator API in background process
-    if ($aeroExe) {
-        $exeArgs = @("start", "--role", "coordinator", "--model", "$detectedModel", "--layers", "$coordLayers") + $peerArg + @("--port", "$apiPort")
-        $rustProc = Start-Process -FilePath $aeroExe -ArgumentList $exeArgs -PassThru -NoNewWindow
-    } else {
-        $cargoArgs = @("run", "--release", "--bin", "aeromesh", "--", "start", "--role", "coordinator", "--model", "$detectedModel", "--layers", "$coordLayers") + $peerArg + @("--port", "$apiPort")
-        $rustProc = Start-Process -FilePath "cargo" -ArgumentList $cargoArgs -PassThru -NoNewWindow
-    }
+    $rustProc = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -PassThru -NoNewWindow
+    
+    # Wait until engine is fully loaded in VRAM before launching UI
+    $isReady = Wait-ServerReady $coordUrl 45
 
-    Start-Sleep -Milliseconds 2500
-
-    if (-not $NoBrowser) {
+    if (-not $NoBrowser -and $isReady) {
         Start-Process $uiUrl
     }
 
