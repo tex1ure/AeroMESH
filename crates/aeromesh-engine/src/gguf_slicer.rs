@@ -331,23 +331,7 @@ fn write_sliced_gguf(
         }
     }
 
-    // 3. Compute 32-byte aligned offsets for new tensor table
-    let mut temp_cursor = Cursor::new(Vec::new());
-    for t in &selected_tensors {
-        write_gguf_string(&mut temp_cursor, &t.name)?;
-        temp_cursor.write_u32::<LittleEndian>(t.dimensions.len() as u32)?;
-        for &d in &t.dimensions {
-            temp_cursor.write_u64::<LittleEndian>(d)?;
-        }
-        temp_cursor.write_u32::<LittleEndian>(t.ggml_type)?;
-        temp_cursor.write_u64::<LittleEndian>(0)?; // Placeholder offset
-    }
-    let tensor_table_len = temp_cursor.position();
-
-    let header_and_table_len = 4 + 4 + 8 + 8 + (writer.get_ref().metadata()?.len() - (4+4+8+8)) + tensor_table_len;
-    let pad_to_data = (alignment - (header_and_table_len % alignment)) % alignment;
-    let _ = pad_to_data;
-
+    // 3. Compute aligned offsets for new tensor table (relative to the start of the data section)
     let mut current_offset = 0u64;
     let mut aligned_offsets = Vec::with_capacity(selected_tensors.len());
 
@@ -369,11 +353,15 @@ fn write_sliced_gguf(
         writer.write_u64::<LittleEndian>(aligned_offsets[i])?;
     }
 
-    // Pad before data section
+    // Pad before data section to alignment boundary
+    const ZERO_BUF: [u8; 4096] = [0u8; 4096];
     let curr_pos = writer.stream_position()?;
-    let data_pad = (alignment - (curr_pos % alignment)) % alignment;
-    for _ in 0..data_pad {
-        writer.write_u8(0)?;
+    let data_pad = ((alignment - (curr_pos % alignment)) % alignment) as usize;
+    let mut remaining_pad = data_pad;
+    while remaining_pad > 0 {
+        let chunk = remaining_pad.min(ZERO_BUF.len());
+        writer.write_all(&ZERO_BUF[..chunk])?;
+        remaining_pad -= chunk;
     }
 
     let data_section_start = writer.stream_position()?;
@@ -384,8 +372,18 @@ fn write_sliced_gguf(
         let current_pos = writer.stream_position()?;
         if target_pos > current_pos {
             let padding_needed = (target_pos - current_pos) as usize;
-            let zeros = vec![0u8; padding_needed];
-            writer.write_all(&zeros)?;
+            ensure!(
+                padding_needed <= (alignment as usize),
+                "Tensor alignment padding {} exceeds alignment {}",
+                padding_needed,
+                alignment
+            );
+            let mut remaining = padding_needed;
+            while remaining > 0 {
+                let chunk = remaining.min(ZERO_BUF.len());
+                writer.write_all(&ZERO_BUF[..chunk])?;
+                remaining -= chunk;
+            }
         }
 
         if t.is_identity_norm {
@@ -430,6 +428,7 @@ fn write_gguf_string<W: Write>(writer: &mut W, s: &str) -> Result<()> {
 
 fn read_gguf_string<R: Read>(reader: &mut R) -> Result<String> {
     let len = reader.read_u64::<LittleEndian>()? as usize;
+    ensure!(len <= 64 * 1024, "GGUF string length ({}) exceeds 64KB safety limit", len);
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).to_string())
@@ -442,11 +441,13 @@ fn skip_gguf_val<R: Read + Seek>(reader: &mut R, val_type: u32) -> Result<()> {
         4 | 5 | 6 => { reader.seek(SeekFrom::Current(4))?; }
         8 => {
             let len = reader.read_u64::<LittleEndian>()?;
+            ensure!(len <= (i64::MAX as u64), "GGUF string length exceeds seek bounds");
             reader.seek(SeekFrom::Current(len as i64))?;
         }
         9 => {
             let elem_type = reader.read_u32::<LittleEndian>()?;
             let count = reader.read_u64::<LittleEndian>()?;
+            ensure!(count <= 1_000_000, "GGUF array count ({}) exceeds maximum safe limit", count);
             for _ in 0..count {
                 skip_gguf_val(reader, elem_type)?;
             }
@@ -494,5 +495,132 @@ fn ggml_type_size_bytes(ggml_type: u32) -> f64 {
         13 => 0.6875,       // Q5_K
         14 => 0.8125,       // Q6_K
         _ => 2.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_synthetic_gguf(path: &Path) -> Result<()> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+
+        // Header: Magic, version 3, tensor_count 3, kv_count 3
+        writer.write_all(&GGUF_MAGIC)?;
+        writer.write_u32::<LittleEndian>(3)?;
+        writer.write_u64::<LittleEndian>(3)?; // 3 tensors: blk.0, blk.1, output_norm
+        writer.write_u64::<LittleEndian>(3)?; // 3 KVs: arch, alignment, block_count
+
+        // KV 1: general.architecture (type 8 = string, "llama")
+        write_gguf_string(&mut writer, "general.architecture")?;
+        writer.write_u32::<LittleEndian>(8)?;
+        write_gguf_string(&mut writer, "llama")?;
+
+        // KV 2: general.alignment (type 4 = uint32, 32)
+        write_gguf_string(&mut writer, "general.alignment")?;
+        writer.write_u32::<LittleEndian>(4)?;
+        writer.write_u32::<LittleEndian>(32)?;
+
+        // KV 3: llama.block_count (type 4 = uint32, 2)
+        write_gguf_string(&mut writer, "llama.block_count")?;
+        writer.write_u32::<LittleEndian>(4)?;
+        writer.write_u32::<LittleEndian>(2)?;
+
+        // Tensor 1: "blk.0.attn_q.weight", dims [4, 4], type 0 (F32), offset 0
+        write_gguf_string(&mut writer, "blk.0.attn_q.weight")?;
+        writer.write_u32::<LittleEndian>(2)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u32::<LittleEndian>(0)?;
+        writer.write_u64::<LittleEndian>(0)?;
+
+        // Tensor 2: "blk.1.attn_q.weight", dims [4, 4], type 0 (F32), offset 64
+        write_gguf_string(&mut writer, "blk.1.attn_q.weight")?;
+        writer.write_u32::<LittleEndian>(2)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u32::<LittleEndian>(0)?;
+        writer.write_u64::<LittleEndian>(64)?;
+
+        // Tensor 3: "output_norm.weight", dims [4], type 0 (F32), offset 128
+        write_gguf_string(&mut writer, "output_norm.weight")?;
+        writer.write_u32::<LittleEndian>(1)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u32::<LittleEndian>(0)?;
+        writer.write_u64::<LittleEndian>(128)?;
+
+        // Alignment pad to 32 bytes before data section
+        let pos = writer.stream_position()?;
+        let pad = ((32 - (pos % 32)) % 32) as usize;
+        for _ in 0..pad {
+            writer.write_u8(0)?;
+        }
+
+        // Data section:
+        // Tensor 1 data (64 bytes)
+        let t1_data = vec![0.5f32; 16];
+        for val in t1_data {
+            writer.write_all(&val.to_le_bytes())?;
+        }
+
+        // Tensor 2 data (64 bytes)
+        let t2_data = vec![1.5f32; 16];
+        for val in t2_data {
+            writer.write_all(&val.to_le_bytes())?;
+        }
+
+        // Tensor 3 data (16 bytes)
+        let t3_data = vec![1.0f32; 4];
+        for val in t3_data {
+            writer.write_all(&val.to_le_bytes())?;
+        }
+
+        writer.flush()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_slice_gguf_no_underflow_panic() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "aeromesh_test_slicer_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let src_model = temp_dir.join("test_model.gguf");
+        create_synthetic_gguf(&src_model).expect("Failed to create synthetic GGUF");
+
+        let out_dir = temp_dir.join("slices");
+        let result = slice_gguf_for_pipeline(&src_model, &out_dir, 1);
+        assert!(
+            result.is_ok(),
+            "slice_gguf_for_pipeline failed: {:?}",
+            result.err()
+        );
+
+        let (s1, s2) = result.unwrap();
+        assert!(s1.exists(), "Stage 1 slice file must exist");
+        assert!(s2.exists(), "Stage 2 slice file must exist");
+
+        let s1_meta = std::fs::metadata(&s1).unwrap();
+        let s2_meta = std::fs::metadata(&s2).unwrap();
+        assert!(s1_meta.len() > 0, "Stage 1 file size must be non-zero");
+        assert!(s2_meta.len() > 0, "Stage 2 file size must be non-zero");
+
+        // Verify that Stage 1 and Stage 2 have valid GGUF headers and can be opened
+        let s1_file = File::open(&s1).unwrap();
+        let s1_mmap = unsafe { memmap2::Mmap::map(&s1_file).unwrap() };
+        assert_eq!(&s1_mmap[0..4], &GGUF_MAGIC);
+
+        let s2_file = File::open(&s2).unwrap();
+        let s2_mmap = unsafe { memmap2::Mmap::map(&s2_file).unwrap() };
+        assert_eq!(&s2_mmap[0..4], &GGUF_MAGIC);
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

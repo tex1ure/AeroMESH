@@ -447,6 +447,17 @@ pub struct LlamaPipelineInstance {
 
 unsafe impl Send for LlamaPipelineInstance {}
 
+impl std::fmt::Debug for LlamaPipelineInstance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlamaPipelineInstance")
+            .field("is_ready", &self.is_ready())
+            .field("hidden_dim", &self.hidden_dim)
+            .field("total_layers", &self.total_layers)
+            .field("n_ctx", &self.n_ctx)
+            .finish()
+    }
+}
+
 impl LlamaPipelineInstance {
     pub fn open(
         model_path: &Path,
@@ -529,7 +540,21 @@ impl LlamaPipelineInstance {
         })
     }
 
+    /// Returns true if all native C++ pointers are valid and non-null.
+    pub fn is_ready(&self) -> bool {
+        !self.model.is_null() && !self.ctx.is_null() && !self.vocab.is_null() && !self.sampler.is_null()
+    }
+
+    /// Validates that the native instance is initialized and ready, returning a typed error otherwise.
+    pub fn ensure_ready(&self) -> Result<()> {
+        if !self.is_ready() {
+            bail!("LlamaPipelineInstance is not ready or has been closed (native C++ pointers are null)");
+        }
+        Ok(())
+    }
+
     pub fn tokenize(&self, text: &str, add_special: bool) -> Result<Vec<LlamaToken>> {
+        self.ensure_ready()?;
         let c_text = CString::new(text)?;
         let max_tokens = (text.len() + 16).max(128) as i32;
         let mut tokens = vec![0 as LlamaToken; max_tokens as usize];
@@ -572,6 +597,7 @@ impl LlamaPipelineInstance {
     }
 
     pub fn token_to_piece(&self, token: LlamaToken) -> Result<Vec<u8>> {
+        self.ensure_ready()?;
         let mut buf = [0u8; 128];
         let n = unsafe {
             llama_token_to_piece(
@@ -614,10 +640,16 @@ impl LlamaPipelineInstance {
     }
 
     pub fn is_eog(&self, token: LlamaToken) -> bool {
+        if !self.is_ready() {
+            return true;
+        }
         unsafe { llama_vocab_is_eog(self.vocab, token) }
     }
 
     pub fn clear_kv_cache(&self) {
+        if !self.is_ready() {
+            return;
+        }
         unsafe {
             let mem = llama_get_memory(self.ctx);
             if !mem.is_null() {
@@ -635,6 +667,7 @@ impl LlamaPipelineInstance {
         tokens: &[LlamaToken],
         start_pos: u32,
     ) -> Result<Vec<f32>> {
+        self.ensure_ready()?;
         let mut activations = Vec::with_capacity(tokens.len() * self.hidden_dim);
         self.evaluate_tokens_to_activations_into(tokens, start_pos, &mut activations)?;
         Ok(activations)
@@ -647,6 +680,7 @@ impl LlamaPipelineInstance {
         start_pos: u32,
         out: &mut Vec<f32>,
     ) -> Result<()> {
+        self.ensure_ready()?;
         if tokens.is_empty() {
             out.clear();
             return Ok(());
@@ -698,13 +732,14 @@ impl LlamaPipelineInstance {
         Ok(())
     }
 
-    /// Stage 2: Inject incoming intermediate activation matrix [seq_len * hidden_dim], compute through downstream layers + LM Head.
+    /// Stage 2: Inject intermediate activation matrix [seq_len * hidden_dim], compute through downstream layers + LM Head.
     pub fn evaluate_activations_to_logits(
         &mut self,
         activations: &[f32],
         seq_len: u32,
         start_pos: u32,
     ) -> Result<()> {
+        self.ensure_ready()?;
         ensure!(
             activations.len() == (seq_len as usize) * self.hidden_dim,
             "Activation size mismatch: expected {} floats, got {}",
@@ -753,6 +788,7 @@ impl LlamaPipelineInstance {
         _top_p: f32,
         _seed: u32,
     ) -> Result<LlamaToken> {
+        self.ensure_ready()?;
         let logits_ptr = unsafe { llama_get_logits_ith(self.ctx, -1) };
         if !logits_ptr.is_null() {
             let n_vocab = unsafe { llama_vocab_n_tokens(self.vocab) } as usize;
@@ -771,7 +807,7 @@ impl LlamaPipelineInstance {
         Ok(token_id)
     }
 
-    /// Explicitly frees the llama context, model, and sampler from GPU/CPU memory.
+    /// Explicitly frees the llama context, model, and sampler from GPU/CPU memory and nullifies pointers.
     pub fn close(&mut self) {
         unsafe {
             if !self.sampler.is_null() {
@@ -786,6 +822,24 @@ impl LlamaPipelineInstance {
                 llama_model_free(self.model);
                 self.model = std::ptr::null_mut();
             }
+            self.vocab = std::ptr::null();
+        }
+    }
+}
+
+#[cfg(test)]
+impl LlamaPipelineInstance {
+    pub fn dummy_closed() -> Self {
+        Self {
+            model: std::ptr::null_mut(),
+            ctx: std::ptr::null_mut(),
+            vocab: std::ptr::null(),
+            sampler: std::ptr::null_mut(),
+            slice_config: LayerSliceConfig::new(0, 0, 1).unwrap(),
+            hidden_dim: 128,
+            total_layers: 1,
+            n_ctx: 512,
+            decode_buf: vec![0.0; 128],
         }
     }
 }
@@ -793,5 +847,50 @@ impl LlamaPipelineInstance {
 impl Drop for LlamaPipelineInstance {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests_instance_safety {
+    use super::*;
+
+    #[test]
+    fn test_closed_instance_safety() {
+        let mut inst = LlamaPipelineInstance::dummy_closed();
+        assert!(!inst.is_ready(), "Dummy closed instance must not be ready");
+        assert!(inst.ensure_ready().is_err(), "ensure_ready must return error");
+
+        // tokenize must return error, no segfault
+        assert!(inst.tokenize("Hello", true).is_err(), "tokenize on closed instance must return error");
+
+        // token_to_piece must return error
+        assert!(inst.token_to_piece(1).is_err(), "token_to_piece on closed instance must return error");
+
+        // token_to_piece_str must return empty string safely
+        assert_eq!(inst.token_to_piece_str(1), "", "token_to_piece_str must safely return empty string");
+
+        // is_eog must safely return true
+        assert!(inst.is_eog(1), "is_eog must safely return true on closed instance");
+
+        // clear_kv_cache must not crash or panic
+        inst.clear_kv_cache();
+
+        // evaluate_tokens_to_activations must return error
+        assert!(inst.evaluate_tokens_to_activations(&[1, 2], 0).is_err(), "evaluate_tokens must return error");
+
+        // evaluate_tokens_to_activations_into must return error
+        let mut out = Vec::new();
+        assert!(inst.evaluate_tokens_to_activations_into(&[1, 2], 0, &mut out).is_err(), "evaluate_tokens_into must return error");
+
+        // evaluate_activations_to_logits must return error
+        let acts = vec![0.0f32; 128];
+        assert!(inst.evaluate_activations_to_logits(&acts, 1, 0).is_err(), "evaluate_activations must return error");
+
+        // sample_next_token must return error
+        assert!(inst.sample_next_token(0.7, 0.9, 42).is_err(), "sample_next_token must return error");
+
+        // repeated close must be safe (idempotent)
+        inst.close();
+        assert!(!inst.is_ready());
     }
 }

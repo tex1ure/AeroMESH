@@ -19,7 +19,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
-use crate::pipeline::PipelineCoordinatorClient;
+use crate::pipeline::{CoordinatorStatus, PipelineCoordinatorClient};
 
 /// Accumulates raw byte chunks to guarantee multi-byte UTF-8 character boundaries are never split across SSE chunks.
 #[derive(Debug, Default)]
@@ -143,9 +143,14 @@ pub struct ChatCompletionChunk {
     pub choices: Vec<ChatCompletionChunkChoice>,
 }
 
+// ---------------------------------------------------------------------------
+// Pipeline HTTP Server
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
 pub struct AppState {
-    pub coordinator: Mutex<PipelineCoordinatorClient>,
-    pub model_name: Mutex<String>,
+    pub coordinator: Arc<Mutex<PipelineCoordinatorClient>>,
+    pub model_name: Arc<Mutex<String>>,
 }
 
 pub struct PipelineHttpServer {
@@ -156,8 +161,8 @@ impl PipelineHttpServer {
     pub fn new(coordinator: PipelineCoordinatorClient, model_name: String) -> Self {
         Self {
             state: Arc::new(AppState {
-                coordinator: Mutex::new(coordinator),
-                model_name: Mutex::new(model_name),
+                coordinator: Arc::new(Mutex::new(coordinator)),
+                model_name: Arc::new(Mutex::new(model_name)),
             }),
         }
     }
@@ -185,8 +190,14 @@ impl PipelineHttpServer {
     }
 }
 
-async fn handle_health() -> &'static str {
-    "OK"
+async fn handle_health(State(state): State<Arc<AppState>>) -> (StatusCode, &'static str) {
+    let coord = state.coordinator.lock().await;
+    match coord.status {
+        CoordinatorStatus::Ready => (StatusCode::OK, "OK"),
+        CoordinatorStatus::Loading(_) => (StatusCode::SERVICE_UNAVAILABLE, "MODEL_LOADING"),
+        CoordinatorStatus::Failed(_) => (StatusCode::SERVICE_UNAVAILABLE, "MODEL_FAILED"),
+        CoordinatorStatus::Closed => (StatusCode::SERVICE_UNAVAILABLE, "MODEL_CLOSED"),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,10 +357,58 @@ async fn handle_chat_completions(
                 std::path::Path::new("models").join(target_model)
             };
             let mut coord = state.coordinator.lock().await;
-            if let Ok(()) = coord.switch_model(&model_path) {
+            if let Err(e) = coord.switch_model(&model_path) {
+                error!(error = %e, target_model = %target_model, "Failed to switch model on chat request");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!("Failed to switch to requested model '{}': {}", target_model, e),
+                            "type": "model_load_error",
+                            "code": 500
+                        }
+                    })),
+                ).into_response();
+            } else {
                 let mut mn = state.model_name.lock().await;
                 *mn = target_model.clone();
             }
+        }
+    }
+
+    // Readiness check: ensure model is fully loaded and ready before generation
+    {
+        let coord = state.coordinator.lock().await;
+        if !coord.is_ready() {
+            let (status_code, err_msg) = match coord.status() {
+                CoordinatorStatus::Loading(p) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Model pipeline is currently loading: {}", p.display()),
+                ),
+                CoordinatorStatus::Failed(e) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Model pipeline is unavailable (load failed: {})", e),
+                ),
+                CoordinatorStatus::Closed => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Model pipeline is closed".to_string(),
+                ),
+                CoordinatorStatus::Ready => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Model pipeline instance is not ready".to_string(),
+                ),
+            };
+
+            return (
+                status_code,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": err_msg,
+                        "type": "model_unavailable",
+                        "code": status_code.as_u16()
+                    }
+                })),
+            ).into_response();
         }
     }
 

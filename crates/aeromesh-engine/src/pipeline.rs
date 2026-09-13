@@ -196,8 +196,18 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                                 stage2
                             };
 
-                            inst.close();
-                            *inst = LlamaPipelineInstance::open(&target_path, new_slice.clone(), ngl, 4096)?;
+                            let new_inst = match LlamaPipelineInstance::open(&target_path, new_slice.clone(), ngl, 4096) {
+                                Ok(new_i) => {
+                                    inst.close();
+                                    new_i
+                                }
+                                Err(first_err) => {
+                                    warn!(error = %first_err, "Worker two-phase hot swap failed (VRAM pressure). Releasing active model to retry...");
+                                    inst.close();
+                                    LlamaPipelineInstance::open(&target_path, new_slice.clone(), ngl, 4096)?
+                                }
+                            };
+                            *inst = new_inst;
                             info!(model = %target_path.display(), hidden_dim = loader.hidden_dim, "✅ Worker successfully hot-swapped model");
                             return Ok(new_slice);
                         }
@@ -369,11 +379,20 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
     // Coordinator Pipeline Client (Zero-Weight Pipeline Stage 1 Orchestrator)
     // ---------------------------------------------------------------------------
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum CoordinatorStatus {
+        Ready,
+        Loading(PathBuf),
+        Failed(String),
+        Closed,
+    }
+
     pub struct PipelineCoordinatorClient {
         pub model_path: PathBuf,
         pub local_slice: LayerSliceConfig,
         pub worker_addrs: Vec<SocketAddr>,
-        pub instance: LlamaPipelineInstance,
+        pub instance: Option<LlamaPipelineInstance>,
+        pub status: CoordinatorStatus,
         pub hidden_dim: usize,
         pub total_layers: usize,
         pub transport: Option<PipelineTransport>,
@@ -426,12 +445,51 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 model_path: target_model_path,
                 local_slice,
                 worker_addrs,
-                instance,
+                instance: Some(instance),
+                status: CoordinatorStatus::Ready,
                 hidden_dim,
                 total_layers,
                 transport: None,
                 target_dtype: ActivationDtype::RawF32,
             })
+        }
+
+        pub fn get_instance_mut(&mut self) -> Result<&mut LlamaPipelineInstance> {
+            match &mut self.instance {
+                Some(inst) if inst.is_ready() => Ok(inst),
+                _ => {
+                    let reason = match &self.status {
+                        CoordinatorStatus::Failed(e) => format!("Model pipeline is unavailable (load failed: {})", e),
+                        CoordinatorStatus::Loading(p) => format!("Model pipeline is currently loading ({})", p.display()),
+                        CoordinatorStatus::Closed => "Model pipeline is closed".to_string(),
+                        CoordinatorStatus::Ready => "Model pipeline instance is not initialized".to_string(),
+                    };
+                    bail!(reason)
+                }
+            }
+        }
+
+        pub fn get_instance(&self) -> Result<&LlamaPipelineInstance> {
+            match &self.instance {
+                Some(inst) if inst.is_ready() => Ok(inst),
+                _ => {
+                    let reason = match &self.status {
+                        CoordinatorStatus::Failed(e) => format!("Model pipeline is unavailable (load failed: {})", e),
+                        CoordinatorStatus::Loading(p) => format!("Model pipeline is currently loading ({})", p.display()),
+                        CoordinatorStatus::Closed => "Model pipeline is closed".to_string(),
+                        CoordinatorStatus::Ready => "Model pipeline instance is not initialized".to_string(),
+                    };
+                    bail!(reason)
+                }
+            }
+        }
+
+        pub fn is_ready(&self) -> bool {
+            self.status == CoordinatorStatus::Ready && self.instance.as_ref().map(|i| i.is_ready()).unwrap_or(false)
+        }
+
+        pub fn status(&self) -> &CoordinatorStatus {
+            &self.status
         }
 
         pub fn switch_model<P: AsRef<Path>>(&mut self, new_model_path: P) -> Result<()> {
@@ -440,6 +498,7 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 bail!("Model file not found at {:?}", path_ref);
             }
 
+            // Step 1: Pre-validate GGUF structure and compute slice before modifying state
             let loader = GgufSliceLoader::open(path_ref)?;
             let total_layers = loader.total_layers;
             let num_nodes = self.worker_addrs.len() + 1;
@@ -463,15 +522,46 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 path_ref.to_path_buf()
             };
 
-            // Explicitly release old model VRAM before loading new model
-            self.instance.close();
+            // Step 2: Attempt two-phase transactional model loading (zero downtime switch)
+            let new_instance = match LlamaPipelineInstance::open(&target_model_path, local_slice.clone(), ngl, 4096) {
+                Ok(inst) => {
+                    // Two-phase load succeeded! Safely close old instance and take new one
+                    if let Some(mut old) = self.instance.take() {
+                        old.close();
+                    }
+                    inst
+                }
+                Err(first_err) => {
+                    // Two-phase load failed (likely CUDA VRAM constraint from having two models concurrent).
+                    // Release active model to maximize available VRAM and retry single-model load.
+                    warn!(
+                        error = %first_err,
+                        "Two-phase model load failed (likely VRAM pressure). Freeing active model to retry single-instance load..."
+                    );
+                    if let Some(mut old) = self.instance.take() {
+                        old.close();
+                    }
+                    self.status = CoordinatorStatus::Loading(target_model_path.clone());
 
-            let instance = LlamaPipelineInstance::open(&target_model_path, local_slice.clone(), ngl, 4096)?;
-            let hidden_dim = instance.hidden_dim;
+                    match LlamaPipelineInstance::open(&target_model_path, local_slice.clone(), ngl, 4096) {
+                        Ok(inst) => inst,
+                        Err(second_err) => {
+                            let err_msg = format!("Failed to load model {:?}: {}", target_model_path, second_err);
+                            error!(error = %err_msg, "Model switch failed. Transitioning coordinator to Failed state.");
+                            self.instance = None;
+                            self.status = CoordinatorStatus::Failed(err_msg.clone());
+                            self.transport = None;
+                            bail!(err_msg);
+                        }
+                    }
+                }
+            };
 
+            let hidden_dim = new_instance.hidden_dim;
             self.model_path = target_model_path;
             self.local_slice = local_slice;
-            self.instance = instance;
+            self.instance = Some(new_instance);
+            self.status = CoordinatorStatus::Ready;
             self.hidden_dim = hidden_dim;
             self.total_layers = total_layers;
             self.transport = None; // Force fresh transport handshake with new model dimensions
@@ -590,8 +680,11 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         let mut total_tokens = 0usize;
         let mut perf_metrics = Vec::new();
 
+        // Verify model readiness before proceeding
+        self.get_instance()?;
+
         // Step 1: Tokenize prompt
-        let prompt_tokens = self.instance.tokenize(prompt, true)?;
+        let prompt_tokens = self.get_instance()?.tokenize(prompt, true)?;
         if prompt_tokens.is_empty() {
             bail!("Prompt tokenization produced 0 tokens");
         }
@@ -599,11 +692,11 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         let prompt_len = prompt_tokens.len() as u32;
 
         // Reset Stage 1 KV-cache for new session
-        self.instance.clear_kv_cache();
+        self.get_instance()?.clear_kv_cache();
 
         // Step 2: Prefill Stage 1
         let prefill_start = Instant::now();
-        let prefill_activations = self.instance.evaluate_tokens_to_activations(&prompt_tokens, 0)?;
+        let prefill_activations = self.get_instance_mut()?.evaluate_tokens_to_activations(&prompt_tokens, 0)?;
         let prefill_time = prefill_start.elapsed();
 
         // Phase 1 Boundary Watchdog: Inspect Coordinator prefill egress activations
@@ -640,9 +733,10 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 }
             }
         } else {
-            first_token_id = self.instance.sample_next_token(0.7, 0.9, 0)?;
-            is_first_eos = self.instance.is_eog(first_token_id);
-            let piece_bytes = self.instance.token_to_piece(first_token_id).unwrap_or_default();
+            let inst = self.get_instance_mut()?;
+            first_token_id = inst.sample_next_token(0.7, 0.9, 0)?;
+            is_first_eos = inst.is_eog(first_token_id);
+            let piece_bytes = inst.token_to_piece(first_token_id).unwrap_or_default();
             first_token_text = String::from_utf8_lossy(&piece_bytes).to_string();
         }
 
@@ -666,7 +760,7 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         if !is_first_eos {
             for seq_id in 1..max_tokens {
                 let decode_tokens = [current_token_id];
-                if let Err(e) = self.instance.evaluate_tokens_to_activations_into(&decode_tokens, current_pos, &mut decode_act_buf) {
+                if let Err(e) = self.get_instance_mut()?.evaluate_tokens_to_activations_into(&decode_tokens, current_pos, &mut decode_act_buf) {
                     self.transport = None;
                     bail!("Stage 1 decode forward pass error: {}", e);
                 }
@@ -704,10 +798,11 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                         }
                     }
                 } else {
-                    let tid = self.instance.sample_next_token(0.7, 0.9, seq_id as u32)?;
-                    let token_piece_bytes = self.instance.token_to_piece(tid).unwrap_or_default();
+                    let inst = self.get_instance_mut()?;
+                    let tid = inst.sample_next_token(0.7, 0.9, seq_id as u32)?;
+                    let token_piece_bytes = inst.token_to_piece(tid).unwrap_or_default();
                     let text = String::from_utf8_lossy(&token_piece_bytes).to_string();
-                    let eos = self.instance.is_eog(tid)
+                    let eos = inst.is_eog(tid)
                         || text.contains("<|im_end|>")
                         || text.contains("<|endoftext|>")
                         || text.contains("<|eot_id|>")
@@ -752,5 +847,72 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         ));
 
         Ok((generated_text, perf_metrics))
+    }
+}
+
+#[cfg(test)]
+mod tests_pipeline_safety {
+    use super::*;
+
+    #[test]
+    fn test_coordinator_status_rejection_when_failed() {
+        let mut client = PipelineCoordinatorClient {
+            model_path: PathBuf::from("non_existent_model.gguf"),
+            local_slice: LayerSliceConfig::new(0, 0, 1).unwrap(),
+            worker_addrs: Vec::new(),
+            instance: None,
+            status: CoordinatorStatus::Failed("GGUF load failed: Out of Memory".to_string()),
+            hidden_dim: 128,
+            total_layers: 1,
+            transport: None,
+            target_dtype: ActivationDtype::RawF32,
+        };
+
+        assert!(!client.is_ready());
+        let res = client.get_instance_mut();
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("Model pipeline is unavailable (load failed:"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_pipeline_rejects_when_failed() {
+        let mut client = PipelineCoordinatorClient {
+            model_path: PathBuf::from("non_existent_model.gguf"),
+            local_slice: LayerSliceConfig::new(0, 0, 1).unwrap(),
+            worker_addrs: Vec::new(),
+            instance: None,
+            status: CoordinatorStatus::Failed("GGUF load failed: file corrupted".to_string()),
+            hidden_dim: 128,
+            total_layers: 1,
+            transport: None,
+            target_dtype: ActivationDtype::RawF32,
+        };
+
+        let res = client.generate_pipeline("Hello", 10, 0.7, 0.9, 1234, None).await;
+        assert!(res.is_err(), "generate_pipeline must reject when in Failed state without crashing");
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("Model pipeline is unavailable (load failed:"));
+    }
+
+    #[test]
+    fn test_switch_model_invalid_path_preserves_old_model() {
+        let mut client = PipelineCoordinatorClient {
+            model_path: PathBuf::from("models/mock_stage1.gguf"),
+            local_slice: LayerSliceConfig::new(0, 0, 1).unwrap(),
+            worker_addrs: Vec::new(),
+            instance: Some(LlamaPipelineInstance::dummy_closed()),
+            status: CoordinatorStatus::Ready,
+            hidden_dim: 128,
+            total_layers: 1,
+            transport: None,
+            target_dtype: ActivationDtype::RawF32,
+        };
+
+        let res = client.switch_model("completely_non_existent_model_file.gguf");
+        assert!(res.is_err(), "switch_model must fail on non-existent file");
+        // Old model instance must NOT have been taken or closed
+        assert!(client.instance.is_some(), "Instance must still be present");
+        assert_eq!(client.status, CoordinatorStatus::Ready, "Status must remain Ready");
     }
 }
