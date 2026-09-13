@@ -110,10 +110,30 @@ impl SharedMemoryRingBuffer {
             return Ok(None); // Buffer empty
         }
 
+        let available = if head >= tail {
+            head - tail
+        } else {
+            self.capacity - (tail - head)
+        };
+        ensure!(
+            available >= 4,
+            "Corrupted ring buffer: available bytes ({}) less than length prefix header (4)",
+            available
+        );
+
         // Read 4-byte length prefix
         let mut len_bytes = [0u8; 4];
         self.read_raw(tail, &mut len_bytes);
         let len = u32::from_le_bytes(len_bytes) as usize;
+
+        let max_allowed = (self.capacity.saturating_sub(4)).min(crate::activation::MAX_ACTIVATION_PAYLOAD_BYTES as usize);
+        ensure!(
+            len <= max_allowed && len <= available - 4,
+            "Shared memory length prefix ({}) exceeds valid bounds (available payload: {}, max allowed: {})",
+            len,
+            available - 4,
+            max_allowed
+        );
 
         let next_tail = (tail + 4) % self.capacity;
         let mut data = vec![0u8; len];
@@ -155,6 +175,25 @@ mod tests {
 
         let recv = rb2.read_slice().unwrap().expect("should receive msg");
         assert_eq!(recv.as_slice(), msg);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_shm_ring_buffer_rejects_oversized_len() {
+        let path = std::env::temp_dir().join("aeromesh_test_shm_corrupt.bin");
+        let _ = std::fs::remove_file(&path);
+
+        let mut rb = SharedMemoryRingBuffer::create_or_open(&path, 1024).unwrap();
+        // Artificially corrupt the buffer: advance head to 10, but write a 1GB length prefix at tail (0)
+        let malicious_len: u32 = 1024 * 1024 * 1024; // 1 GB
+        rb.write_raw(0, &malicious_len.to_le_bytes());
+        rb.head().store(10, Ordering::Release);
+        rb.tail().store(0, Ordering::Release);
+
+        let res = rb.read_slice();
+        assert!(res.is_err(), "Must reject oversized length prefix without allocating");
+        assert!(res.unwrap_err().to_string().contains("exceeds valid bounds"));
 
         let _ = std::fs::remove_file(&path);
     }

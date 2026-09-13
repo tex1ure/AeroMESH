@@ -10,6 +10,14 @@ pub const HANDSHAKE_REQ_MAGIC: [u8; 4] = *b"AHSK";
 pub const HANDSHAKE_RESP_MAGIC: [u8; 4] = *b"AHSR";
 pub const PROTOCOL_VERSION: u16 = 2;
 
+// Hard Resource Ceilings to Prevent Unbounded Network Memory Allocations & DoS
+pub const MAX_ACTIVATION_PAYLOAD_BYTES: u32 = 128 * 1024 * 1024; // 128 MB max per activation frame
+pub const MAX_SEQUENCE_LENGTH: u32 = 131_072;                   // 128k max sequence length
+pub const MAX_HIDDEN_DIM: u32 = 65_536;                         // 64k max hidden dimension
+pub const MAX_TOKEN_TEXT_BYTES: u32 = 64 * 1024;                // 64 KB max token text piece
+pub const MAX_HANDSHAKE_STR_LEN: usize = 512;                   // 512 B max architecture or checksum string
+pub const MAX_HANDSHAKE_ERR_LEN: usize = 8192;                  // 8 KB max error message length
+
 // Flags for ActivationHeader
 pub const FLAG_CLEAR_KV: u8 = 0x01;
 pub const FLAG_IS_PROMPT: u8 = 0x02;
@@ -66,6 +74,41 @@ pub struct ActivationHeader {
 impl ActivationHeader {
     pub const SIZE: usize = 42;
 
+    /// Calculates mathematically expected payload size for given sequence length, hidden dimension, and dtype.
+    /// Returns an error on integer overflow or unsupported dtype.
+    pub fn calculate_expected_payload_bytes(sequence_length: u32, hidden_dim: u32, dtype: u8) -> Result<u32> {
+        let seq_len = sequence_length as u64;
+        let d = hidden_dim as u64;
+        let activation_dtype = ActivationDtype::from_u8(dtype)?;
+
+        let total_bytes: u64 = match activation_dtype {
+            ActivationDtype::RawF32 => seq_len
+                .checked_mul(d)
+                .and_then(|elems| elems.checked_mul(4))
+                .ok_or_else(|| anyhow::anyhow!("RawF32 payload size overflow (seq_len={}, dim={})", seq_len, d))?,
+            ActivationDtype::Fp16 | ActivationDtype::Bf16 => seq_len
+                .checked_mul(d)
+                .and_then(|elems| elems.checked_mul(2))
+                .ok_or_else(|| anyhow::anyhow!("FP16/BF16 payload size overflow (seq_len={}, dim={})", seq_len, d))?,
+            ActivationDtype::Fp8E4M3 => seq_len
+                .checked_mul(d)
+                .ok_or_else(|| anyhow::anyhow!("FP8 payload size overflow (seq_len={}, dim={})", seq_len, d))?,
+            ActivationDtype::Int8PerRow => {
+                let row_bytes = d.checked_add(4)
+                    .ok_or_else(|| anyhow::anyhow!("Int8PerRow row size overflow (dim={})", d))?;
+                seq_len
+                    .checked_mul(row_bytes)
+                    .ok_or_else(|| anyhow::anyhow!("Int8PerRow payload size overflow (seq_len={}, dim={})", seq_len, d))?
+            }
+        };
+
+        if total_bytes > (u32::MAX as u64) {
+            bail!("Calculated payload size exceeds u32::MAX: {}", total_bytes);
+        }
+
+        Ok(total_bytes as u32)
+    }
+
     pub fn encode(&self, out: &mut [u8]) {
         assert!(out.len() >= Self::SIZE);
         out[0..4].copy_from_slice(&self.magic);
@@ -99,6 +142,38 @@ impl ActivationHeader {
         let dtype = src[36];
         let flags = src[37];
         let payload_bytes = BigEndian::read_u32(&src[38..42]);
+
+        // Validate protocol boundaries against malicious inputs before accepting
+        ensure!(
+            sequence_length <= MAX_SEQUENCE_LENGTH,
+            "Activation sequence_length ({}) exceeds maximum allowed ({})",
+            sequence_length,
+            MAX_SEQUENCE_LENGTH
+        );
+        ensure!(
+            hidden_dim <= MAX_HIDDEN_DIM && hidden_dim > 0,
+            "Activation hidden_dim ({}) is invalid (max allowed: {})",
+            hidden_dim,
+            MAX_HIDDEN_DIM
+        );
+        ensure!(
+            payload_bytes <= MAX_ACTIVATION_PAYLOAD_BYTES,
+            "Activation payload_bytes ({}) exceeds maximum safety ceiling ({} bytes)",
+            payload_bytes,
+            MAX_ACTIVATION_PAYLOAD_BYTES
+        );
+
+        // Mathematical consistency guard: payload_bytes must match tensor dimensions and dtype
+        let expected_bytes = Self::calculate_expected_payload_bytes(sequence_length, hidden_dim, dtype)?;
+        ensure!(
+            payload_bytes == expected_bytes,
+            "Mismatched activation payload size in header: header claims {} bytes, expected {} bytes (seq_len={}, dim={}, dtype={})",
+            payload_bytes,
+            expected_bytes,
+            sequence_length,
+            hidden_dim,
+            dtype
+        );
 
         Ok(Self {
             magic,
@@ -359,7 +434,15 @@ impl ActivationFrame {
     }
 
     pub fn to_f32_vec(&self) -> Result<Vec<f32>> {
-        let total_elements = (self.header.sequence_length as usize) * (self.header.hidden_dim as usize);
+        let total_elements = (self.header.sequence_length as usize)
+            .checked_mul(self.header.hidden_dim as usize)
+            .ok_or_else(|| anyhow::anyhow!("Integer overflow calculating total f32 elements (seq_len={}, dim={})", self.header.sequence_length, self.header.hidden_dim))?;
+        ensure!(
+            total_elements <= (MAX_ACTIVATION_PAYLOAD_BYTES as usize),
+            "Total elements ({}) exceeds safety limit ({})",
+            total_elements,
+            MAX_ACTIVATION_PAYLOAD_BYTES
+        );
         let mut out = vec![0.0f32; total_elements];
         self.dequantize_into(&mut out)?;
         Ok(out)
@@ -379,6 +462,13 @@ impl ActivationFrame {
         reader.read_exact(&mut header_buf).await?;
         let header = ActivationHeader::decode(&header_buf)?;
 
+        ensure!(
+            header.payload_bytes <= MAX_ACTIVATION_PAYLOAD_BYTES,
+            "Activation payload_bytes ({}) exceeds maximum safety ceiling ({} bytes)",
+            header.payload_bytes,
+            MAX_ACTIVATION_PAYLOAD_BYTES
+        );
+
         let mut payload_buf = vec![0u8; header.payload_bytes as usize];
         reader.read_exact(&mut payload_buf).await?;
 
@@ -392,6 +482,13 @@ impl ActivationFrame {
         let mut header_buf = [0u8; ActivationHeader::SIZE];
         reader.read_exact(&mut header_buf)?;
         let header = ActivationHeader::decode(&header_buf)?;
+
+        ensure!(
+            header.payload_bytes <= MAX_ACTIVATION_PAYLOAD_BYTES,
+            "Activation payload_bytes ({}) exceeds maximum safety ceiling ({} bytes)",
+            header.payload_bytes,
+            MAX_ACTIVATION_PAYLOAD_BYTES
+        );
 
         let mut payload_buf = vec![0u8; header.payload_bytes as usize];
         reader.read_exact(&mut payload_buf)?;
@@ -536,6 +633,13 @@ impl TokenResponseFrame {
         let eval_time_ms = f32::from_bits(eval_time_bits);
         let text_len = reader.read_u32().await? as usize;
 
+        ensure!(
+            text_len <= (MAX_TOKEN_TEXT_BYTES as usize),
+            "Token text length ({}) exceeds maximum safety ceiling ({} bytes)",
+            text_len,
+            MAX_TOKEN_TEXT_BYTES
+        );
+
         let mut text_buf = vec![0u8; text_len];
         reader.read_exact(&mut text_buf).await?;
         let token_text = String::from_utf8(text_buf)?;
@@ -580,6 +684,13 @@ impl TokenResponseFrame {
 
         reader.read_exact(&mut u32_buf)?;
         let text_len = u32::from_be_bytes(u32_buf) as usize;
+
+        ensure!(
+            text_len <= (MAX_TOKEN_TEXT_BYTES as usize),
+            "Token text length ({}) exceeds maximum safety ceiling ({} bytes)",
+            text_len,
+            MAX_TOKEN_TEXT_BYTES
+        );
 
         let mut text_buf = vec![0u8; text_len];
         reader.read_exact(&mut text_buf)?;
@@ -644,11 +755,23 @@ impl HandshakeRequest {
         let worker_layer_end = reader.read_u32().await?;
 
         let arch_len = reader.read_u16().await? as usize;
+        ensure!(
+            arch_len <= MAX_HANDSHAKE_STR_LEN,
+            "Handshake architecture string length ({}) exceeds limit ({} bytes)",
+            arch_len,
+            MAX_HANDSHAKE_STR_LEN
+        );
         let mut arch_buf = vec![0u8; arch_len];
         reader.read_exact(&mut arch_buf).await?;
         let model_architecture = String::from_utf8(arch_buf)?;
 
         let csum_len = reader.read_u16().await? as usize;
+        ensure!(
+            csum_len <= MAX_HANDSHAKE_STR_LEN,
+            "Handshake checksum string length ({}) exceeds limit ({} bytes)",
+            csum_len,
+            MAX_HANDSHAKE_STR_LEN
+        );
         let mut csum_buf = vec![0u8; csum_len];
         reader.read_exact(&mut csum_buf).await?;
         let checksum_prefix = String::from_utf8(csum_buf)?;
@@ -711,6 +834,12 @@ impl HandshakeResponse {
         let worker_layer_count = reader.read_u32().await?;
 
         let err_len = reader.read_u16().await? as usize;
+        ensure!(
+            err_len <= MAX_HANDSHAKE_ERR_LEN,
+            "Handshake error message length ({}) exceeds limit ({} bytes)",
+            err_len,
+            MAX_HANDSHAKE_ERR_LEN
+        );
         let mut err_buf = vec![0u8; err_len];
         reader.read_exact(&mut err_buf).await?;
         let error_message = String::from_utf8(err_buf)?;
@@ -923,5 +1052,163 @@ mod tests {
 
         let inf_data = vec![1.0f32, f32::INFINITY, 2.0];
         assert!(inspect_activations("Test_Inf", &inf_data, &[1, 3]).is_err());
+    }
+
+    #[test]
+    fn test_activation_header_rejects_oversized_payload_ceiling() {
+        let mut buf = [0u8; ActivationHeader::SIZE];
+        buf[0..4].copy_from_slice(&ACTIVATION_MAGIC);
+        BigEndian::write_u16(&mut buf[4..6], PROTOCOL_VERSION);
+        BigEndian::write_u32(&mut buf[22..26], 1); // seq_len = 1
+        BigEndian::write_u32(&mut buf[32..36], 1024); // hidden_dim = 1024
+        buf[36] = ActivationDtype::RawF32 as u8;
+        // Inject payload_bytes = MAX_ACTIVATION_PAYLOAD_BYTES + 1
+        BigEndian::write_u32(&mut buf[38..42], MAX_ACTIVATION_PAYLOAD_BYTES + 1);
+
+        let res = ActivationHeader::decode(&buf);
+        assert!(res.is_err(), "Must reject payload exceeding MAX_ACTIVATION_PAYLOAD_BYTES");
+        assert!(res.unwrap_err().to_string().contains("exceeds maximum safety ceiling"));
+
+        // Inject payload_bytes = 0xFFFFFFFF
+        BigEndian::write_u32(&mut buf[38..42], u32::MAX);
+        let res_max = ActivationHeader::decode(&buf);
+        assert!(res_max.is_err(), "Must reject u32::MAX payload_bytes");
+    }
+
+    #[test]
+    fn test_activation_header_rejects_mismatched_payload_bytes() {
+        let mut buf = [0u8; ActivationHeader::SIZE];
+        buf[0..4].copy_from_slice(&ACTIVATION_MAGIC);
+        BigEndian::write_u16(&mut buf[4..6], PROTOCOL_VERSION);
+        BigEndian::write_u32(&mut buf[22..26], 1); // seq_len = 1
+        BigEndian::write_u32(&mut buf[32..36], 16); // hidden_dim = 16
+        buf[36] = ActivationDtype::RawF32 as u8; // expected: 1 * 16 * 4 = 64 bytes
+        BigEndian::write_u32(&mut buf[38..42], 128); // malicious/corrupted claim: 128 bytes
+
+        let res = ActivationHeader::decode(&buf);
+        assert!(res.is_err(), "Must reject mathematically mismatched payload length");
+        assert!(res.unwrap_err().to_string().contains("Mismatched activation payload size"));
+    }
+
+    #[test]
+    fn test_activation_header_rejects_oversized_sequence_or_dim() {
+        let mut buf = [0u8; ActivationHeader::SIZE];
+        buf[0..4].copy_from_slice(&ACTIVATION_MAGIC);
+        BigEndian::write_u16(&mut buf[4..6], PROTOCOL_VERSION);
+        BigEndian::write_u32(&mut buf[22..26], MAX_SEQUENCE_LENGTH + 1); // seq_len too large
+        BigEndian::write_u32(&mut buf[32..36], 1024);
+        buf[36] = ActivationDtype::RawF32 as u8;
+        BigEndian::write_u32(&mut buf[38..42], 4096);
+
+        let res = ActivationHeader::decode(&buf);
+        assert!(res.is_err(), "Must reject sequence_length > MAX_SEQUENCE_LENGTH");
+
+        // Now test hidden_dim > MAX_HIDDEN_DIM
+        BigEndian::write_u32(&mut buf[22..26], 1);
+        BigEndian::write_u32(&mut buf[32..36], MAX_HIDDEN_DIM + 1);
+        let res_dim = ActivationHeader::decode(&buf);
+        assert!(res_dim.is_err(), "Must reject hidden_dim > MAX_HIDDEN_DIM");
+
+        // Now test hidden_dim == 0
+        BigEndian::write_u32(&mut buf[32..36], 0);
+        let res_zero = ActivationHeader::decode(&buf);
+        assert!(res_zero.is_err(), "Must reject hidden_dim == 0");
+    }
+
+    #[test]
+    fn test_activation_header_rejects_integer_overflow() {
+        let res = ActivationHeader::calculate_expected_payload_bytes(u32::MAX, u32::MAX, ActivationDtype::RawF32 as u8);
+        assert!(res.is_err(), "Must fail on integer overflow in dimensions calculation");
+    }
+
+    #[tokio::test]
+    async fn test_token_response_rejects_oversized_text_async() {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&TOKEN_RESP_MAGIC);
+        stream.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        stream.extend_from_slice(&1u64.to_be_bytes()); // session_id
+        stream.extend_from_slice(&1u64.to_be_bytes()); // sequence_id
+        stream.extend_from_slice(&42i32.to_be_bytes()); // token_id
+        stream.push(0); // is_eos = false
+        stream.extend_from_slice(&1.5f32.to_bits().to_be_bytes()); // eval_time_ms
+        // Malicious length: 1 MB text (> MAX_TOKEN_TEXT_BYTES = 64 KB)
+        stream.extend_from_slice(&(1024 * 1024u32).to_be_bytes());
+
+        let mut cursor = std::io::Cursor::new(stream);
+        let res = TokenResponseFrame::decode_async(&mut cursor).await;
+        assert!(res.is_err(), "Must reject token text exceeding ceiling");
+        assert!(res.unwrap_err().to_string().contains("exceeds maximum safety ceiling"));
+    }
+
+    #[test]
+    fn test_token_response_rejects_oversized_text_sync() {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&TOKEN_RESP_MAGIC);
+        stream.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        stream.extend_from_slice(&1u64.to_be_bytes());
+        stream.extend_from_slice(&1u64.to_be_bytes());
+        stream.extend_from_slice(&42i32.to_be_bytes());
+        stream.push(0);
+        stream.extend_from_slice(&1.5f32.to_bits().to_be_bytes());
+        // Malicious length: 1 MB
+        stream.extend_from_slice(&(1024 * 1024u32).to_be_bytes());
+
+        let mut cursor = std::io::Cursor::new(stream);
+        let res = TokenResponseFrame::decode_sync(&mut cursor);
+        assert!(res.is_err(), "Must reject token text exceeding ceiling");
+        assert!(res.unwrap_err().to_string().contains("exceeds maximum safety ceiling"));
+    }
+
+    #[tokio::test]
+    async fn test_handshake_request_rejects_oversized_strings() {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&HANDSHAKE_REQ_MAGIC);
+        stream.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        stream.extend_from_slice(&4096u32.to_be_bytes()); // hidden_dim
+        stream.extend_from_slice(&32u32.to_be_bytes());   // total_layers
+        stream.extend_from_slice(&0u32.to_be_bytes());    // worker_layer_start
+        stream.extend_from_slice(&16u32.to_be_bytes());   // worker_layer_end
+        // Malicious arch length: 1000 bytes (> MAX_HANDSHAKE_STR_LEN = 512)
+        stream.extend_from_slice(&1000u16.to_be_bytes());
+
+        let mut cursor = std::io::Cursor::new(stream);
+        let res = HandshakeRequest::decode_async(&mut cursor).await;
+        assert!(res.is_err(), "Must reject architecture string exceeding limit");
+        assert!(res.unwrap_err().to_string().contains("exceeds limit"));
+    }
+
+    #[tokio::test]
+    async fn test_handshake_response_rejects_oversized_error() {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&HANDSHAKE_RESP_MAGIC);
+        stream.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        stream.push(0); // accepted = false
+        stream.extend_from_slice(&0u32.to_be_bytes()); // worker_layer_count
+        // Malicious error string length: 10000 bytes (> MAX_HANDSHAKE_ERR_LEN = 8192)
+        stream.extend_from_slice(&10000u16.to_be_bytes());
+
+        let mut cursor = std::io::Cursor::new(stream);
+        let res = HandshakeResponse::decode_async(&mut cursor).await;
+        assert!(res.is_err(), "Must reject handshake error string exceeding limit");
+        assert!(res.unwrap_err().to_string().contains("exceeds limit"));
+    }
+
+    #[tokio::test]
+    async fn test_activation_frame_truncated_stream_error() {
+        let mut header_bytes = [0u8; ActivationHeader::SIZE];
+        header_bytes[0..4].copy_from_slice(&ACTIVATION_MAGIC);
+        BigEndian::write_u16(&mut header_bytes[4..6], PROTOCOL_VERSION);
+        BigEndian::write_u32(&mut header_bytes[22..26], 1);
+        BigEndian::write_u32(&mut header_bytes[32..36], 4);
+        header_bytes[36] = ActivationDtype::RawF32 as u8; // expected 16 bytes
+        BigEndian::write_u32(&mut header_bytes[38..42], 16);
+
+        // Feed only 8 bytes of payload instead of 16
+        let mut stream = header_bytes.to_vec();
+        stream.extend_from_slice(&[0u8; 8]);
+
+        let mut cursor = std::io::Cursor::new(stream);
+        let res = ActivationFrame::decode_async(&mut cursor).await;
+        assert!(res.is_err(), "Must error on truncated payload stream");
     }
 }

@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
@@ -96,7 +96,17 @@ impl PipelineWorkerService {
                                         let _ = hot_swap_worker_model(&mut inst, frame.header.hidden_dim, frame.header.layer_index);
                                     }
 
-                                    let total_elements = (seq_len as usize) * (frame.header.hidden_dim as usize);
+                                    let total_elements = match (seq_len as usize).checked_mul(frame.header.hidden_dim as usize) {
+                                        Some(elems) if elems <= (aeromesh_core::MAX_ACTIVATION_PAYLOAD_BYTES as usize) => elems,
+                                        _ => {
+                                            error!(
+                                                seq_len = seq_len,
+                                                dim = frame.header.hidden_dim,
+                                                "Oversized or overflowing activation dimensions in SHM; dropping frame"
+                                            );
+                                            continue;
+                                        }
+                                    };
                                     let mut dequant_buf = vec![0.0f32; total_elements];
                                     if let Err(e) = frame.dequantize_into(&mut dequant_buf) {
                                         error!(error = %e, "SHM dequantization error");
@@ -281,7 +291,15 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
             let seq_len = frame.header.sequence_length.max(1);
             let start_pos = frame.header.token_position;
             let seq_id = frame.header.sequence_id;
-            let total_elements = (seq_len as usize) * (frame.header.hidden_dim as usize);
+            let total_elements = (seq_len as usize)
+                .checked_mul(frame.header.hidden_dim as usize)
+                .ok_or_else(|| anyhow::anyhow!("Integer overflow calculating total elements (seq_len={}, dim={})", seq_len, frame.header.hidden_dim))?;
+            ensure!(
+                total_elements <= (aeromesh_core::MAX_ACTIVATION_PAYLOAD_BYTES as usize),
+                "Total elements ({}) exceeds safety limit ({})",
+                total_elements,
+                aeromesh_core::MAX_ACTIVATION_PAYLOAD_BYTES
+            );
 
             // In-place dequantize into reusable buffer
             dequant_buf.resize(total_elements, 0.0f32);
@@ -662,12 +680,7 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                     tracing::error!("🚨 Coordinator decode egress watchdog assertion failed: {}", e);
                 }
 
-                let mut next_token_id = 0;
-                let mut token_text = String::new();
-                let mut is_eos = false;
-
-                // Stream single-token quantized activation frame [1 * hidden_dim: 1.50 KB or 5.12 KB]
-                if let Some(ref mut transport) = self.transport {
+                let (next_token_id, token_text, is_eos) = if let Some(ref mut transport) = self.transport {
                     let decode_frame = ActivationFrame::from_f32_matrix_quantized(
                         session_id,
                         seq_id as u64,
@@ -679,23 +692,28 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                         self.target_dtype,
                         0,
                     );
-                    if transport.send_activation(&decode_frame).await.is_ok() {
-                        if let Ok(resp) = transport.recv_response().await {
-                            next_token_id = resp.token_id;
-                            token_text = resp.token_text;
-                            is_eos = resp.is_eos;
+                    if let Err(e) = transport.send_activation(&decode_frame).await {
+                        error!(error = %e, "Failed to send decode activation frame to worker");
+                        break;
+                    }
+                    match transport.recv_response().await {
+                        Ok(resp) => (resp.token_id, resp.token_text, resp.is_eos),
+                        Err(e) => {
+                            error!(error = %e, "Failed to receive token response from worker");
+                            break;
                         }
                     }
                 } else {
-                    next_token_id = self.instance.sample_next_token(0.7, 0.9, seq_id as u32)?;
-                    let token_piece_bytes = self.instance.token_to_piece(next_token_id).unwrap_or_default();
-                    token_text = String::from_utf8_lossy(&token_piece_bytes).to_string();
-                    is_eos = self.instance.is_eog(next_token_id)
-                        || token_text.contains("<|im_end|>")
-                        || token_text.contains("<|endoftext|>")
-                        || token_text.contains("<|eot_id|>")
-                        || token_text.contains("</s>");
-                }
+                    let tid = self.instance.sample_next_token(0.7, 0.9, seq_id as u32)?;
+                    let token_piece_bytes = self.instance.token_to_piece(tid).unwrap_or_default();
+                    let text = String::from_utf8_lossy(&token_piece_bytes).to_string();
+                    let eos = self.instance.is_eog(tid)
+                        || text.contains("<|im_end|>")
+                        || text.contains("<|endoftext|>")
+                        || text.contains("<|eot_id|>")
+                        || text.contains("</s>");
+                    (tid, text, eos)
+                };
 
                 if is_eos {
                     break;
