@@ -433,6 +433,12 @@ body::after {
   animation: pulse-dot 2s infinite ease-in-out;
 }
 
+.status-dot.generating {
+  background-color: var(--accent-mint);
+  box-shadow: 0 0 16px rgba(74, 222, 128, 0.7);
+  animation: pulse-dot 0.8s infinite ease-in-out;
+}
+
 .status-dot.offline {
   background-color: var(--accent-coral);
   box-shadow: 0 0 12px rgba(248, 113, 113, 0.4);

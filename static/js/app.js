@@ -15,7 +15,8 @@
 
   let activeModel = 'Loading...';
   let availableModels = [];
-  let clusterState = { connected: false, status: 'checking' };
+  let clusterState = 'offline';
+  let lastClusterPayload = null;
 
   let maxTokens = 256;
   const tokenSteps = [128, 256, 512, 1024, 2048];
@@ -70,7 +71,7 @@
 
     await fetchModels();
     await fetchClusterStatus();
-    setInterval(fetchClusterStatus, 6000);
+    setInterval(fetchClusterStatus, 2500);
 
     if (conversations.length === 0) {
       createNewChat();
@@ -170,37 +171,79 @@
     lucide.createIcons();
   }
 
+  // --- UNIFIED CLUSTER TELEMETRY STATE (ONE SOURCE OF TRUTH) ---
+  // Exactly three states: 'offline' | 'online_idle' | 'online_generating'
+
   async function fetchClusterStatus() {
     try {
       const resp = await fetch('/api/cluster/status');
       if (resp.ok) {
-        clusterState = await resp.json();
-        updateClusterUI(clusterState);
+        const data = await resp.json();
+        let mapped = 'offline';
+        if (data.state === 'offline' || data.status === 'offline' || data.connected === false) {
+          mapped = 'offline';
+        } else if (data.state === 'online_generating' || (isGenerating && data.connected !== false)) {
+          mapped = 'online_generating';
+        } else if (
+          data.state === 'online_idle' ||
+          data.status === 'ok' ||
+          data.connected === true ||
+          data.cluster_status === 'ONLINE'
+        ) {
+          mapped = isGenerating ? 'online_generating' : 'online_idle';
+        }
+        setClusterState(mapped, data);
         return;
       }
     } catch (e) {
-      clusterState = { connected: false, status: 'offline', message: e.message };
+      // Network fetch error
     }
-    updateClusterUI(clusterState);
+    setClusterState('offline', { state: 'offline', status: 'offline' });
   }
 
-  function updateClusterUI(data) {
-    if (data.connected && data.status === 'ok') {
-      // Online state
+  function setClusterState(state, payload = null) {
+    if (isGenerating && state !== 'offline') {
+      state = 'online_generating';
+    }
+    clusterState = state;
+    if (payload) {
+      lastClusterPayload = payload;
+    }
+    renderClusterUI(clusterState, lastClusterPayload);
+  }
+
+  function renderClusterUI(state, data) {
+    data = data || {};
+    const localStage = data.local_stage || (data.coordinator && data.coordinator.local_layers ? {
+      layer_start: data.coordinator.local_layers.split('..=')[0],
+      layer_end: data.coordinator.local_layers.split('..=')[1]
+    } : {});
+    const workers = data.worker_nodes || data.workers || [];
+    const totalLayers = data.total_layers || (data.coordinator && data.coordinator.total_layers ? data.coordinator.total_layers : 'Auto');
+
+    if (state === 'online_idle' || state === 'online_generating') {
+      if (data.active_model && (elements.activeModelName.textContent === 'Coordinator Offline' || elements.activeModelName.textContent === 'Loading...')) {
+        elements.activeModelName.textContent = data.active_model;
+        activeModel = data.active_model;
+      }
+
+      // 1. Sidebar indicator
       elements.sidebarStatusDot.classList.remove('offline');
-      elements.topStatusDot.classList.remove('offline');
-      elements.modalStatusDot.classList.remove('offline');
-
-      elements.clusterStatusLabel.textContent = 'Mesh Online';
+      if (state === 'online_generating') {
+        elements.sidebarStatusDot.classList.add('generating');
+        elements.clusterStatusLabel.textContent = '⚡ Inferring (P2P)';
+      } else {
+        elements.sidebarStatusDot.classList.remove('generating');
+        elements.clusterStatusLabel.textContent = 'Mesh Online';
+      }
       elements.clusterStatusLabel.style.color = 'var(--accent-mint)';
-      elements.topStatusText.textContent = 'Pipeline Connected';
-      elements.topStatusText.parentElement.style.color = 'var(--accent-mint)';
 
-      // Populate sidebar stats dynamically
-      const localStage = data.local_stage || {};
-      const workers = data.worker_nodes || [];
-
+      // Sidebar dynamic stats (NO "cargo run -- serve" hint when online)
       elements.clusterStatsDynamic.innerHTML = `
+        <div class="cluster-stats-row">
+          <span>Status:</span>
+          <span style="color: var(--accent-mint); font-weight: 600;">${state === 'online_generating' ? '⚡ Inferring (P2P)' : 'Active (Idle)'}</span>
+        </div>
         <div class="cluster-stats-row">
           <span>Coordinator:</span>
           <span class="stat-highlight">Layers ${localStage.layer_start ?? 0}..${localStage.layer_end ?? '?'}</span>
@@ -211,11 +254,32 @@
         </div>
         <div class="cluster-stats-row">
           <span>Total Layers:</span>
-          <span style="color: #fff; font-weight: 600;">${data.total_layers || 'Auto'}</span>
+          <span style="color: #fff; font-weight: 600;">${totalLayers}</span>
         </div>
       `;
 
-      // Populate Modal topology dynamically
+      // 2. Top-bar pill
+      elements.topStatusDot.classList.remove('offline');
+      if (state === 'online_generating') {
+        elements.topStatusDot.classList.add('generating');
+        elements.topStatusText.textContent = 'Cluster Inferring';
+      } else {
+        elements.topStatusDot.classList.remove('generating');
+        elements.topStatusText.textContent = 'Pipeline Connected';
+      }
+      elements.topStatusText.parentElement.style.color = 'var(--accent-mint)';
+
+      // 3. Telemetry Modal / HUD
+      elements.modalStatusDot.classList.remove('offline');
+      if (state === 'online_generating') {
+        elements.modalStatusDot.classList.add('generating');
+        elements.modalClusterStatus.textContent = 'Coordinator active — Streaming activations (P2P)';
+      } else {
+        elements.modalStatusDot.classList.remove('generating');
+        elements.modalClusterStatus.textContent = `Coordinator active on ${data.coordinator_endpoint || 'http://127.0.0.1:8080'} (Idle)`;
+      }
+      elements.modalClusterStatus.style.color = 'var(--accent-mint)';
+
       elements.modalNodesContainer.innerHTML = `
         <div class="node-box">
           <div>
@@ -227,7 +291,7 @@
 
         <div style="display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--accent-orange); font-size: 11.5px; font-weight: 700;">
           <i data-lucide="arrow-down-up" style="width: 14px; height: 14px;"></i>
-          <span>${data.transport || 'Tailscale Direct WireGuard'} • Zero Weights Transferred</span>
+          <span>${data.transport || (data.coordinator && data.coordinator.transport) || 'Tailscale Direct WireGuard'} • Zero Weights Transferred</span>
         </div>
 
         ${
@@ -256,20 +320,15 @@
         `
         }
       `;
-
-      elements.modalClusterStatus.textContent = `Coordinator active on ${data.coordinator || 'http://127.0.0.1:8080'}`;
-      elements.modalClusterStatus.style.color = 'var(--accent-mint)';
     } else {
       // Offline state
+      // 1. Sidebar indicator
       elements.sidebarStatusDot.classList.add('offline');
-      elements.topStatusDot.classList.add('offline');
-      elements.modalStatusDot.classList.add('offline');
-
+      elements.sidebarStatusDot.classList.remove('generating');
       elements.clusterStatusLabel.textContent = 'Coordinator Offline';
       elements.clusterStatusLabel.style.color = 'var(--accent-coral)';
-      elements.topStatusText.textContent = 'Coordinator Offline';
-      elements.topStatusText.parentElement.style.color = 'var(--accent-coral)';
 
+      // Show "Start: cargo run -- serve" hint ONLY in offline state
       elements.clusterStatsDynamic.innerHTML = `
         <div class="cluster-stats-row">
           <span>Status:</span>
@@ -281,18 +340,27 @@
         </div>
       `;
 
+      // 2. Top-bar pill
+      elements.topStatusDot.classList.add('offline');
+      elements.topStatusDot.classList.remove('generating');
+      elements.topStatusText.textContent = 'Coordinator Offline';
+      elements.topStatusText.parentElement.style.color = 'var(--accent-coral)';
+
+      // 3. Telemetry Modal / HUD
+      elements.modalStatusDot.classList.add('offline');
+      elements.modalStatusDot.classList.remove('generating');
+      elements.modalClusterStatus.textContent = 'Coordinator offline (http://127.0.0.1:8080)';
+      elements.modalClusterStatus.style.color = 'var(--accent-coral)';
+
       elements.modalNodesContainer.innerHTML = `
         <div style="padding: 14px; text-align: center; color: var(--text-muted); font-size: 13px; display: flex; flex-direction: column; gap: 8px;">
           <div style="color: var(--accent-coral); font-weight: 700;">AeroMesh Coordinator is not running</div>
           <div>Start the cluster coordinator from PowerShell:</div>
           <code style="background: #080b10; padding: 8px 12px; border-radius: 6px; color: var(--accent-orange); font-size: 11.5px; border: 1px solid rgba(255,255,255,0.06); text-align: left; overflow-x: auto;">
-            cargo run --bin aeromesh -- serve --model models/model.gguf --layers 0..24 --peers worker-ip:50052 --port 8080
+            cargo run --bin aeromesh -- serve --model models/test.gguf --layers 0..24 --peers worker-ip:50052 --port 8080
           </code>
         </div>
       `;
-
-      elements.modalClusterStatus.textContent = 'Coordinator offline (http://127.0.0.1:8080)';
-      elements.modalClusterStatus.style.color = 'var(--accent-coral)';
     }
 
     lucide.createIcons();
@@ -802,6 +870,7 @@
 
     isGenerating = true;
     updateSendButtonState(true);
+    setClusterState('online_generating');
 
     const assistantMessageIndex = chat.messages.length;
     chat.messages.push({ role: 'assistant', content: '', metrics: null });
@@ -909,6 +978,7 @@
       updateSendButtonState(false);
       clearKvOnSend = false;
       elements.pillClearKv.classList.remove('active');
+      setClusterState('online_idle');
     }
   }
 

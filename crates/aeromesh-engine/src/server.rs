@@ -143,9 +143,20 @@ pub struct ChatCompletionChunk {
     pub choices: Vec<ChatCompletionChunkChoice>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterMeta {
+    pub model_path: String,
+    pub local_layer_start: usize,
+    pub local_layer_end: usize,
+    pub total_layers: usize,
+    pub hidden_dim: usize,
+    pub workers: Vec<String>,
+}
+
 pub struct AppState {
     pub coordinator: Mutex<PipelineCoordinatorClient>,
     pub model_name: Mutex<String>,
+    pub cluster_meta: std::sync::RwLock<ClusterMeta>,
 }
 
 pub struct PipelineHttpServer {
@@ -154,10 +165,20 @@ pub struct PipelineHttpServer {
 
 impl PipelineHttpServer {
     pub fn new(coordinator: PipelineCoordinatorClient, model_name: String) -> Self {
+        let meta = ClusterMeta {
+            model_path: coordinator.model_path.to_string_lossy().to_string(),
+            local_layer_start: coordinator.local_slice.layer_start,
+            local_layer_end: coordinator.local_slice.layer_end,
+            total_layers: coordinator.total_layers,
+            hidden_dim: coordinator.hidden_dim,
+            workers: coordinator.worker_addrs.iter().map(|w| w.to_string()).collect(),
+        };
+
         Self {
             state: Arc::new(AppState {
                 coordinator: Mutex::new(coordinator),
                 model_name: Mutex::new(model_name),
+                cluster_meta: std::sync::RwLock::new(meta),
             }),
         }
     }
@@ -185,8 +206,14 @@ impl PipelineHttpServer {
     }
 }
 
-async fn handle_health() -> &'static str {
-    "OK"
+async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let is_busy = state.coordinator.try_lock().is_err();
+    let state_str = if is_busy { "online_generating" } else { "online_idle" };
+    Json(serde_json::json!({
+        "status": "ok",
+        "state": state_str,
+        "service": "aeromesh-coordinator"
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,6 +245,15 @@ async fn handle_switch_model(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to switch model: {}", e),
         ));
+    }
+
+    if let Ok(mut meta) = state.cluster_meta.write() {
+        meta.model_path = coord.model_path.to_string_lossy().to_string();
+        meta.local_layer_start = coord.local_slice.layer_start;
+        meta.local_layer_end = coord.local_slice.layer_end;
+        meta.total_layers = coord.total_layers;
+        meta.hidden_dim = coord.hidden_dim;
+        meta.workers = coord.worker_addrs.iter().map(|w| w.to_string()).collect();
     }
 
     let actual_name = model_path
@@ -274,23 +310,34 @@ async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_json::V
 }
 
 async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let client = state.coordinator.lock().await;
-    let local_slice = &client.local_slice;
-    let workers: Vec<String> = client.worker_addrs.iter().map(|w| w.to_string()).collect();
+    let is_busy = state.coordinator.try_lock().is_err();
+    let state_str = if is_busy { "online_generating" } else { "online_idle" };
+
     let current_model = state.model_name.lock().await.clone();
+    let meta = state.cluster_meta.read().unwrap().clone();
 
     Json(serde_json::json!({
+        "state": state_str,
+        "status": "ok",
+        "connected": true,
         "cluster_status": "ONLINE",
         "active_model": current_model,
         "coordinator": {
-            "model": client.model_path.to_string_lossy(),
-            "local_layers": format!("{}..={}", local_slice.layer_start, local_slice.layer_end),
-            "total_layers": local_slice.total_layers,
-            "hidden_dim": client.hidden_dim,
+            "model": meta.model_path,
+            "local_layers": format!("{}..={}", meta.local_layer_start, meta.local_layer_end),
+            "total_layers": meta.total_layers,
+            "hidden_dim": meta.hidden_dim,
             "transport": "Zero-Weight Activation Streaming"
         },
-        "workers": workers,
-        "nodes_count": workers.len() + 1
+        "local_stage": {
+            "layer_start": meta.local_layer_start,
+            "layer_end": meta.local_layer_end
+        },
+        "total_layers": meta.total_layers,
+        "hidden_dim": meta.hidden_dim,
+        "workers": meta.workers,
+        "worker_nodes": meta.workers,
+        "nodes_count": meta.workers.len() + 1
     }))
 }
 
@@ -349,6 +396,14 @@ async fn handle_chat_completions(
             if let Ok(()) = coord.switch_model(&model_path) {
                 let mut mn = state.model_name.lock().await;
                 *mn = target_model.clone();
+                if let Ok(mut meta) = state.cluster_meta.write() {
+                    meta.model_path = coord.model_path.to_string_lossy().to_string();
+                    meta.local_layer_start = coord.local_slice.layer_start;
+                    meta.local_layer_end = coord.local_slice.layer_end;
+                    meta.total_layers = coord.total_layers;
+                    meta.hidden_dim = coord.hidden_dim;
+                    meta.workers = coord.worker_addrs.iter().map(|w| w.to_string()).collect();
+                }
             }
         }
     }

@@ -99,24 +99,44 @@ async def switch_model(payload: dict):
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
+@app.get("/health")
+async def health():
+    """
+    Proxies health check to coordinator, returns gateway status.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(HEALTH_URL)
+            if resp.status_code == 200:
+                return resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"status": "ok", "state": "online_idle"}
+    except Exception:
+        pass
+    return {"status": "offline", "state": "offline"}
+
+
 @app.get("/api/cluster/status")
 async def cluster_status():
     """
     Queries the live AeroMesh Coordinator node dynamically.
     Returns real connected node topology, layer distribution, and transport status.
+    Guarantees fallback payload with state:"offline" on connection error (never a raw 5xx).
     """
     try:
-        async with httpx.AsyncClient(timeout=1.5) as client:
+        async with httpx.AsyncClient(timeout=2.0) as client:
             resp = await client.get(CLUSTER_STATUS_URL)
             if resp.status_code == 200:
-                return resp.json()
+                data = resp.json()
+                if "state" not in data:
+                    data["state"] = "online_idle" if data.get("connected", True) else "offline"
+                return data
     except Exception:
         pass
 
-    # Coordinator is offline - report real status without hardcoding fake layers
+    # Coordinator is offline - fallback payload with state: "offline"
     return {
-        "connected": False,
+        "state": "offline",
         "status": "offline",
+        "connected": False,
         "coordinator_endpoint": AEROMESH_ENDPOINT,
         "message": "AeroMesh Coordinator is offline. Start the coordinator with: cargo run --bin aeromesh -- serve --model <model.gguf> --layers <range> --peers <worker-ip>:50052"
     }
