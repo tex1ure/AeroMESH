@@ -62,3 +62,8 @@ channel_*_bwd.bin
 Thumbs.db
 desktop.ini
 $RECYCLE.BIN/
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example

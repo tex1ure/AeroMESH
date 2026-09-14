@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import glob
+import hmac
 from typing import AsyncGenerator
 
 # Ensure UTF-8 output on Windows consoles
@@ -12,23 +13,74 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from fastapi import FastAPI, Request
+# Lightweight .env loader
+def load_dotenv():
+    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(env_file):
+        with open(env_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k not in os.environ:
+                    os.environ[k] = v
+
+load_dotenv()
+
+from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 import uvicorn
 
 # ---------------------------------------------------------------------------
-# DYNAMIC BACKEND CONFIGURATION
+# DYNAMIC BACKEND CONFIGURATION & THREAT MODEL (SEC-01)
 # ---------------------------------------------------------------------------
+# Threat model:
+# - browser -> gateway (7860): stays open on 127.0.0.1; remote exposure requires Tailscale with ACLs
+# - gateway -> coordinator (8080): authenticated via Bearer token (AEROMESH_API_KEY)
+# - coordinator -> worker (50052): authenticated via mutual SHA-256 handshake secret (AEROMESH_WORKER_SECRET)
 AEROMESH_ENDPOINT = os.getenv("AEROMESH_ENDPOINT", "http://127.0.0.1:8080")
 CHAT_COMPLETIONS_URL = f"{AEROMESH_ENDPOINT}/v1/chat/completions"
 MODELS_URL = f"{AEROMESH_ENDPOINT}/v1/models"
 CLUSTER_STATUS_URL = f"{AEROMESH_ENDPOINT}/api/cluster/status"
 HEALTH_URL = f"{AEROMESH_ENDPOINT}/health"
 
-HOST = os.getenv("HOST", "0.0.0.0")
+AEROMESH_API_KEY = os.getenv("AEROMESH_API_KEY", "")
+GATEWAY_API_KEY = os.getenv("AEROMESH_GATEWAY_API_KEY", "")
+
+HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "7860"))
+
+def get_auth_headers() -> dict:
+    key = os.getenv("AEROMESH_API_KEY", "")
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+async def verify_gateway_access(request: Request):
+    """FastAPI dependency returning 401 envelope on proxy routes if exposed beyond localhost."""
+    client_host = request.client.host if request.client else "127.0.0.1"
+    is_local = client_host in ("127.0.0.1", "localhost", "::1")
+    if not GATEWAY_API_KEY and is_local:
+        return True
+    if not GATEWAY_API_KEY:
+        return True
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail={"error": {"message": "Unauthorized gateway access", "type": "authentication_error", "param": None, "code": "invalid_api_key"}}
+        )
+    token = auth.replace("Bearer ", "").strip()
+    if not hmac.compare_digest(token, GATEWAY_API_KEY):
+        raise HTTPException(
+            status_code=401,
+            detail={"error": {"message": "Invalid gateway API key", "type": "authentication_error", "param": None, "code": "invalid_api_key"}}
+        )
+    return True
 
 app = FastAPI(title="AeroMesh Intelligence Engine", version="1.0.0")
 
@@ -53,7 +105,7 @@ async def serve_spa():
 # ---------------------------------------------------------------------------
 # DYNAMIC BACKEND MODELS & CLUSTER STATUS (Zero Hardcoding)
 # ---------------------------------------------------------------------------
-@app.get("/v1/models")
+@app.get("/v1/models", dependencies=[Depends(verify_gateway_access)])
 async def get_models():
     """
     Fetches the active models directly from the running AeroMesh coordinator.
@@ -61,7 +113,7 @@ async def get_models():
     """
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
-            resp = await client.get(MODELS_URL)
+            resp = await client.get(MODELS_URL, headers=get_auth_headers())
             if resp.status_code == 200:
                 return resp.json()
     except Exception:
@@ -85,15 +137,15 @@ async def get_models():
     }
 
 
-@app.post("/api/model/switch")
-@app.post("/v1/models/load")
+@app.post("/api/model/switch", dependencies=[Depends(verify_gateway_access)])
+@app.post("/v1/models/load", dependencies=[Depends(verify_gateway_access)])
 async def switch_model(payload: dict):
     """
     Proxies model switch requests directly to the AeroMesh coordinator.
     """
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(f"{AEROMESH_ENDPOINT}/api/model/switch", json=payload)
+            resp = await client.post(f"{AEROMESH_ENDPOINT}/api/model/switch", json=payload, headers=get_auth_headers())
             return JSONResponse(status_code=resp.status_code, content=resp.json())
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
@@ -106,7 +158,7 @@ async def health():
     """
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(HEALTH_URL)
+            resp = await client.get(HEALTH_URL, headers=get_auth_headers())
             if resp.status_code == 200:
                 return resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {"status": "ok", "state": "online_idle"}
     except Exception:
@@ -114,7 +166,7 @@ async def health():
     return {"status": "offline", "state": "offline"}
 
 
-@app.get("/api/cluster/status")
+@app.get("/api/cluster/status", dependencies=[Depends(verify_gateway_access)])
 async def cluster_status():
     """
     Queries the live AeroMesh Coordinator node dynamically.
@@ -123,7 +175,7 @@ async def cluster_status():
     """
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(CLUSTER_STATUS_URL)
+            resp = await client.get(CLUSTER_STATUS_URL, headers=get_auth_headers())
             if resp.status_code == 200:
                 data = resp.json()
                 if "state" not in data:
@@ -142,27 +194,27 @@ async def cluster_status():
     }
 
 
-@app.post("/v1/chat/completions")
-@app.post("/api/chat")
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_gateway_access)])
+@app.post("/api/chat", dependencies=[Depends(verify_gateway_access)])
 async def chat_completions(request: Request):
     body = await request.json()
     if body.get("stream", True):
         return await chat_stream(request)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
-            resp = await client.post(CHAT_COMPLETIONS_URL, json=body)
+            resp = await client.post(CHAT_COMPLETIONS_URL, json=body, headers=get_auth_headers())
             return JSONResponse(status_code=resp.status_code, content=resp.json())
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-@app.post("/api/chat/abort")
+@app.post("/api/chat/abort", dependencies=[Depends(verify_gateway_access)])
 async def chat_abort():
     """Signals cancellation to backend coordinator if required."""
     return {"status": "aborted"}
 
 
-@app.post("/api/chat/stream")
+@app.post("/api/chat/stream", dependencies=[Depends(verify_gateway_access)])
 async def chat_stream(request: Request):
     """
     Server-Sent Events (SSE) streaming endpoint.
@@ -173,7 +225,7 @@ async def chat_stream(request: Request):
     async def stream_generator():
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
-                async with client.stream("POST", CHAT_COMPLETIONS_URL, json=body) as response:
+                async with client.stream("POST", CHAT_COMPLETIONS_URL, json=body, headers=get_auth_headers()) as response:
                     if response.status_code != 200:
                         err_text = await response.aread()
                         err_msg = json.dumps({

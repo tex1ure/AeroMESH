@@ -138,7 +138,7 @@ enum Commands {
         peers: Option<String>,
 
         /// Host to bind HTTP API server
-        #[arg(long, default_value = "0.0.0.0")]
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
 
         /// Port to bind HTTP API server
@@ -192,6 +192,7 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?))
         .init();
 
+    aeromesh_engine::load_dotenv_if_present();
     aeromesh_engine::ensure_llama_initialized();
 
     let cli = Cli::parse();

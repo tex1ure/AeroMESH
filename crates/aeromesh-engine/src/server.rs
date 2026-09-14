@@ -1,3 +1,11 @@
+//! AeroMESH Secure Control Surface & API Server
+//!
+//! Threat Model (SEC-01):
+//! - Browser -> Web Gateway (7860): Binds 127.0.0.1 by default. Remote exposure requires Tailscale with ACLs.
+//! - Gateway -> Coordinator Axum (8080): Binds 127.0.0.1 by default. Authenticated via Bearer token matching AEROMESH_API_KEY.
+//! - Coordinator -> Worker TCP (50052): Authenticated via mutual SHA-256 handshake secret (AEROMESH_WORKER_SECRET) over Tailscale Direct WireGuard.
+//! - /health endpoint is explicitly exempted from auth for cluster health probes and liveness checks.
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,6 +21,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
@@ -20,6 +29,88 @@ use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
 use crate::pipeline::PipelineCoordinatorClient;
+
+// ---------------------------------------------------------------------------
+// Standard OpenAI Error Envelope (FIX-06)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiErrorDetail {
+    pub message: String,
+    #[serde(rename = "type")]
+    pub error_type: String,
+    pub param: Option<String>,
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiErrorResponse {
+    pub error: ApiErrorDetail,
+}
+
+impl ApiErrorResponse {
+    pub fn new(message: impl Into<String>, error_type: impl Into<String>, code: Option<&str>) -> Self {
+        Self {
+            error: ApiErrorDetail {
+                message: message.into(),
+                error_type: error_type.into(),
+                param: None,
+                code: code.map(|c| c.to_string()),
+            },
+        }
+    }
+
+    pub fn unauthorized(msg: &str) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(Self::new(msg, "authentication_error", Some("invalid_api_key"))),
+        )
+    }
+
+    pub fn bad_request(msg: &str) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(Self::new(msg, "invalid_request_error", None)),
+        )
+    }
+
+    pub fn internal(msg: &str) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(Self::new(msg, "api_error", None)),
+        )
+    }
+}
+
+/// Constant-time string comparison using SHA-256 digests to prevent timing leaks.
+pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
+    let hash_a = Sha256::digest(a.as_bytes());
+    let hash_b = Sha256::digest(b.as_bytes());
+    let mut diff = 0u8;
+    for (x, y) in hash_a.iter().zip(hash_b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Automatically loads .env file variables if present.
+pub fn load_dotenv_if_present() {
+    if let Ok(content) = std::fs::read_to_string(".env") {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                let k = k.trim();
+                let v = v.trim().trim_matches('"').trim_matches('\'');
+                if std::env::var(k).is_err() {
+                    std::env::set_var(k, v);
+                }
+            }
+        }
+    }
+}
 
 /// Accumulates raw byte chunks to guarantee multi-byte UTF-8 character boundaries are never split across SSE chunks.
 #[derive(Debug, Default)]
@@ -184,6 +275,8 @@ impl PipelineHttpServer {
     }
 
     pub async fn run(&self, host: &str, port: u16) -> Result<()> {
+        load_dotenv_if_present();
+
         let app = Router::new()
             .route("/v1/chat/completions", post(handle_chat_completions))
             .route("/api/chat", post(handle_chat_completions))
@@ -193,6 +286,7 @@ impl PipelineHttpServer {
             .route("/api/model/switch", post(handle_switch_model))
             .route("/v1/models/load", post(handle_switch_model))
             .route("/api/cluster/status", get(handle_cluster_status))
+            .layer(axum::middleware::from_fn(auth_middleware))
             .layer(CorsLayer::permissive())
             .with_state(self.state.clone());
 
@@ -204,6 +298,47 @@ impl PipelineHttpServer {
 
         Ok(())
     }
+}
+
+async fn auth_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<Response, (StatusCode, Json<ApiErrorResponse>)> {
+    let path = req.uri().path();
+    // Exempt /health endpoint for cluster probes and heartbeat
+    if path == "/health" {
+        return Ok(next.run(req).await);
+    }
+
+    let expected_key = std::env::var("AEROMESH_API_KEY").unwrap_or_default();
+    if expected_key.trim().is_empty() {
+        error!("🚨 AEROMESH_API_KEY environment variable is not configured on coordinator");
+        return Err(ApiErrorResponse::unauthorized(
+            "AEROMESH_API_KEY is not configured on coordinator",
+        ));
+    }
+
+    let auth_header = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|val| val.to_str().ok());
+
+    let token = match auth_header {
+        Some(h) if h.starts_with("Bearer ") => h.trim_start_matches("Bearer ").trim(),
+        _ => {
+            return Err(ApiErrorResponse::unauthorized(
+                "Missing or malformed Authorization header. Expected 'Bearer <AEROMESH_API_KEY>'",
+            ));
+        }
+    };
+
+    if !constant_time_eq_str(token, expected_key.trim()) {
+        return Err(ApiErrorResponse::unauthorized(
+            "Invalid API key provided in Bearer token",
+        ));
+    }
+
+    Ok(next.run(req).await)
 }
 
 async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -499,5 +634,30 @@ async fn handle_chat_completions(
             )
                 .into_response(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constant_time_eq_str() {
+        assert!(constant_time_eq_str("secret-token-12345", "secret-token-12345"));
+        assert!(!constant_time_eq_str("secret-token-12345", "secret-token-12346"));
+        assert!(!constant_time_eq_str("secret-token-12345", "secret-token"));
+        assert!(!constant_time_eq_str("", "secret-token"));
+        assert!(constant_time_eq_str("", ""));
+    }
+
+    #[test]
+    fn test_api_error_response_fix06_envelope() {
+        let (status, Json(body)) = ApiErrorResponse::unauthorized("Invalid API key provided");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let json_val = serde_json::to_value(&body).unwrap();
+        assert_eq!(json_val["error"]["message"], "Invalid API key provided");
+        assert_eq!(json_val["error"]["type"], "authentication_error");
+        assert_eq!(json_val["error"]["code"], "invalid_api_key");
+        assert!(json_val["error"]["param"].is_null());
     }
 }

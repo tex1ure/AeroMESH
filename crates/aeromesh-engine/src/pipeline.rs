@@ -7,6 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
+use sha2::{Digest, Sha256};
 
 use aeromesh_core::{
     ActivationDtype, ActivationFrame, HandshakeRequest, HandshakeResponse,
@@ -215,16 +216,48 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
 
         if peek_buf == aeromesh_core::HANDSHAKE_REQ_MAGIC {
             let handshake_fut = HandshakeRequest::decode_async(socket);
-            let req = tokio::time::timeout(SOCKET_TIMEOUT, handshake_fut)
-                .await
-                .context("Handshake timeout")??;
+            let req = match tokio::time::timeout(SOCKET_TIMEOUT, handshake_fut).await {
+                Ok(Ok(req)) => req,
+                Ok(Err(e)) => {
+                    warn!(peer = %peer_addr, error = %e, "🚨 Handshake decoding failed or legacy protocol version detected");
+                    let _ = socket.shutdown().await;
+                    return Ok(());
+                }
+                Err(_) => {
+                    warn!(peer = %peer_addr, "Handshake timeout");
+                    let _ = socket.shutdown().await;
+                    return Ok(());
+                }
+            };
+
+            // Authenticate worker secret
+            let expected_secret = std::env::var("AEROMESH_WORKER_SECRET").unwrap_or_default();
+            let expected_token: [u8; 32] = Sha256::digest(expected_secret.as_bytes()).into();
+
+            // Constant-time comparison
+            let mut diff = 0u8;
+            for (a, b) in req.auth_token.iter().zip(expected_token.iter()) {
+                diff |= a ^ b;
+            }
+
+            if diff != 0 {
+                warn!(
+                    peer = %peer_addr,
+                    "🚨 Handshake rejected: invalid AEROMESH_WORKER_SECRET token from peer. Closing connection."
+                );
+                let resp = HandshakeResponse::reject("Authentication failed: invalid worker secret");
+                let _ = socket.write_all(&resp.encode()).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+                return Ok(());
+            }
 
             info!(
                 peer = %peer_addr,
                 arch = %req.model_architecture,
                 hidden_dim = req.hidden_dim,
                 total_layers = req.total_layers,
-                "Received HandshakeRequest from Coordinator"
+                "✅ Received authenticated HandshakeRequest from Coordinator"
             );
 
             let mut inst = instance.lock().await;
@@ -234,10 +267,10 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
             }
             drop(inst);
 
-            let resp = HandshakeResponse::ok();
+            let resp = HandshakeResponse::ok(expected_token);
             socket.write_all(&resp.encode()).await?;
             socket.flush().await?;
-            info!(peer = %peer_addr, "Handshake accepted. Ready for activation stream.");
+            info!(peer = %peer_addr, "✅ Handshake accepted. Ready for activation stream.");
         }
 
         // Step 2: Process incoming activation frames with dynamic in-place dequantization & hot-swapping
@@ -502,8 +535,12 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         let worker_start = (self.local_slice.layer_end + 1) as u32;
         let worker_end = (self.total_layers.saturating_sub(1)) as u32;
 
+        let worker_secret = std::env::var("AEROMESH_WORKER_SECRET").unwrap_or_default();
+        let auth_token: [u8; 32] = Sha256::digest(worker_secret.as_bytes()).into();
+
         let req = HandshakeRequest {
             version: aeromesh_core::PROTOCOL_VERSION,
+            auth_token,
             model_architecture: "llama".to_string(),
             hidden_dim: self.hidden_dim as u32,
             total_layers: self.total_layers as u32,
@@ -522,14 +559,25 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         let resp_fut = HandshakeResponse::decode_async(&mut stream);
         match tokio::time::timeout(SOCKET_TIMEOUT, resp_fut).await {
             Ok(Ok(resp)) if resp.accepted => {
-                info!(worker = %target_worker, "✅ Handshake verified. Connected to remote Stage 2 Worker via Tuned TCP Socket");
+                let mut diff = 0u8;
+                for (a, b) in resp.auth_token.iter().zip(auth_token.iter()) {
+                    diff |= a ^ b;
+                }
+                if diff != 0 {
+                    warn!(worker = %target_worker, "🚨 Worker handshake response failed mutual authentication check");
+                    return Ok(());
+                }
+                info!(worker = %target_worker, "✅ Handshake verified with mutual authentication. Connected to remote Stage 2 Worker via Tuned TCP Socket");
                 self.transport = Some(PipelineTransport::Tcp(aeromesh_core::TcpPipelineTransport::new(stream)?));
             }
             Ok(Ok(resp)) => {
-                warn!(error = %resp.error_message, "Worker rejected handshake");
+                warn!(worker = %target_worker, error = %resp.error_message, "🚨 Worker rejected handshake");
             }
-            _ => {
-                warn!("Handshake response timed out from worker");
+            Ok(Err(e)) => {
+                warn!(worker = %target_worker, error = %e, "🚨 Worker handshake response error or version mismatch");
+            }
+            Err(_) => {
+                warn!(worker = %target_worker, "Handshake response timed out from worker");
             }
         }
 
