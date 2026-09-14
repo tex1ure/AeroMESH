@@ -246,7 +246,7 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
 
         loop {
             let frame_fut = ActivationFrame::decode_async(socket);
-            let frame = match tokio::time::timeout(Duration::from_secs(120), frame_fut).await {
+            let frame = match tokio::time::timeout(Duration::from_secs(3600), frame_fut).await {
                 Ok(Ok(f)) => f,
                 Ok(Err(_)) => break,
                 Err(_) => break,
@@ -412,7 +412,7 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 hidden_dim,
                 total_layers,
                 transport: None,
-                target_dtype: ActivationDtype::RawF32,
+                target_dtype: ActivationDtype::Int8PerRow,
             })
         }
 
@@ -602,6 +602,7 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         let mut is_first_eos = false;
 
         // Stream Quantized Prefill Activation Frame [S * hidden_dim]
+        let mut transport_ok = false;
         if let Some(ref mut transport) = self.transport {
             let prefill_frame = ActivationFrame::from_f32_matrix_quantized(
                 session_id,
@@ -619,9 +620,40 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                     first_token_id = resp.token_id;
                     first_token_text = resp.token_text;
                     is_first_eos = resp.is_eos;
+                    transport_ok = true;
                 }
             }
-        } else {
+        }
+
+        if !transport_ok && !self.worker_addrs.is_empty() {
+            tracing::info!("🔄 Re-establishing transport connection to pipeline worker...");
+            self.transport = None;
+            if self.ensure_connected().await.is_ok() {
+                if let Some(ref mut transport) = self.transport {
+                    let prefill_frame = ActivationFrame::from_f32_matrix_quantized(
+                        session_id,
+                        0,
+                        prompt_len,
+                        0,
+                        self.local_slice.layer_end as u16,
+                        self.hidden_dim as u32,
+                        &prefill_activations,
+                        self.target_dtype,
+                        FLAG_IS_PROMPT | FLAG_CLEAR_KV,
+                    );
+                    if transport.send_activation(&prefill_frame).await.is_ok() {
+                        if let Ok(resp) = transport.recv_response().await {
+                            first_token_id = resp.token_id;
+                            first_token_text = resp.token_text;
+                            is_first_eos = resp.is_eos;
+                            transport_ok = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !transport_ok && self.transport.is_none() {
             first_token_id = self.instance.sample_next_token(0.7, 0.9, 0)?;
             is_first_eos = self.instance.is_eog(first_token_id);
             let piece_bytes = self.instance.token_to_piece(first_token_id).unwrap_or_default();
@@ -665,6 +697,7 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 let mut next_token_id = 0;
                 let mut token_text = String::new();
                 let mut is_eos = false;
+                let mut decode_transport_ok = false;
 
                 // Stream single-token quantized activation frame [1 * hidden_dim: 1.50 KB or 5.12 KB]
                 if let Some(ref mut transport) = self.transport {
@@ -684,9 +717,15 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                             next_token_id = resp.token_id;
                             token_text = resp.token_text;
                             is_eos = resp.is_eos;
+                            decode_transport_ok = true;
                         }
                     }
-                } else {
+                    if !decode_transport_ok {
+                        self.transport = None;
+                    }
+                }
+                
+                if !decode_transport_ok {
                     next_token_id = self.instance.sample_next_token(0.7, 0.9, seq_id as u32)?;
                     let token_piece_bytes = self.instance.token_to_piece(next_token_id).unwrap_or_default();
                     token_text = String::from_utf8_lossy(&token_piece_bytes).to_string();

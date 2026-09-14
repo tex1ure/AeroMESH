@@ -142,9 +142,20 @@ async def cluster_status():
     }
 
 
-# ---------------------------------------------------------------------------
-# STREAMING CHAT COMPLETIONS PROXY
-# ---------------------------------------------------------------------------
+@app.post("/v1/chat/completions")
+@app.post("/api/chat")
+async def chat_completions(request: Request):
+    body = await request.json()
+    if body.get("stream", True):
+        return await chat_stream(request)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
+            resp = await client.post(CHAT_COMPLETIONS_URL, json=body)
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.post("/api/chat/abort")
 async def chat_abort():
     """Signals cancellation to backend coordinator if required."""

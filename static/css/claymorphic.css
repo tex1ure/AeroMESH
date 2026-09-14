@@ -1268,6 +1268,68 @@ body::after {
   border: var(--border-subtle);
 }
 
+/* Direct WireGuard Mesh HUD Badges & Telemetry */
+.mesh-link-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 8px 12px;
+  background: rgba(16, 185, 129, 0.05);
+  border: 1px dashed rgba(16, 185, 129, 0.35);
+  border-radius: var(--radius-sm);
+  margin: 4px 0;
+}
+
+.direct-wireguard-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.5);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.25);
+  color: #10b981;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.direct-wireguard-badge .badge-ping {
+  background: rgba(16, 185, 129, 0.25);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  color: #34d399;
+}
+
+.mesh-wire-stats {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.badge-direct-wireguard {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #10b981;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 10.5px;
+}
+
+.stat-highlight.direct-badge {
+  background: rgba(16, 185, 129, 0.15) !important;
+  color: var(--accent-mint) !important;
+  border: 1px solid rgba(16, 185, 129, 0.3) !important;
+}
+
 /* ==========================================================================
    RESPONSIVE (Mobile)
    ========================================================================== */

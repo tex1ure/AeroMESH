@@ -131,8 +131,7 @@ pub fn slice_gguf_for_pipeline<P: AsRef<Path>, Q: AsRef<Path>>(
         let ggml_type = cursor.read_u32::<LittleEndian>()?;
         let offset = cursor.read_u64::<LittleEndian>()?;
 
-        let type_size = ggml_type_size_bytes(ggml_type);
-        let size_bytes = (element_count as f64 * type_size).ceil() as u64;
+        let size_bytes = ggml_tensor_size_bytes(ggml_type, element_count);
         let layer_index = extract_layer_index(&name);
 
         tensors.push(SourceTensor {
@@ -482,17 +481,47 @@ fn reindex_tensor_name(name: &str, old_idx: usize, new_idx: usize) -> String {
     name.to_string()
 }
 
-fn ggml_type_size_bytes(ggml_type: u32) -> f64 {
-    match ggml_type {
-        0 => 4.0,           // F32
-        1 => 2.0,           // F16
-        2 => 0.5 + 2.0/32.0, // Q4_0
-        3 => 0.5 + 4.0/32.0, // Q4_1
-        7 => 1.0,           // I8
-        8 => 1.0 + 2.0/32.0, // Q8_0
-        12 => 0.5625,       // Q4_K
-        13 => 0.6875,       // Q5_K
-        14 => 0.8125,       // Q6_K
-        _ => 2.0,
+pub fn ggml_tensor_size_bytes(ggml_type: u32, element_count: u64) -> u64 {
+    let (blck_size, type_size): (u64, u64) = match ggml_type {
+        0 => (1, 4),     // F32
+        1 => (1, 2),     // F16
+        2 => (32, 18),   // Q4_0
+        3 => (32, 20),   // Q4_1
+        6 => (32, 22),   // Q5_0
+        7 => (32, 24),   // Q5_1
+        8 => (32, 34),   // Q8_0
+        9 => (32, 36),   // Q8_1
+        10 => (256, 84), // Q2_K
+        11 => (256, 110),// Q3_K
+        12 => (256, 144),// Q4_K
+        13 => (256, 176),// Q5_K
+        14 => (256, 210),// Q6_K
+        15 => (256, 292),// Q8_K
+        16 => (256, 66), // IQ2_XXS
+        17 => (256, 74), // IQ2_XS
+        18 => (256, 98), // IQ3_XXS
+        19 => (256, 48), // IQ1_S
+        20 => (32, 18),  // IQ4_NL
+        21 => (256, 110),// IQ3_S
+        22 => (256, 82), // IQ2_S
+        23 => (256, 136),// IQ4_XS
+        24 => (1, 1),    // I8
+        25 => (1, 2),    // I16
+        26 => (1, 4),    // I32
+        27 => (1, 8),    // I64
+        28 => (1, 8),    // F64
+        29 => (256, 70), // IQ1_M
+        30 => (1, 2),    // BF16
+        39 => (32, 18),  // MXFP4
+        40 => (32, 18),  // NVFP4
+        41 => (32, 6),   // Q1_0
+        42 => (32, 10),  // Q2_0
+        _ => (1, 2),
+    };
+
+    if blck_size == 1 {
+        element_count * type_size
+    } else {
+        ((element_count + blck_size - 1) / blck_size) * type_size
     }
 }
