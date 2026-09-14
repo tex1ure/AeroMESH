@@ -525,6 +525,10 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
             &self.status
         }
 
+        pub fn n_ctx(&self) -> usize {
+            self.instance.as_ref().map(|i| i.n_ctx).unwrap_or(4096)
+        }
+
         pub fn switch_model<P: AsRef<Path>>(&mut self, new_model_path: P) -> Result<()> {
             let path_ref = new_model_path.as_ref();
             if !path_ref.exists() {
@@ -735,6 +739,35 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         let prompt_tokens = self.get_instance()?.tokenize(prompt, true)?;
         if prompt_tokens.is_empty() {
             bail!("Prompt tokenization produced 0 tokens");
+        }
+
+        let n_ctx = self.get_instance()?.n_ctx;
+
+        // FIX-24: Validate context window boundaries upfront
+        if prompt_tokens.len() >= n_ctx {
+            let err_msg = format!(
+                "Prompt length ({} tokens) exceeds model maximum context window ({} tokens)",
+                prompt_tokens.len(),
+                n_ctx
+            );
+            if let Some(ref tx) = token_tx {
+                let _ = tx.send(err_msg.as_bytes().to_vec()).await;
+            }
+            bail!(err_msg);
+        }
+
+        if prompt_tokens.len() + max_tokens > n_ctx {
+            let err_msg = format!(
+                "Prompt tokens ({}) + requested max_tokens ({}) exceeds model context window of {} tokens (maximum generation capacity: {} tokens)",
+                prompt_tokens.len(),
+                max_tokens,
+                n_ctx,
+                n_ctx.saturating_sub(prompt_tokens.len())
+            );
+            if let Some(ref tx) = token_tx {
+                let _ = tx.send(err_msg.as_bytes().to_vec()).await;
+            }
+            bail!(err_msg);
         }
 
         let prompt_len = prompt_tokens.len() as u32;
@@ -1001,5 +1034,34 @@ mod tests_pipeline_safety {
         // Old model instance must NOT have been taken or closed
         assert!(client.instance.is_some(), "Instance must still be present");
         assert_eq!(client.status, CoordinatorStatus::Ready, "Status must remain Ready");
+    }
+
+    #[test]
+    fn test_coordinator_n_ctx_reporting() {
+        let client_with_instance = PipelineCoordinatorClient {
+            model_path: PathBuf::from("models/mock_stage1.gguf"),
+            local_slice: LayerSliceConfig::new(0, 0, 1).unwrap(),
+            worker_addrs: Vec::new(),
+            instance: Some(LlamaPipelineInstance::dummy_closed()),
+            status: CoordinatorStatus::Ready,
+            hidden_dim: 128,
+            total_layers: 1,
+            transport: None,
+            target_dtype: ActivationDtype::RawF32,
+        };
+        assert_eq!(client_with_instance.n_ctx(), 512);
+
+        let client_without_instance = PipelineCoordinatorClient {
+            model_path: PathBuf::from("models/mock_stage1.gguf"),
+            local_slice: LayerSliceConfig::new(0, 0, 1).unwrap(),
+            worker_addrs: Vec::new(),
+            instance: None,
+            status: CoordinatorStatus::Closed,
+            hidden_dim: 128,
+            total_layers: 1,
+            transport: None,
+            target_dtype: ActivationDtype::RawF32,
+        };
+        assert_eq!(client_without_instance.n_ctx(), 4096);
     }
 }

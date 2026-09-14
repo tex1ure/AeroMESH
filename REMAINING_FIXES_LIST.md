@@ -1,6 +1,6 @@
 # AeroMESH — Complete Fixes & Remaining Tasks List
 
-> **Current Status**: All P0 blockers, critical engine crashes, and input validation bounds are **FIXED and tested** (35/35 workspace tests passing).  
+> **Current Status**: All P0 blockers, critical engine crashes, input validation bounds, and context window guards are **FIXED and tested** (36/36 workspace tests passing).  
 > **Git Branch**: `main` (synchronized with `origin/main` at commit `fa3837a`).  
 > **Purpose of this file**: A simple, human-readable checklist of everything that was fixed, everything that remains to be done, and architectural decisions kept as-is.
 
@@ -12,18 +12,18 @@
 |---|:---:|:---:|:---:|:---:|
 | **Critical Engine & Crash Fixes (P0)** | 5 | **5** (100%) | 0 | 0 |
 | **Security & Authentication (P0 / P1)** | 4 | **2** (50%) | 2 | 0 |
-| **Input Validation & Safety (P1 / P2)** | 3 | **2** (67%) | 1 | 0 |
+| **Input Validation & Safety (P1 / P2)** | 3 | **3** (100%) | 0 | 0 |
 | **Frontend & Usability (P2)** | 2 | **1** (50%) | 1 | 0 |
 | **Documentation & Presentation (P1 / P2)** | 6 | **3** (50%) | 3 | 0 |
 | **Legal & Open Source Polish (P3)** | 3 | 0 | 3 | 0 |
 | **Intentional Design Decisions (No Action)** | 8 | 0 | 0 | **8** |
-| **Total** | **31** | **13** | **10** | **8** |
+| **Total** | **31** | **14** | **9** | **8** |
 
 ---
 
 ## 1. What We Already Fixed & Tested ([X] DONE)
 
-These are critical bugs, crashes, vulnerabilities, and validation defects that were identified and completely patched. All 35 automated unit tests currently pass.
+These are critical bugs, crashes, vulnerabilities, and validation defects that were identified and completely patched. All 36 automated unit tests currently pass.
 
 ### [X] 1. Dangling Pointer Segfault on Model Switch (`CRASH-01`)
 - **What was broken**: When switching models (`/v1/chat/completions`), the engine called `close()` which freed underlying C++ memory and left pointers null. If loading the new model failed, the coordinator kept running with null pointers. The very next chat request attempted to tokenize using a null vocabulary pointer, causing an instant native segmentation fault (`0xC0000005`) that crashed the entire program.
@@ -96,6 +96,11 @@ These are critical bugs, crashes, vulnerabilities, and validation defects that w
 - **How it was fixed**: Enhanced `ApiErrorResponse` with `unprocessable`, `bad_request_with_param`, `service_unavailable`, and `not_found` constructors conforming strictly to the OpenAI JSON schema (`{"error": {"message": "...", "type": "invalid_request_error", "param": "...", "code": "..."}}`). Added `JsonRejection` interception returning HTTP 400 on malformed JSON syntax.
 - **File**: `crates/aeromesh-engine/src/server.rs`.
 
+### [X] 14. Context Window Boundary Guard (`FIX-24`)
+- **What was broken**: Prompts and generation parameters were never verified against the model context size (`n_ctx = 4096`). Prompts exceeding 4096 tokens or requests with `prompt_tokens + max_tokens > n_ctx` attempted out-of-bounds KV cache allocation, causing silent truncation or segmentation faults inside native CUDA kernels.
+- **How it was fixed**: Added `PipelineCoordinatorClient::n_ctx()` exposing the active instance context window. In `handle_chat_completions`, requests with `max_tokens > n_ctx` are rejected upfront with `HTTP 422 Unprocessable Entity` (`code: "context_window_exceeded"`). In `generate_pipeline`, prompt token counts are checked after tokenization: if `prompt_tokens.len() >= n_ctx` or `prompt_tokens.len() + max_tokens > n_ctx`, generation immediately returns an explicit descriptive error and forwards it to the streaming channel without crashing.
+- **Files**: `crates/aeromesh-engine/src/pipeline.rs`, `crates/aeromesh-engine/src/server.rs`.
+
 ---
 
 ## 2. What Is Remaining To Do ([ ] TO-DO)
@@ -110,17 +115,12 @@ These are the remaining actionable tasks, ranked by order of priority and ease o
 - **Why it matters**: Permissive CORS allows any website you visit in your web browser to quietly send requests to your local LLM engine.
 - **Effort**: ~10 minutes | **Difficulty**: Very Easy
 
-#### [ ] 3. "Stop Generating" Abort Button (`FIX-19`)
+#### [ ] 2. "Stop Generating" Abort Button (`FIX-19`)
 - **What is needed**: In `static/js/app.js`, attach a JavaScript `AbortController` to the Server-Sent Events (SSE) fetch stream. When the user clicks the "Stop" button in the UI, call `controller.abort()` to halt token streaming immediately.
 - **Why it matters**: Essential user experience feature; lets the user cancel long generations without having to refresh the browser.
 - **Effort**: ~15 minutes | **Difficulty**: Easy
 
-#### [ ] 4. Context Window Boundary Guard (`FIX-24`)
-- **What is needed**: In `crates/aeromesh-engine/src/pipeline.rs`, check that `prompt_tokens.len() + max_tokens <= n_ctx` (e.g. 4096). If the prompt is too long, return an explicit error instead of letting llama.cpp truncate or fail silently.
-- **Why it matters**: Prevents out-of-bounds KV cache allocation.
-- **Effort**: ~15 minutes | **Difficulty**: Easy
-
-#### [ ] 5. Rate Limiting Middleware (`FIX-08`)
+#### [ ] 3. Rate Limiting Middleware (`FIX-08`)
 - **What is needed**: In `crates/aeromesh-engine/src/server.rs`, attach `tower::limit::RateLimitLayer` to routes (e.g., 60 req/min for `/health`, 15 req/min for `/v1/chat/completions`).
 - **Why it matters**: Protects the engine from accidental request floods or loops.
 - **Effort**: ~25 minutes | **Difficulty**: Easy

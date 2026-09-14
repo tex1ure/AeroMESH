@@ -756,6 +756,20 @@ async fn handle_chat_completions(
 
             return ApiErrorResponse::service_unavailable(err_msg, Some("model_not_ready")).into_response();
         }
+
+        // FIX-24: Validate max_tokens against active model context window
+        let n_ctx = coord.n_ctx();
+        if max_tokens > n_ctx {
+            return ApiErrorResponse::unprocessable(
+                format!(
+                    "'max_tokens' ({}) exceeds active model context window ({} tokens)",
+                    max_tokens, n_ctx
+                ),
+                Some("max_tokens"),
+                Some("context_window_exceeded"),
+            )
+            .into_response();
+        }
     }
 
     if is_streaming {
