@@ -1,6 +1,6 @@
 # AeroMESH — Complete Fixes & Remaining Tasks List
 
-> **Current Status**: All P0 blockers and critical engine crashes are **FIXED and tested** (26/26 workspace tests passing).  
+> **Current Status**: All P0 blockers, critical engine crashes, and input validation bounds are **FIXED and tested** (35/35 workspace tests passing).  
 > **Git Branch**: `main` (synchronized with `origin/main` at commit `fa3837a`).  
 > **Purpose of this file**: A simple, human-readable checklist of everything that was fixed, everything that remains to be done, and architectural decisions kept as-is.
 
@@ -12,18 +12,18 @@
 |---|:---:|:---:|:---:|:---:|
 | **Critical Engine & Crash Fixes (P0)** | 5 | **5** (100%) | 0 | 0 |
 | **Security & Authentication (P0 / P1)** | 4 | **2** (50%) | 2 | 0 |
-| **Input Validation & Safety (P1 / P2)** | 3 | 0 | 3 | 0 |
+| **Input Validation & Safety (P1 / P2)** | 3 | **2** (67%) | 1 | 0 |
 | **Frontend & Usability (P2)** | 2 | **1** (50%) | 1 | 0 |
 | **Documentation & Presentation (P1 / P2)** | 6 | **3** (50%) | 3 | 0 |
 | **Legal & Open Source Polish (P3)** | 3 | 0 | 3 | 0 |
 | **Intentional Design Decisions (No Action)** | 8 | 0 | 0 | **8** |
-| **Total** | **31** | **11** | **12** | **8** |
+| **Total** | **31** | **13** | **10** | **8** |
 
 ---
 
 ## 1. What We Already Fixed & Tested ([X] DONE)
 
-These are critical bugs, crashes, and vulnerabilities that were identified and completely patched. All 26 automated unit tests currently pass.
+These are critical bugs, crashes, vulnerabilities, and validation defects that were identified and completely patched. All 35 automated unit tests currently pass.
 
 ### [X] 1. Dangling Pointer Segfault on Model Switch (`CRASH-01`)
 - **What was broken**: When switching models (`/v1/chat/completions`), the engine called `close()` which freed underlying C++ memory and left pointers null. If loading the new model failed, the coordinator kept running with null pointers. The very next chat request attempted to tokenize using a null vocabulary pointer, causing an instant native segmentation fault (`0xC0000005`) that crashed the entire program.
@@ -86,6 +86,16 @@ These are critical bugs, crashes, and vulnerabilities that were identified and c
 - **How it was fixed**: Merged `origin/P0-Fixes` into `upX`, resolved all conflicts cleanly, verified with 26 passing unit tests, and fast-forward merged into `main`.
 - **Branches**: `main` and `upX` are now unified at `fa3837a`.
 
+### [X] 12. Chat Completions Parameter Bounds Checking (`FIX-06`)
+- **What was broken**: `/v1/chat/completions` accepted completely unvalidated requests. Empty message arrays produced empty prompts that wasted GPU cycles; messages with invalid roles or empty content corrupted ChatML prompt formatting; negative or extreme temperatures (`< 0.0` or `> 2.0`, `NaN`, `Inf`) caused floating-point math domain crashes in native softmax sampling; invalid `top_p` or zero/excessive `max_tokens` threatened engine stability.
+- **How it was fixed**: Implemented `ChatCompletionRequest::validate()` verifying `messages` is non-empty, roles are valid (`system`, `user`, `assistant`, `tool`, `function`), content is non-blank, `temperature` $\in [0.0, 2.0]$, `top_p` $\in [0.0, 1.0]$, and `max_tokens` $\in [1, 32768]$.
+- **File**: `crates/aeromesh-engine/src/server.rs`.
+
+### [X] 13. OpenAI 422 JSON Error Envelopes (`FIX-07`)
+- **What was broken**: When requests failed validation, the server either returned Axum's default plain-text rejections, non-standard `{ "error": "string" }` JSON, or HTTP 500 with integer codes. Third-party OpenAI SDKs (Python `openai`, LangChain) failed with deserialization errors.
+- **How it was fixed**: Enhanced `ApiErrorResponse` with `unprocessable`, `bad_request_with_param`, `service_unavailable`, and `not_found` constructors conforming strictly to the OpenAI JSON schema (`{"error": {"message": "...", "type": "invalid_request_error", "param": "...", "code": "..."}}`). Added `JsonRejection` interception returning HTTP 400 on malformed JSON syntax.
+- **File**: `crates/aeromesh-engine/src/server.rs`.
+
 ---
 
 ## 2. What Is Remaining To Do ([ ] TO-DO)
@@ -94,21 +104,7 @@ These are the remaining actionable tasks, ranked by order of priority and ease o
 
 ### High Priority — Code & Security (Do First)
 
-#### [ ] 1. Request Input Validation & OpenAI 422 Errors (`FIX-06 & FIX-07`)
-- **What is needed**: In `crates/aeromesh-engine/src/server.rs`, validate incoming chat requests before processing:
-  - Check that `messages` array is not empty.
-  - Check that each message has a valid `role` and non-empty `content`.
-  - Check that `temperature` is between `0.0` and `2.0`.
-  - Check that `top_p` is between `0.0` and `1.0`.
-  - Check that `max_tokens` is between `1` and `32768`.
-  - If validation fails, return an OpenAI-compatible HTTP 422 JSON error:
-    ```json
-    {"error": {"message": "temperature must be between 0.0 and 2.0", "type": "invalid_request_error", "code": 422}}
-    ```
-- **Why it matters**: Prevents panics or undefined behavior on garbage input; matches OpenAI API standards.
-- **Effort**: ~25 minutes | **Difficulty**: Easy
-
-#### [ ] 2. Restrict CORS from `*` to Localhost (`FIX-11`)
+#### [ ] 1. Restrict CORS from `*` to Localhost (`FIX-11`)
 - **What is needed**: In `crates/aeromesh-engine/src/server.rs`, replace `.layer(CorsLayer::permissive())` with an explicit origin whitelist:
   - Allow `http://127.0.0.1:7860` and `http://localhost:7860` (the FastAPI frontend).
 - **Why it matters**: Permissive CORS allows any website you visit in your web browser to quietly send requests to your local LLM engine.

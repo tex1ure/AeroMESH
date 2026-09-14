@@ -1,5 +1,5 @@
 //! AeroMESH Secure Control Surface & API Server
-//!
+//! 
 //! Threat Model (SEC-01):
 //! - Browser -> Web Gateway (7860): Binds 127.0.0.1 by default. Remote exposure requires Tailscale with ACLs.
 //! - Gateway -> Coordinator Axum (8080): Binds 127.0.0.1 by default. Authenticated via Bearer token matching AEROMESH_API_KEY.
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use axum::{
-    extract::State,
+    extract::{rejection::JsonRejection, State},
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -31,10 +31,10 @@ use tracing::{error, info};
 use crate::pipeline::{CoordinatorStatus, PipelineCoordinatorClient};
 
 // ---------------------------------------------------------------------------
-// Standard OpenAI Error Envelope (FIX-06)
+// Standard OpenAI Error Envelope (FIX-06 & FIX-07)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiErrorDetail {
     pub message: String,
     #[serde(rename = "type")]
@@ -43,7 +43,7 @@ pub struct ApiErrorDetail {
     pub code: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiErrorResponse {
     pub error: ApiErrorDetail,
 }
@@ -55,6 +55,22 @@ impl ApiErrorResponse {
                 message: message.into(),
                 error_type: error_type.into(),
                 param: None,
+                code: code.map(|c| c.to_string()),
+            },
+        }
+    }
+
+    pub fn with_param(
+        message: impl Into<String>,
+        error_type: impl Into<String>,
+        param: Option<&str>,
+        code: Option<&str>,
+    ) -> Self {
+        Self {
+            error: ApiErrorDetail {
+                message: message.into(),
+                error_type: error_type.into(),
+                param: param.map(|p| p.to_string()),
                 code: code.map(|c| c.to_string()),
             },
         }
@@ -74,7 +90,43 @@ impl ApiErrorResponse {
         )
     }
 
-    pub fn internal(msg: &str) -> (StatusCode, Json<Self>) {
+    pub fn bad_request_with_param(
+        msg: impl Into<String>,
+        param: Option<&str>,
+        code: Option<&str>,
+    ) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(Self::with_param(msg, "invalid_request_error", param, code)),
+        )
+    }
+
+    pub fn unprocessable(
+        msg: impl Into<String>,
+        param: Option<&str>,
+        code: Option<&str>,
+    ) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(Self::with_param(msg, "invalid_request_error", param, code)),
+        )
+    }
+
+    pub fn service_unavailable(msg: impl Into<String>, code: Option<&str>) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(Self::with_param(msg, "model_unavailable", None, code)),
+        )
+    }
+
+    pub fn not_found(msg: impl Into<String>, param: Option<&str>) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::NOT_FOUND,
+            Json(Self::with_param(msg, "invalid_request_error", param, Some("not_found"))),
+        )
+    }
+
+    pub fn internal(msg: impl Into<String>) -> (StatusCode, Json<Self>) {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(Self::new(msg, "api_error", None)),
@@ -191,6 +243,93 @@ pub struct ChatCompletionRequest {
 
 fn default_max_tokens() -> Option<usize> {
     Some(256)
+}
+
+impl ChatCompletionRequest {
+    /// Validates the request according to OpenAI API constraints and AeroMESH engine limits.
+    /// Returns HTTP 422 Unprocessable Entity with standard ApiErrorResponse on failure.
+    pub fn validate(&self) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+        // 1. messages array cannot be empty
+        if self.messages.is_empty() {
+            return Err(ApiErrorResponse::unprocessable(
+                "'messages' array cannot be empty. At least one message is required.",
+                Some("messages"),
+                Some("missing_required_field"),
+            ));
+        }
+
+        // 2. Validate each message in the array
+        for (i, msg) in self.messages.iter().enumerate() {
+            let role = msg.role.trim().to_lowercase();
+            if role.is_empty() {
+                return Err(ApiErrorResponse::unprocessable(
+                    format!("Message at index {} has an empty 'role'. Expected 'system', 'user', or 'assistant'.", i),
+                    Some("messages.role"),
+                    Some("invalid_value"),
+                ));
+            }
+            if !matches!(role.as_str(), "system" | "user" | "assistant" | "tool" | "function") {
+                return Err(ApiErrorResponse::unprocessable(
+                    format!("Message at index {} has an invalid role '{}'. Allowed roles: 'system', 'user', 'assistant', 'tool', 'function'.", i, msg.role),
+                    Some("messages.role"),
+                    Some("invalid_value"),
+                ));
+            }
+            if msg.content.trim().is_empty() {
+                return Err(ApiErrorResponse::unprocessable(
+                    format!("Message at index {} has empty 'content'.", i),
+                    Some("messages.content"),
+                    Some("empty_content"),
+                ));
+            }
+        }
+
+        // 3. Validate temperature (must be finite and 0.0 <= t <= 2.0)
+        if let Some(t) = self.temperature {
+            if t.is_nan() || t.is_infinite() || !(0.0..=2.0).contains(&t) {
+                return Err(ApiErrorResponse::unprocessable(
+                    format!("'temperature' must be a finite number between 0.0 and 2.0, got {}", t),
+                    Some("temperature"),
+                    Some("invalid_value"),
+                ));
+            }
+        }
+
+        // 4. Validate top_p (must be finite and 0.0 <= p <= 1.0)
+        if let Some(p) = self.top_p {
+            if p.is_nan() || p.is_infinite() || !(0.0..=1.0).contains(&p) {
+                return Err(ApiErrorResponse::unprocessable(
+                    format!("'top_p' must be a finite number between 0.0 and 1.0, got {}", p),
+                    Some("top_p"),
+                    Some("invalid_value"),
+                ));
+            }
+        }
+
+        // 5. Validate max_tokens (1 <= m <= 32768)
+        if let Some(m) = self.max_tokens {
+            if m == 0 || m > 32768 {
+                return Err(ApiErrorResponse::unprocessable(
+                    format!("'max_tokens' must be an integer between 1 and 32768, got {}", m),
+                    Some("max_tokens"),
+                    Some("invalid_value"),
+                ));
+            }
+        }
+
+        // 6. Validate model if provided
+        if let Some(ref m) = self.model {
+            if m.trim().is_empty() {
+                return Err(ApiErrorResponse::unprocessable(
+                    "'model' parameter cannot be empty when specified.",
+                    Some("model"),
+                    Some("invalid_value"),
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -537,8 +676,25 @@ fn format_chat_prompt(messages: &[ChatMessage]) -> String {
 
 async fn handle_chat_completions(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ChatCompletionRequest>,
+    req_res: Result<Json<ChatCompletionRequest>, JsonRejection>,
 ) -> Response {
+    let Json(req) = match req_res {
+        Ok(r) => r,
+        Err(rejection) => {
+            return ApiErrorResponse::bad_request_with_param(
+                format!("Invalid JSON payload: {}", rejection.body_text()),
+                Some("body"),
+                Some("invalid_json"),
+            )
+            .into_response();
+        }
+    };
+
+    // FIX-06 & FIX-07: Validate parameters and return standard HTTP 422 on failure
+    if let Err(err_resp) = req.validate() {
+        return err_resp.into_response();
+    }
+
     let is_streaming = req.stream.unwrap_or(true);
     let prompt = format_chat_prompt(&req.messages);
 
@@ -564,16 +720,10 @@ async fn handle_chat_completions(
             let mut coord = state.coordinator.lock().await;
             if let Err(e) = coord.switch_model(&model_path) {
                 error!(error = %e, target_model = %target_model, "Failed to switch model on chat request");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": {
-                            "message": format!("Failed to switch to requested model '{}': {}", target_model, e),
-                            "type": "model_load_error",
-                            "code": 500
-                        }
-                    })),
-                ).into_response();
+                return ApiErrorResponse::internal(
+                    format!("Failed to switch to requested model '{}': {}", target_model, e),
+                )
+                .into_response();
             } else {
                 let mut mn = state.model_name.lock().await;
                 *mn = target_model.clone();
@@ -593,35 +743,18 @@ async fn handle_chat_completions(
     {
         let coord = state.coordinator.lock().await;
         if !coord.is_ready() {
-            let (status_code, err_msg) = match coord.status() {
-                CoordinatorStatus::Loading(p) => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    format!("Model pipeline is currently loading: {}", p.display()),
-                ),
-                CoordinatorStatus::Failed(e) => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    format!("Model pipeline is unavailable (load failed: {})", e),
-                ),
-                CoordinatorStatus::Closed => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Model pipeline is closed".to_string(),
-                ),
-                CoordinatorStatus::Ready => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Model pipeline instance is not ready".to_string(),
-                ),
+            let err_msg = match coord.status() {
+                CoordinatorStatus::Loading(p) => {
+                    format!("Model pipeline is currently loading: {}", p.display())
+                }
+                CoordinatorStatus::Failed(e) => {
+                    format!("Model pipeline is unavailable (load failed: {})", e)
+                }
+                CoordinatorStatus::Closed => "Model pipeline is closed".to_string(),
+                CoordinatorStatus::Ready => "Model pipeline instance is not ready".to_string(),
             };
 
-            return (
-                status_code,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": err_msg,
-                        "type": "model_unavailable",
-                        "code": status_code.as_u16()
-                    }
-                })),
-            ).into_response();
+            return ApiErrorResponse::service_unavailable(err_msg, Some("model_not_ready")).into_response();
         }
     }
 
@@ -691,11 +824,7 @@ async fn handle_chat_completions(
                 };
                 Json(resp).into_response()
             }
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response(),
+            Err(e) => ApiErrorResponse::internal(e.to_string()).into_response(),
         }
     }
 }
@@ -722,5 +851,136 @@ mod tests {
         assert_eq!(json_val["error"]["type"], "authentication_error");
         assert_eq!(json_val["error"]["code"], "invalid_api_key");
         assert!(json_val["error"]["param"].is_null());
+    }
+
+    #[test]
+    fn test_openai_422_envelope_schema_conformance() {
+        let (status, Json(body)) = ApiErrorResponse::unprocessable(
+            "'temperature' must be a finite number between 0.0 and 2.0, got 3.5",
+            Some("temperature"),
+            Some("invalid_value"),
+        );
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let json_val = serde_json::to_value(&body).unwrap();
+        assert_eq!(json_val["error"]["message"], "'temperature' must be a finite number between 0.0 and 2.0, got 3.5");
+        assert_eq!(json_val["error"]["type"], "invalid_request_error");
+        assert_eq!(json_val["error"]["param"], "temperature");
+        assert_eq!(json_val["error"]["code"], "invalid_value");
+    }
+
+    fn sample_valid_request() -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: Some("qwen2.5-0.5b-instruct.gguf".to_string()),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Hello AeroMESH".to_string(),
+            }],
+            max_tokens: Some(256),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            stream: Some(true),
+            session_id: Some(12345),
+        }
+    }
+
+    #[test]
+    fn test_chat_completion_validation_valid_request_passes() {
+        let req = sample_valid_request();
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_chat_completion_validation_empty_messages_returns_422() {
+        let mut req = sample_valid_request();
+        req.messages.clear();
+        let (status, Json(err)) = req.validate().unwrap_err();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.error.param, Some("messages".to_string()));
+        assert_eq!(err.error.code, Some("missing_required_field".to_string()));
+    }
+
+    #[test]
+    fn test_chat_completion_validation_invalid_role_returns_422() {
+        let mut req = sample_valid_request();
+        req.messages[0].role = "bad_role".to_string();
+        let (status, Json(err)) = req.validate().unwrap_err();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.error.param, Some("messages.role".to_string()));
+        assert_eq!(err.error.code, Some("invalid_value".to_string()));
+    }
+
+    #[test]
+    fn test_chat_completion_validation_empty_content_returns_422() {
+        let mut req = sample_valid_request();
+        req.messages[0].content = "   \n\t  ".to_string();
+        let (status, Json(err)) = req.validate().unwrap_err();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.error.param, Some("messages.content".to_string()));
+        assert_eq!(err.error.code, Some("empty_content".to_string()));
+    }
+
+    #[test]
+    fn test_chat_completion_validation_temperature_bounds_returns_422() {
+        for bad_temp in [-1.0f32, -0.01, 2.01, 100.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut req = sample_valid_request();
+            req.temperature = Some(bad_temp);
+            let (status, Json(err)) = req.validate().unwrap_err();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "Testing temp {}", bad_temp);
+            assert_eq!(err.error.param, Some("temperature".to_string()));
+            assert_eq!(err.error.code, Some("invalid_value".to_string()));
+        }
+
+        // Test boundary valid values
+        for good_temp in [0.0f32, 0.7, 1.0, 1.99, 2.0] {
+            let mut req = sample_valid_request();
+            req.temperature = Some(good_temp);
+            assert!(req.validate().is_ok(), "Testing temp {}", good_temp);
+        }
+    }
+
+    #[test]
+    fn test_chat_completion_validation_top_p_bounds_returns_422() {
+        for bad_p in [-0.01f32, 1.01, 10.0, f32::NAN, f32::INFINITY] {
+            let mut req = sample_valid_request();
+            req.top_p = Some(bad_p);
+            let (status, Json(err)) = req.validate().unwrap_err();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "Testing top_p {}", bad_p);
+            assert_eq!(err.error.param, Some("top_p".to_string()));
+            assert_eq!(err.error.code, Some("invalid_value".to_string()));
+        }
+
+        for good_p in [0.0f32, 0.5, 0.9, 1.0] {
+            let mut req = sample_valid_request();
+            req.top_p = Some(good_p);
+            assert!(req.validate().is_ok(), "Testing top_p {}", good_p);
+        }
+    }
+
+    #[test]
+    fn test_chat_completion_validation_max_tokens_bounds_returns_422() {
+        for bad_max in [0usize, 32769, 100_000] {
+            let mut req = sample_valid_request();
+            req.max_tokens = Some(bad_max);
+            let (status, Json(err)) = req.validate().unwrap_err();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "Testing max_tokens {}", bad_max);
+            assert_eq!(err.error.param, Some("max_tokens".to_string()));
+            assert_eq!(err.error.code, Some("invalid_value".to_string()));
+        }
+
+        for good_max in [1usize, 256, 4096, 32768] {
+            let mut req = sample_valid_request();
+            req.max_tokens = Some(good_max);
+            assert!(req.validate().is_ok(), "Testing max_tokens {}", good_max);
+        }
+    }
+
+    #[test]
+    fn test_chat_completion_validation_empty_model_returns_422() {
+        let mut req = sample_valid_request();
+        req.model = Some("   ".to_string());
+        let (status, Json(err)) = req.validate().unwrap_err();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.error.param, Some("model".to_string()));
+        assert_eq!(err.error.code, Some("invalid_value".to_string()));
     }
 }
