@@ -8,7 +8,7 @@ pub const ACTIVATION_MAGIC: [u8; 4] = *b"AERO";
 pub const TOKEN_RESP_MAGIC: [u8; 4] = *b"ATOK";
 pub const HANDSHAKE_REQ_MAGIC: [u8; 4] = *b"AHSK";
 pub const HANDSHAKE_RESP_MAGIC: [u8; 4] = *b"AHSR";
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 // Hard Resource Ceilings to Prevent Unbounded Network Memory Allocations & DoS
 pub const MAX_ACTIVATION_PAYLOAD_BYTES: u32 = 128 * 1024 * 1024; // 128 MB max per activation frame
@@ -711,6 +711,7 @@ impl TokenResponseFrame {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandshakeRequest {
     pub version: u16,
+    pub auth_token: [u8; 32],
     pub model_architecture: String,
     pub hidden_dim: u32,
     pub total_layers: u32,
@@ -723,10 +724,11 @@ impl HandshakeRequest {
     pub fn encode(&self) -> Bytes {
         let arch_bytes = self.model_architecture.as_bytes();
         let csum_bytes = self.checksum_prefix.as_bytes();
-        let mut buf = BytesMut::with_capacity(32 + arch_bytes.len() + csum_bytes.len());
+        let mut buf = BytesMut::with_capacity(64 + arch_bytes.len() + csum_bytes.len());
 
         buf.extend_from_slice(&HANDSHAKE_REQ_MAGIC);
         buf.extend_from_slice(&self.version.to_be_bytes());
+        buf.extend_from_slice(&self.auth_token);
         buf.extend_from_slice(&self.hidden_dim.to_be_bytes());
         buf.extend_from_slice(&self.total_layers.to_be_bytes());
         buf.extend_from_slice(&self.worker_layer_start.to_be_bytes());
@@ -747,7 +749,13 @@ impl HandshakeRequest {
         ensure!(magic == HANDSHAKE_REQ_MAGIC, "Invalid handshake request magic: {:?}", magic);
 
         let version = reader.read_u16().await?;
+        if version == 2 {
+            bail!("Handshake rejected: received legacy protocol version 2 (missing auth_token). AeroMesh requires PROTOCOL_VERSION 3 with mutual authentication.");
+        }
         ensure!(version == PROTOCOL_VERSION, "Unsupported handshake protocol version: {}", version);
+
+        let mut auth_token = [0u8; 32];
+        reader.read_exact(&mut auth_token).await?;
 
         let hidden_dim = reader.read_u32().await?;
         let total_layers = reader.read_u32().await?;
@@ -778,6 +786,7 @@ impl HandshakeRequest {
 
         Ok(Self {
             version,
+            auth_token,
             model_architecture,
             hidden_dim,
             total_layers,
@@ -792,27 +801,40 @@ impl HandshakeRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandshakeResponse {
     pub version: u16,
+    pub auth_token: [u8; 32],
     pub accepted: bool,
     pub worker_layer_count: u32,
     pub error_message: String,
 }
 
 impl HandshakeResponse {
-    pub fn ok() -> Self {
+    pub fn ok(auth_token: [u8; 32]) -> Self {
         Self {
             version: PROTOCOL_VERSION,
+            auth_token,
             accepted: true,
             worker_layer_count: 0,
             error_message: String::new(),
         }
     }
 
+    pub fn reject(error_message: impl Into<String>) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            auth_token: [0u8; 32],
+            accepted: false,
+            worker_layer_count: 0,
+            error_message: error_message.into(),
+        }
+    }
+
     pub fn encode(&self) -> Bytes {
         let err_bytes = self.error_message.as_bytes();
-        let mut buf = BytesMut::with_capacity(16 + err_bytes.len());
+        let mut buf = BytesMut::with_capacity(48 + err_bytes.len());
 
         buf.extend_from_slice(&HANDSHAKE_RESP_MAGIC);
         buf.extend_from_slice(&self.version.to_be_bytes());
+        buf.extend_from_slice(&self.auth_token);
         buf.extend_from_slice(&[if self.accepted { 1 } else { 0 }]);
         buf.extend_from_slice(&self.worker_layer_count.to_be_bytes());
 
@@ -828,7 +850,13 @@ impl HandshakeResponse {
         ensure!(magic == HANDSHAKE_RESP_MAGIC, "Invalid handshake response magic: {:?}", magic);
 
         let version = reader.read_u16().await?;
+        if version == 2 {
+            bail!("Handshake response rejected: received legacy protocol version 2 (missing auth_token). AeroMesh requires PROTOCOL_VERSION 3.");
+        }
         ensure!(version == PROTOCOL_VERSION, "Unsupported handshake response protocol version: {}", version);
+
+        let mut auth_token = [0u8; 32];
+        reader.read_exact(&mut auth_token).await?;
 
         let accepted = reader.read_u8().await? != 0;
         let worker_layer_count = reader.read_u32().await?;
@@ -846,6 +874,7 @@ impl HandshakeResponse {
 
         Ok(Self {
             version,
+            auth_token,
             accepted,
             worker_layer_count,
             error_message,
@@ -1164,6 +1193,7 @@ mod tests {
         let mut stream = Vec::new();
         stream.extend_from_slice(&HANDSHAKE_REQ_MAGIC);
         stream.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        stream.extend_from_slice(&[0u8; 32]); // auth_token for PROTOCOL_VERSION 3
         stream.extend_from_slice(&4096u32.to_be_bytes()); // hidden_dim
         stream.extend_from_slice(&32u32.to_be_bytes());   // total_layers
         stream.extend_from_slice(&0u32.to_be_bytes());    // worker_layer_start
@@ -1182,6 +1212,7 @@ mod tests {
         let mut stream = Vec::new();
         stream.extend_from_slice(&HANDSHAKE_RESP_MAGIC);
         stream.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        stream.extend_from_slice(&[0u8; 32]); // auth_token for PROTOCOL_VERSION 3
         stream.push(0); // accepted = false
         stream.extend_from_slice(&0u32.to_be_bytes()); // worker_layer_count
         // Malicious error string length: 10000 bytes (> MAX_HANDSHAKE_ERR_LEN = 8192)
@@ -1211,4 +1242,44 @@ mod tests {
         let res = ActivationFrame::decode_async(&mut cursor).await;
         assert!(res.is_err(), "Must error on truncated payload stream");
     }
+
+    #[tokio::test]
+    async fn test_handshake_v3_mutual_auth_and_v2_rejection() {
+        let auth_token = [7u8; 32];
+        let req = HandshakeRequest {
+            version: PROTOCOL_VERSION,
+            auth_token,
+            model_architecture: "qwen2".to_string(),
+            hidden_dim: 5120,
+            total_layers: 48,
+            worker_layer_start: 24,
+            worker_layer_end: 47,
+            checksum_prefix: "test-mesh".to_string(),
+        };
+
+        let encoded = req.encode();
+        let mut cursor = std::io::Cursor::new(encoded.to_vec());
+        let decoded = HandshakeRequest::decode_async(&mut cursor).await.unwrap();
+        assert_eq!(req, decoded);
+        assert_eq!(decoded.auth_token, auth_token);
+
+        let resp = HandshakeResponse::ok(auth_token);
+        let resp_encoded = resp.encode();
+        let mut resp_cursor = std::io::Cursor::new(resp_encoded.to_vec());
+        let resp_decoded = HandshakeResponse::decode_async(&mut resp_cursor).await.unwrap();
+        assert_eq!(resp, resp_decoded);
+        assert_eq!(resp_decoded.auth_token, auth_token);
+
+        // Verify rejection of legacy v2 handshake request
+        let mut legacy_v2_bytes = vec![];
+        legacy_v2_bytes.extend_from_slice(&HANDSHAKE_REQ_MAGIC);
+        legacy_v2_bytes.extend_from_slice(&2u16.to_be_bytes()); // Version 2
+        legacy_v2_bytes.extend_from_slice(&[0u8; 64]);
+        let mut legacy_cursor = std::io::Cursor::new(legacy_v2_bytes);
+        let legacy_res = HandshakeRequest::decode_async(&mut legacy_cursor).await;
+        assert!(legacy_res.is_err(), "Legacy protocol v2 must be explicitly rejected");
+        let err_str = legacy_res.unwrap_err().to_string();
+        assert!(err_str.contains("legacy protocol version 2"), "Error message should mention legacy version: {}", err_str);
+    }
 }
+
