@@ -2,7 +2,7 @@
 
 **Last Updated**: September 15, 2026  
 **Current Git Branch**: `main` (`commit 6dfc3b7`)  
-**Workspace Test Suite**: **36 / 36 Unit Tests Passing** (`cargo test --workspace`)  
+**Workspace Test Suite**: **39 / 39 Unit Tests Passing** (`cargo test --workspace`)  
 **Release Build Status**: **Clean / Zero Errors** (`cargo check --workspace --release`)
 
 ---
@@ -13,6 +13,7 @@ Over the recent audit cycles, the codebase underwent critical hardening against 
 
 Both feature branches (`P0-Fixes` and `upX`) have been **successfully unified and merged into `main`**. The system now features:
 - **Zero-Trust Mutual Authentication** on all control surfaces and binary TCP mesh sockets (`FIX-03`).
+- **Strict Local Origin CORS Restriction** preventing CSRF and drive-by web attacks (`FIX-11`).
 - **Transactional Model Hot-Swapping** immune to native segmentation faults (`CRASH-01`).
 - **Zero-Allocation GGUF Model Slicing** immune to underflow panics (`CRASH-02`).
 - **Bounded Frame Deserialization** immune to wire memory DoS attacks (`FIX-05`).
@@ -40,6 +41,7 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 | Issue ID | What Was Broken | How It Was Fixed | Affected Files |
 |---|---|---|---|
 | **FIX-03** | **No Authentication on HTTP API or TCP Worker Port**<br>Any network peer could invoke `/v1/chat/completions` or send raw frames to TCP port 50052. | (1) Added Axum `auth_middleware` checking `Authorization: Bearer <AEROMESH_API_KEY>` with constant-time equality.<br>(2) FastAPI gateway forwards the bearer token.<br>(3) Upgraded binary protocol to `PROTOCOL_VERSION = 3` with 32-byte mutual auth token (`AEROMESH_WORKER_SECRET`) on port 50052. | `server.rs`<br>`app.py`<br>`activation.rs`<br>`pipeline.rs` |
+| **FIX-11** | **Overly Permissive CORS Allowed Arbitrary External Origins**<br>In `server.rs`, Axum used `.layer(CorsLayer::permissive())`, allowing any external website in the user's browser to send cross-origin requests to `localhost:8080`. | Replaced permissive CORS with strict `build_cors_layer()` allowing only local Web UI origins (`http://127.0.0.1:7860`, `http://localhost:7860`) with optional `AEROMESH_ALLOWED_ORIGIN` env var override. Exempted preflight `OPTIONS` requests from authentication. Added 3 automated tests. | `server.rs` |
 | **SEC-DOC** | **Missing Threat Model & Security Disclosure**<br>No documentation of trust boundaries or ports. | Created [`SECURITY.md`](SECURITY.md) covering threat model, timing attack mitigations, control surfaces, and loopback rules. | `SECURITY.md` |
 
 ### C. Performance, Telemetry & Documentation
@@ -64,17 +66,12 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 
 These are actionable code improvements that directly increase reliability, security, and demo usability:
 
-1. **FIX-11 (P1, Security): Restrict CORS from `*` to Local Origins**
-   - **Current State**: In `server.rs`, Axum uses `.layer(CorsLayer::permissive())`, allowing any malicious site in the user's browser to send requests to `localhost:8080`.
-   - **Required Action**: Restrict CORS headers to `http://127.0.0.1:7860` and `http://localhost:7860`.
-   - **Effort**: Very Easy (~10 mins) • **Impact**: High
-
-2. **FIX-19 (P2, Frontend): "Stop Generating" Abort Button**
+1. **FIX-19 (P2, Frontend): "Stop Generating" Abort Button**
    - **Current State**: Once a response starts streaming, the user cannot cancel it without refreshing the page.
    - **Required Action**: Attach an `AbortController` to the fetch/SSE stream in `static/js/app.js` and wire up the UI Stop button to trigger `abort()`.
    - **Effort**: Easy (~20 mins) • **Impact**: Medium
 
-3. **FIX-08 (P1, Security): Rate Limiting Middleware**
+2. **FIX-08 (P1, Security): Rate Limiting Middleware**
    - **Current State**: No rate limiter on Axum routes.
    - **Required Action**: Attach `tower::limit::RateLimitLayer` (e.g. 60 req/min for health, 15 req/min for completions).
    - **Effort**: Easy (~30 mins) • **Impact**: Medium
@@ -85,7 +82,7 @@ These are actionable code improvements that directly increase reliability, secur
 
 These items require no complex code changes, take minimal time, and significantly boost the professional polish of the repository:
 
-4. **FIX-14 / FIX-02 (P1, Demo): `DEMO_SCRIPT.md`**
+3. **FIX-14 / FIX-02 (P1, Demo): `DEMO_SCRIPT.md`**
    - **Description**: A comprehensive presenter's battlecard containing:
      - Exact PowerShell commands to run on Laptop A (Coordinator) and Laptop B (Worker).
      - Expected console outputs.
@@ -93,11 +90,11 @@ These items require no complex code changes, take minimal time, and significantl
      - Instant fallback command (`.\start.ps1 all` for single-machine loopback) if network fails.
    - **Effort**: Easy (~20 mins) • **Impact**: High
 
-5. **FIX-17 (P2, Documentation): `API_REFERENCE.md`**
+4. **FIX-17 (P2, Documentation): `API_REFERENCE.md`**
    - **Description**: Standalone API documentation containing curl examples, request/response JSON schemas, SSE event formats, and error codes for `/v1/chat/completions`, `/v1/models`, `/health`, and `/api/cluster/status`.
    - **Effort**: Easy (~20 mins) • **Impact**: Medium
 
-6. **FIX-18 (P2, Documentation): `LIMITATIONS.md`**
+5. **FIX-18 (P2, Documentation): `LIMITATIONS.md`**
    - **Description**: Proactive disclosure of architectural boundaries (preempts reviewer critique):
      - 2-node maximum in current pipeline design.
      - Windows-only Win32 Job Object requirement.
@@ -105,15 +102,15 @@ These items require no complex code changes, take minimal time, and significantl
      - Ephemeral conversation history (no database persistence).
    - **Effort**: Very Easy (~15 mins) • **Impact**: Medium
 
-7. **FIX-25 & FIX-27 (P3, Legal/Community): `LICENSE` & `CONTRIBUTING.md`**
+6. **FIX-25 & FIX-27 (P3, Legal/Community): `LICENSE` & `CONTRIBUTING.md`**
    - **Description**: Add standard Apache-2.0 / MIT `LICENSE` file in root and concise `CONTRIBUTING.md` with build steps and code style guidelines.
    - **Effort**: Very Easy (~10 mins) • **Impact**: Medium
 
-8. **FIX-22 (P2, DevOps): CI/CD Pipeline (`.github/workflows/ci.yml`)**
+7. **FIX-22 (P2, DevOps): CI/CD Pipeline (`.github/workflows/ci.yml`)**
    - **Description**: Automated GitHub Actions workflow running `cargo test --workspace` and `cargo check --workspace --release` on every pull request and push.
    - **Effort**: Easy (~15 mins) • **Impact**: Medium
 
-9. **FIX-04 (P0, Documentation): UI Screenshots & Visual Proof**
+8. **FIX-04 (P0, Documentation): UI Screenshots & Visual Proof**
    - **Description**: Capture 3–5 clean screenshots of the claymorphic web UI (chat state, model loading, telemetry HUD modal, streaming response) and embed them into `README.md`.
    - **Effort**: Easy (~20 mins) • **Impact**: High
 
@@ -139,11 +136,11 @@ These items were evaluated during the ruthless review and determined to be **cor
 | Category | Total Issues | Resolved | Remaining Actionable | Accepted Constraints |
 |---|:---:|:---:|:---:|:---:|
 | **P0 (Critical / Blockers)** | 5 | 3 | 2 (Demo script, Screenshots) | 0 |
-| **P1 (High Priority)** | 10 | 4 | 6 (CORS, Rate limit, Demo script, etc.) | 0 |
+| **P1 (High Priority)** | 10 | 5 | 5 (Rate limit, Demo script, etc.) | 0 |
 | **P2 (Medium Priority)** | 9 | 2 | 3 (API doc, Limitations, Stop btn, CI) | 4 |
 | **P3 (Low Priority)** | 6 | 0 | 2 (License, Contributing) | 4 |
 | **Engine Crash Fixes** | 2 | 2 | 0 | 0 |
-| **Total** | **32** | **13** | **11** | **8** |
+| **Total** | **32** | **14** | **10** | **8** |
 
 ---
 
@@ -152,7 +149,6 @@ These items were evaluated during the ruthless review and determined to be **cor
 To get the project submission-ready in the shortest time:
 
 1. **Step 1 (Code & Security)**:
-   - Implement `FIX-11` (CORS restriction) in `server.rs`.
    - Implement `FIX-19` ("Stop Generating" abort button) in `app.js`.
    - Implement `FIX-08` (Rate limiting middleware) in `server.rs`.
 2. **Step 2 (Documentation Suite)**:

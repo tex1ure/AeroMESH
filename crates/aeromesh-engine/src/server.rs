@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use axum::{
     extract::{rejection::JsonRejection, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
 
 use crate::pipeline::{CoordinatorStatus, PipelineCoordinatorClient};
@@ -420,6 +420,8 @@ impl PipelineHttpServer {
     pub async fn run(&self, host: &str, port: u16) -> Result<()> {
         load_dotenv_if_present();
 
+        let cors = build_cors_layer();
+
         let app = Router::new()
             .route("/v1/chat/completions", post(handle_chat_completions))
             .route("/api/chat", post(handle_chat_completions))
@@ -430,7 +432,7 @@ impl PipelineHttpServer {
             .route("/v1/models/load", post(handle_switch_model))
             .route("/api/cluster/status", get(handle_cluster_status))
             .layer(axum::middleware::from_fn(auth_middleware))
-            .layer(CorsLayer::permissive())
+            .layer(cors)
             .with_state(self.state.clone());
 
         let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
@@ -443,13 +445,42 @@ impl PipelineHttpServer {
     }
 }
 
+/// Builds strict CORS policy allowing only local web UI origins (127.0.0.1:7860 & localhost:7860)
+/// with optional AEROMESH_ALLOWED_ORIGIN environment variable extension.
+pub fn build_cors_layer() -> CorsLayer {
+    let mut allowed_origins = vec![
+        "http://127.0.0.1:7860"
+            .parse::<HeaderValue>()
+            .expect("valid origin"),
+        "http://localhost:7860"
+            .parse::<HeaderValue>()
+            .expect("valid origin"),
+    ];
+
+    if let Ok(custom_origins) = std::env::var("AEROMESH_ALLOWED_ORIGIN") {
+        for origin in custom_origins.split(',') {
+            let trimmed = origin.trim();
+            if !trimmed.is_empty() {
+                if let Ok(val) = trimmed.parse::<HeaderValue>() {
+                    allowed_origins.push(val);
+                }
+            }
+        }
+    }
+
+    CorsLayer::new()
+        .allow_origin(allowed_origins)
+        .allow_methods(Any) // Allow GET, POST, OPTIONS for SSE compatibility
+        .allow_headers(Any) // Allow Authorization, Content-Type, etc.
+}
+
 async fn auth_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<Response, (StatusCode, Json<ApiErrorResponse>)> {
     let path = req.uri().path();
-    // Exempt /health endpoint for cluster probes and heartbeat
-    if path == "/health" {
+    // Exempt OPTIONS preflight requests and /health endpoint for cluster probes and heartbeat
+    if req.method() == axum::http::Method::OPTIONS || path == "/health" {
         return Ok(next.run(req).await);
     }
 
@@ -997,4 +1028,63 @@ mod tests {
         assert_eq!(err.error.param, Some("model".to_string()));
         assert_eq!(err.error.code, Some("invalid_value".to_string()));
     }
+
+    #[tokio::test]
+    async fn test_cors_preflight_allowed_origin_returns_header() {
+        let app = Router::new()
+            .route("/v1/models", get(|| async { "ok" }))
+            .layer(build_cors_layer());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .request(reqwest::Method::OPTIONS, format!("http://{}/v1/models", addr))
+            .header("Origin", "http://127.0.0.1:7860")
+            .header("Access-Control-Request-Method", "GET")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let origin_header = resp.headers().get("access-control-allow-origin");
+        assert_eq!(origin_header.unwrap(), "http://127.0.0.1:7860");
+    }
+
+    #[tokio::test]
+    async fn test_cors_preflight_unauthorized_origin_omits_header() {
+        let app = Router::new()
+            .route("/v1/models", get(|| async { "ok" }))
+            .layer(build_cors_layer());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .request(reqwest::Method::OPTIONS, format!("http://{}/v1/models", addr))
+            .header("Origin", "http://evil.com")
+            .header("Access-Control-Request-Method", "GET")
+            .send()
+            .await
+            .unwrap();
+
+        let origin_header = resp.headers().get("access-control-allow-origin");
+        assert!(origin_header.is_none());
+    }
+
+    #[test]
+    fn test_build_cors_layer_with_custom_env_origin() {
+        std::env::set_var("AEROMESH_ALLOWED_ORIGIN", "http://192.168.1.100:7860, http://lan-host:7860");
+        let _cors = build_cors_layer();
+        std::env::remove_var("AEROMESH_ALLOWED_ORIGIN");
+    }
 }
+
