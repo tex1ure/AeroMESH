@@ -544,6 +544,8 @@ cargo run --bin aeromesh -- prime-cache --model models/model.gguf
 
 The AeroMesh coordinator exposes an OpenAI-compatible REST and SSE streaming interface on port `8080` (or your configured `--port`):
 
+- **API Reference**: See [`API_REFERENCE.md`](API_REFERENCE.md) for full endpoint specifications, SSE streaming schemas, parameter constraints, cURL examples, and error matrices.
+
 ### API Endpoints
 
 - `POST /v1/chat/completions` (or `/api/chat/stream`): Standard OpenAI chat completion format. Supports both standard JSON responses and Server-Sent Events (`stream: true`).

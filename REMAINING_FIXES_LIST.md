@@ -14,10 +14,10 @@
 | **Security & Authentication (P0 / P1)** | 4 | **4** (100%) | 0 | 0 |
 | **Input Validation & Safety (P1 / P2)** | 3 | **3** (100%) | 0 | 0 |
 | **Frontend & Usability (P2)** | 2 | **2** (100%) | 0 | 0 |
-| **Documentation & Presentation (P1 / P2)** | 6 | **4** (67%) | 2 | 0 |
+| **Documentation & Presentation (P1 / P2)** | 6 | **5** (83%) | 1 | 0 |
 | **Legal & Open Source Polish (P3)** | 3 | 0 | 3 | 0 |
 | **Intentional Design Decisions (No Action)** | 8 | 0 | 0 | **8** |
-| **Total** | **31** | **18** | **5** | **8** |
+| **Total** | **31** | **19** | **4** | **8** |
 
 ---
 
@@ -138,7 +138,7 @@ These are the remaining actionable tasks, ranked by order of priority and ease o
 - **Why it matters**: Prevents demo day panic and guarantees a polished live presentation.
 - **Effort**: ~15 minutes | **Difficulty**: Very Easy
 
-#### [ ] 7. Standalone API Reference (`API_REFERENCE.md` / `FIX-17`)
+#### [x] 7. Standalone API Reference (`API_REFERENCE.md` / `FIX-17`) - **Status**: Completed. Fully documented endpoints, curl commands, JSON schemas, SSE formats, and error matrices.
 - **What is needed**: Create a clean developer document listing:
   - `/v1/chat/completions` (JSON format, parameters, curl example, SSE streaming example).
   - `/v1/models` (list available models).
