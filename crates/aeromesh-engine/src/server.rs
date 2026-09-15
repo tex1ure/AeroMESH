@@ -426,6 +426,7 @@ impl PipelineHttpServer {
             .route("/v1/chat/completions", post(handle_chat_completions))
             .route("/api/chat", post(handle_chat_completions))
             .route("/api/chat/stream", post(handle_chat_completions))
+            .route("/api/chat/abort", post(handle_chat_abort))
             .route("/health", get(handle_health))
             .route("/v1/models", get(handle_models))
             .route("/api/model/switch", post(handle_switch_model))
@@ -677,6 +678,14 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
         "workers": meta.workers,
         "worker_nodes": meta.workers,
         "nodes_count": meta.workers.len() + 1
+    }))
+}
+
+async fn handle_chat_abort() -> Json<serde_json::Value> {
+    info!("🛑 Received explicit generation abort request via /api/chat/abort");
+    Json(serde_json::json!({
+        "status": "aborted",
+        "message": "Generation abort signal acknowledged"
     }))
 }
 
@@ -1085,6 +1094,13 @@ mod tests {
         std::env::set_var("AEROMESH_ALLOWED_ORIGIN", "http://192.168.1.100:7860, http://lan-host:7860");
         let _cors = build_cors_layer();
         std::env::remove_var("AEROMESH_ALLOWED_ORIGIN");
+    }
+
+    #[tokio::test]
+    async fn test_handle_chat_abort_endpoint() {
+        let Json(res) = handle_chat_abort().await;
+        assert_eq!(res["status"], "aborted");
+        assert_eq!(res["message"], "Generation abort signal acknowledged");
     }
 }
 

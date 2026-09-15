@@ -58,6 +58,11 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 | **FIX-07** | **Non-Standard Error Envelopes on Validation Failure**<br>Validation rejections returned Axum plain text or non-standard JSON, causing third-party OpenAI client SDKs to crash with deserialization errors. | Enhanced `ApiErrorResponse` with structured constructors (`unprocessable`, `bad_request_with_param`, `service_unavailable`, `not_found`) conforming to OpenAI schema (`{"error": {"message": "...", "type": "invalid_request_error", "param": "...", "code": 422}}`). Added `JsonRejection` interception for HTTP 400 on malformed JSON syntax. | `server.rs` |
 | **FIX-24** | **No Context Window / VRAM Boundary Enforcement**<br>Prompts exceeding `n_ctx = 4096` or requests where `prompt_tokens + max_tokens > n_ctx` were not checked upfront, causing out-of-bounds KV-cache allocation or silent segmentation faults in native CUDA kernels. | Added pre-flight token count validation (`prompt_tokens.len() + max_tokens <= n_ctx`). Rejects overflowing requests upfront with typed HTTP 422 error: `"Total tokens (X prompt + Y max_tokens = Z) exceed model context window of 4096"`. Added context validation guards across `LlamaPipelineInstance` and `PipelineCoordinatorClient`. | `server.rs`<br>`pipeline.rs` |
 
+### E. Frontend UX & Stream Lifecycle (FIX-19)
+| Issue ID | What Was Broken | How It Was Fixed | Affected Files |
+|---|---|---|---|
+| **FIX-19** | **No "Stop Generating" Abort Capability**<br>Streaming responses could not be cancelled by the user mid-generation, causing unwanted token generation, wasted GPU cycles, and UI lockup until max_tokens elapsed. | Made `send-btn` context-aware (dual-purpose Send/Stop toggle), wired up `AbortController` to the fetch SSE stream, handled `AbortError` gracefully in console (`Generation aborted by user.`), added `Escape` key abort trigger, and integrated `/api/chat/abort` backup endpoints across Axum and FastAPI with native token loop cancellation. | `static/js/app.js`<br>`app.py`<br>`server.rs`<br>`claymorphic.css` |
+
 ---
 
 ## 3. Remaining Fixes & Action Items
@@ -66,12 +71,7 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 
 These are actionable code improvements that directly increase reliability, security, and demo usability:
 
-1. **FIX-19 (P2, Frontend): "Stop Generating" Abort Button**
-   - **Current State**: Once a response starts streaming, the user cannot cancel it without refreshing the page.
-   - **Required Action**: Attach an `AbortController` to the fetch/SSE stream in `static/js/app.js` and wire up the UI Stop button to trigger `abort()`.
-   - **Effort**: Easy (~20 mins) • **Impact**: Medium
-
-2. **FIX-08 (P1, Security): Rate Limiting Middleware**
+1. **FIX-08 (P1, Security): Rate Limiting Middleware**
    - **Current State**: No rate limiter on Axum routes.
    - **Required Action**: Attach `tower::limit::RateLimitLayer` (e.g. 60 req/min for health, 15 req/min for completions).
    - **Effort**: Easy (~30 mins) • **Impact**: Medium
@@ -137,10 +137,10 @@ These items were evaluated during the ruthless review and determined to be **cor
 |---|:---:|:---:|:---:|:---:|
 | **P0 (Critical / Blockers)** | 5 | 3 | 2 (Demo script, Screenshots) | 0 |
 | **P1 (High Priority)** | 10 | 5 | 5 (Rate limit, Demo script, etc.) | 0 |
-| **P2 (Medium Priority)** | 9 | 2 | 3 (API doc, Limitations, Stop btn, CI) | 4 |
+| **P2 (Medium Priority)** | 9 | 3 | 2 (API doc, Limitations, CI) | 4 |
 | **P3 (Low Priority)** | 6 | 0 | 2 (License, Contributing) | 4 |
 | **Engine Crash Fixes** | 2 | 2 | 0 | 0 |
-| **Total** | **32** | **14** | **10** | **8** |
+| **Total** | **32** | **15** | **9** | **8** |
 
 ---
 
@@ -149,7 +149,7 @@ These items were evaluated during the ruthless review and determined to be **cor
 To get the project submission-ready in the shortest time:
 
 1. **Step 1 (Code & Security)**:
-   - Implement `FIX-19` ("Stop Generating" abort button) in `app.js`.
+   - ✅ `FIX-19` ("Stop Generating" abort button) completed across frontend & backend.
    - Implement `FIX-08` (Rate limiting middleware) in `server.rs`.
 2. **Step 2 (Documentation Suite)**:
    - Generate `DEMO_SCRIPT.md` (`FIX-14` / `FIX-02`).

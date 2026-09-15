@@ -211,6 +211,11 @@ async def chat_completions(request: Request):
 @app.post("/api/chat/abort", dependencies=[Depends(verify_gateway_access)])
 async def chat_abort():
     """Signals cancellation to backend coordinator if required."""
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.post(f"{AEROMESH_ENDPOINT}/api/chat/abort", headers=get_auth_headers())
+    except Exception:
+        pass
     return {"status": "aborted"}
 
 

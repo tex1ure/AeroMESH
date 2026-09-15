@@ -1033,8 +1033,10 @@
       saveConversations();
     } catch (err) {
       if (err.name === 'AbortError') {
+        console.log('Generation aborted by user.');
         accumulatedText += '\n\n*(Generation stopped by user)*';
       } else {
+        console.error('Stream error:', err);
         accumulatedText += `\n\n❌ **Communication Error**: ${err.message}`;
       }
       chat.messages[assistantMessageIndex].content = accumulatedText;
@@ -1060,7 +1062,7 @@
       elements.sendBtn.title = 'Send Prompt (Enter)';
       elements.sendBtn.innerHTML = '<i data-lucide="arrow-up" style="width: 18px; height: 18px; stroke-width: 2.5;"></i>';
     }
-    lucide.createIcons();
+    if (window.lucide) window.lucide.createIcons();
   }
 
   function adjustTextareaHeight() {
@@ -1110,7 +1112,10 @@
 
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && isGenerating) {
-        if (activeAbortController) activeAbortController.abort();
+        if (activeAbortController) {
+          activeAbortController.abort();
+          try { fetch('/api/chat/abort', { method: 'POST' }); } catch (e) {}
+        }
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
         e.preventDefault();
@@ -1118,7 +1123,16 @@
       }
     });
 
-    elements.sendBtn.onclick = () => handleSendMessage();
+    elements.sendBtn.onclick = () => {
+      if (isGenerating && activeAbortController) {
+        // Trigger abort if currently streaming
+        activeAbortController.abort();
+        try { fetch('/api/chat/abort', { method: 'POST' }); } catch (e) {}
+      } else if (!isGenerating) {
+        // Normal send behavior
+        handleSendMessage();
+      }
+    };
 
     elements.suggestionCards.forEach((card) => {
       card.onclick = () => {
