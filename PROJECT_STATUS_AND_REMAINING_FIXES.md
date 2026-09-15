@@ -1,8 +1,8 @@
 # AeroMESH: Project Status & Master Fixes Tracker
 
 **Last Updated**: September 15, 2026  
-**Current Git Branch**: `main` (`commit fa3837a`)  
-**Workspace Test Suite**: **26 / 26 Unit Tests Passing** (`cargo test --workspace`)  
+**Current Git Branch**: `main` (`commit 6dfc3b7`)  
+**Workspace Test Suite**: **36 / 36 Unit Tests Passing** (`cargo test --workspace`)  
 **Release Build Status**: **Clean / Zero Errors** (`cargo check --workspace --release`)
 
 ---
@@ -12,10 +12,12 @@
 Over the recent audit cycles, the codebase underwent critical hardening against remote crashes, memory exhaustion attacks, native access violations, and arithmetic underflows. 
 
 Both feature branches (`P0-Fixes` and `upX`) have been **successfully unified and merged into `main`**. The system now features:
-- **Zero-Trust Mutual Authentication** on all control surfaces and binary TCP mesh sockets.
-- **Transactional Model Hot-Swapping** immune to native segmentation faults.
-- **Zero-Allocation GGUF Model Slicing** immune to underflow panics.
-- **Bounded Frame Deserialization** immune to wire memory DoS attacks.
+- **Zero-Trust Mutual Authentication** on all control surfaces and binary TCP mesh sockets (`FIX-03`).
+- **Transactional Model Hot-Swapping** immune to native segmentation faults (`CRASH-01`).
+- **Zero-Allocation GGUF Model Slicing** immune to underflow panics (`CRASH-02`).
+- **Bounded Frame Deserialization** immune to wire memory DoS attacks (`FIX-05`).
+- **Request Parameter Validation & Structured 422 Envelopes** adhering strictly to OpenAI schema (`FIX-06` & `FIX-07`).
+- **Context Window & VRAM Boundary Guard** preventing out-of-bounds KV-cache memory allocation (`FIX-24`).
 - **Real-Time Telemetry Synchronization** with live inferring HUD indicators.
 - **Comprehensive Benchmark & Security Documentation** (`BENCHMARKS.md`, `SECURITY.md`, `README.md`).
 
@@ -47,6 +49,13 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 | **FIX-15** | **Inadequate Technical Documentation**<br>Project lacked deep architecture and protocol documentation. | Rewrote root [`README.md`](README.md) (32 KB) with detailed pipeline diagrams, memory topologies, CLI reference, and tensor slicing specs. | `README.md` |
 | **TELEMETRY** | **UI Showed "Coordinator Offline" During Generation**<br>Polling `/api/cluster/status` contended on the generation lock. | Added thread-safe `cluster_meta: RwLock<ClusterMeta>` to `AppState`, live inferring indicators (`⚡ Inferring (P2P)`), generating pulse CSS animations, and dynamic token counters. | `server.rs`<br>`app.js`<br>`claymorphic.css` |
 
+### D. Input Validation & Bounds Safety
+| Issue ID | What Was Broken | How It Was Fixed | Affected Files |
+|---|---|---|---|
+| **FIX-06** | **Unvalidated Chat Completion Requests**<br>`/v1/chat/completions` accepted empty message arrays, invalid roles, blank content, extreme/negative temperatures, or `NaN`/`Inf` that caused floating-point math domain crashes in native softmax sampling. | Implemented `ChatCompletionRequest::validate()` enforcing non-empty `messages`, valid roles (`system`, `user`, `assistant`, `tool`, `function`), non-blank content, `temperature` $\in [0.0, 2.0]$, `top_p` $\in [0.0, 1.0]$, and `max_tokens` $\in [1, 32768]$. | `server.rs` |
+| **FIX-07** | **Non-Standard Error Envelopes on Validation Failure**<br>Validation rejections returned Axum plain text or non-standard JSON, causing third-party OpenAI client SDKs to crash with deserialization errors. | Enhanced `ApiErrorResponse` with structured constructors (`unprocessable`, `bad_request_with_param`, `service_unavailable`, `not_found`) conforming to OpenAI schema (`{"error": {"message": "...", "type": "invalid_request_error", "param": "...", "code": 422}}`). Added `JsonRejection` interception for HTTP 400 on malformed JSON syntax. | `server.rs` |
+| **FIX-24** | **No Context Window / VRAM Boundary Enforcement**<br>Prompts exceeding `n_ctx = 4096` or requests where `prompt_tokens + max_tokens > n_ctx` were not checked upfront, causing out-of-bounds KV-cache allocation or silent segmentation faults in native CUDA kernels. | Added pre-flight token count validation (`prompt_tokens.len() + max_tokens <= n_ctx`). Rejects overflowing requests upfront with typed HTTP 422 error: `"Total tokens (X prompt + Y max_tokens = Z) exceed model context window of 4096"`. Added context validation guards across `LlamaPipelineInstance` and `PipelineCoordinatorClient`. | `server.rs`<br>`pipeline.rs` |
+
 ---
 
 ## 3. Remaining Fixes & Action Items
@@ -55,30 +64,17 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 
 These are actionable code improvements that directly increase reliability, security, and demo usability:
 
-1. **FIX-06 & FIX-07 (P1, Backend): Request Input Validation & Structured 422 Errors**
-   - **Current State**: `/v1/chat/completions` accepts requests without checking parameters.
-   - **Required Action**: Validate that `messages` is non-empty, each message has a non-empty `role` and `content`, `temperature` $\in [0.0, 2.0]$, `top_p` $\in [0.0, 1.0]$, and `max_tokens` $\in [1, 32768]$. Return standard OpenAI-compatible HTTP 422 JSON error if invalid:
-     ```json
-     {"error": {"message": "temperature must be between 0.0 and 2.0", "type": "invalid_request_error", "code": 422}}
-     ```
-   - **Effort**: Easy (~30 mins) • **Impact**: High
-
-2. **FIX-11 (P1, Security): Restrict CORS from `*` to Local Origins**
+1. **FIX-11 (P1, Security): Restrict CORS from `*` to Local Origins**
    - **Current State**: In `server.rs`, Axum uses `.layer(CorsLayer::permissive())`, allowing any malicious site in the user's browser to send requests to `localhost:8080`.
    - **Required Action**: Restrict CORS headers to `http://127.0.0.1:7860` and `http://localhost:7860`.
    - **Effort**: Very Easy (~10 mins) • **Impact**: High
 
-3. **FIX-19 (P2, Frontend): "Stop Generating" Abort Button**
+2. **FIX-19 (P2, Frontend): "Stop Generating" Abort Button**
    - **Current State**: Once a response starts streaming, the user cannot cancel it without refreshing the page.
    - **Required Action**: Attach an `AbortController` to the fetch/SSE stream in `static/js/app.js` and wire up the UI Stop button to trigger `abort()`.
    - **Effort**: Easy (~20 mins) • **Impact**: Medium
 
-4. **FIX-24 (P2, Performance): Context Window / VRAM Boundary Guard**
-   - **Current State**: Prompts exceeding model context (`n_ctx = 4096`) are not rejected upfront.
-   - **Required Action**: Validate `prompt_tokens.len() + max_tokens <= n_ctx`. If exceeded, return an explicit error: `"Context window of 4096 tokens exceeded"`.
-   - **Effort**: Easy (~15 mins) • **Impact**: Medium
-
-5. **FIX-08 (P1, Security): Rate Limiting Middleware**
+3. **FIX-08 (P1, Security): Rate Limiting Middleware**
    - **Current State**: No rate limiter on Axum routes.
    - **Required Action**: Attach `tower::limit::RateLimitLayer` (e.g. 60 req/min for health, 15 req/min for completions).
    - **Effort**: Easy (~30 mins) • **Impact**: Medium
@@ -89,7 +85,7 @@ These are actionable code improvements that directly increase reliability, secur
 
 These items require no complex code changes, take minimal time, and significantly boost the professional polish of the repository:
 
-6. **FIX-14 / FIX-02 (P1, Demo): `DEMO_SCRIPT.md`**
+4. **FIX-14 / FIX-02 (P1, Demo): `DEMO_SCRIPT.md`**
    - **Description**: A comprehensive presenter's battlecard containing:
      - Exact PowerShell commands to run on Laptop A (Coordinator) and Laptop B (Worker).
      - Expected console outputs.
@@ -97,11 +93,11 @@ These items require no complex code changes, take minimal time, and significantl
      - Instant fallback command (`.\start.ps1 all` for single-machine loopback) if network fails.
    - **Effort**: Easy (~20 mins) • **Impact**: High
 
-7. **FIX-17 (P2, Documentation): `API_REFERENCE.md`**
+5. **FIX-17 (P2, Documentation): `API_REFERENCE.md`**
    - **Description**: Standalone API documentation containing curl examples, request/response JSON schemas, SSE event formats, and error codes for `/v1/chat/completions`, `/v1/models`, `/health`, and `/api/cluster/status`.
    - **Effort**: Easy (~20 mins) • **Impact**: Medium
 
-8. **FIX-18 (P2, Documentation): `LIMITATIONS.md`**
+6. **FIX-18 (P2, Documentation): `LIMITATIONS.md`**
    - **Description**: Proactive disclosure of architectural boundaries (preempts reviewer critique):
      - 2-node maximum in current pipeline design.
      - Windows-only Win32 Job Object requirement.
@@ -109,17 +105,17 @@ These items require no complex code changes, take minimal time, and significantl
      - Ephemeral conversation history (no database persistence).
    - **Effort**: Very Easy (~15 mins) • **Impact**: Medium
 
-9. **FIX-25 & FIX-27 (P3, Legal/Community): `LICENSE` & `CONTRIBUTING.md`**
+7. **FIX-25 & FIX-27 (P3, Legal/Community): `LICENSE` & `CONTRIBUTING.md`**
    - **Description**: Add standard Apache-2.0 / MIT `LICENSE` file in root and concise `CONTRIBUTING.md` with build steps and code style guidelines.
    - **Effort**: Very Easy (~10 mins) • **Impact**: Medium
 
-10. **FIX-22 (P2, DevOps): CI/CD Pipeline (`.github/workflows/ci.yml`)**
-    - **Description**: Automated GitHub Actions workflow running `cargo test --workspace` and `cargo check --workspace --release` on every pull request and push.
-    - **Effort**: Easy (~15 mins) • **Impact**: Medium
+8. **FIX-22 (P2, DevOps): CI/CD Pipeline (`.github/workflows/ci.yml`)**
+   - **Description**: Automated GitHub Actions workflow running `cargo test --workspace` and `cargo check --workspace --release` on every pull request and push.
+   - **Effort**: Easy (~15 mins) • **Impact**: Medium
 
-11. **FIX-04 (P0, Documentation): UI Screenshots & Visual Proof**
-    - **Description**: Capture 3–5 clean screenshots of the claymorphic web UI (chat state, model loading, telemetry HUD modal, streaming response) and embed them into `README.md`.
-    - **Effort**: Easy (~20 mins) • **Impact**: High
+9. **FIX-04 (P0, Documentation): UI Screenshots & Visual Proof**
+   - **Description**: Capture 3–5 clean screenshots of the claymorphic web UI (chat state, model loading, telemetry HUD modal, streaming response) and embed them into `README.md`.
+   - **Effort**: Easy (~20 mins) • **Impact**: High
 
 ---
 
@@ -143,11 +139,11 @@ These items were evaluated during the ruthless review and determined to be **cor
 | Category | Total Issues | Resolved | Remaining Actionable | Accepted Constraints |
 |---|:---:|:---:|:---:|:---:|
 | **P0 (Critical / Blockers)** | 5 | 3 | 2 (Demo script, Screenshots) | 0 |
-| **P1 (High Priority)** | 10 | 2 | 8 (Validation, CORS, Rate limit, etc.) | 0 |
-| **P2 (Medium Priority)** | 9 | 1 | 4 (API doc, Limitations, Stop btn, CI) | 4 |
+| **P1 (High Priority)** | 10 | 4 | 6 (CORS, Rate limit, Demo script, etc.) | 0 |
+| **P2 (Medium Priority)** | 9 | 2 | 3 (API doc, Limitations, Stop btn, CI) | 4 |
 | **P3 (Low Priority)** | 6 | 0 | 2 (License, Contributing) | 4 |
 | **Engine Crash Fixes** | 2 | 2 | 0 | 0 |
-| **Total** | **32** | **10** | **14** | **8** |
+| **Total** | **32** | **13** | **11** | **8** |
 
 ---
 
@@ -156,8 +152,9 @@ These items were evaluated during the ruthless review and determined to be **cor
 To get the project submission-ready in the shortest time:
 
 1. **Step 1 (Code & Security)**:
-   - Implement `FIX-06` (Request validation on `/v1/chat/completions`) + `FIX-11` (CORS restriction) in `server.rs`.
+   - Implement `FIX-11` (CORS restriction) in `server.rs`.
    - Implement `FIX-19` ("Stop Generating" abort button) in `app.js`.
+   - Implement `FIX-08` (Rate limiting middleware) in `server.rs`.
 2. **Step 2 (Documentation Suite)**:
    - Generate `DEMO_SCRIPT.md` (`FIX-14` / `FIX-02`).
    - Generate `API_REFERENCE.md` (`FIX-17`) and `LIMITATIONS.md` (`FIX-18`).
