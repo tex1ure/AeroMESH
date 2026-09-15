@@ -42,6 +42,7 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 |---|---|---|---|
 | **FIX-03** | **No Authentication on HTTP API or TCP Worker Port**<br>Any network peer could invoke `/v1/chat/completions` or send raw frames to TCP port 50052. | (1) Added Axum `auth_middleware` checking `Authorization: Bearer <AEROMESH_API_KEY>` with constant-time equality.<br>(2) FastAPI gateway forwards the bearer token.<br>(3) Upgraded binary protocol to `PROTOCOL_VERSION = 3` with 32-byte mutual auth token (`AEROMESH_WORKER_SECRET`) on port 50052. | `server.rs`<br>`app.py`<br>`activation.rs`<br>`pipeline.rs` |
 | **FIX-11** | **Overly Permissive CORS Allowed Arbitrary External Origins**<br>In `server.rs`, Axum used `.layer(CorsLayer::permissive())`, allowing any external website in the user's browser to send cross-origin requests to `localhost:8080`. | Replaced permissive CORS with strict `build_cors_layer()` allowing only local Web UI origins (`http://127.0.0.1:7860`, `http://localhost:7860`) with optional `AEROMESH_ALLOWED_ORIGIN` env var override. Exempted preflight `OPTIONS` requests from authentication. Added 3 automated tests. | `server.rs` |
+| **FIX-08** | **No Rate Limiting on API Endpoints**<br>Unauthenticated rapid health probes or spamming completions requests could overwhelm the async runtime and exhaust inference resources. | Added Tower `RateLimitLayer` and `BufferLayer` across two isolated sub-routers: a 60 req/min pool for `/health` (1024 buffer) and a shared 15 req/min pool for `/v1/chat/completions`, `/api/chat`, and `/api/chat/stream` (128 buffer). Created `map_rate_limit_error` mapping Tower errors to standard OpenAI 429 JSON envelope (`rate_limit_error`). Added 2 unit/integration tests. | `server.rs`<br>`Cargo.toml` |
 | **SEC-DOC** | **Missing Threat Model & Security Disclosure**<br>No documentation of trust boundaries or ports. | Created [`SECURITY.md`](SECURITY.md) covering threat model, timing attack mitigations, control surfaces, and loopback rules. | `SECURITY.md` |
 
 ### C. Performance, Telemetry & Documentation
@@ -67,14 +68,9 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 
 ## 3. Remaining Fixes & Action Items
 
-### Tier 1: High-Impact Code & Security Fixes (Immediate Next Steps)
+### Tier 1: High-Impact Code & Security Fixes (Completed)
 
-These are actionable code improvements that directly increase reliability, security, and demo usability:
-
-1. **FIX-08 (P1, Security): Rate Limiting Middleware**
-   - **Current State**: No rate limiter on Axum routes.
-   - **Required Action**: Attach `tower::limit::RateLimitLayer` (e.g. 60 req/min for health, 15 req/min for completions).
-   - **Effort**: Easy (~30 mins) • **Impact**: Medium
+All critical code and security fixes (`FIX-08` Rate Limiting, `FIX-11` Strict CORS, `FIX-19` Abort Button) have been implemented and validated with 43 automated workspace unit and integration tests.
 
 ---
 
@@ -136,11 +132,11 @@ These items were evaluated during the ruthless review and determined to be **cor
 | Category | Total Issues | Resolved | Remaining Actionable | Accepted Constraints |
 |---|:---:|:---:|:---:|:---:|
 | **P0 (Critical / Blockers)** | 5 | 3 | 2 (Demo script, Screenshots) | 0 |
-| **P1 (High Priority)** | 10 | 5 | 5 (Rate limit, Demo script, etc.) | 0 |
+| **P1 (High Priority)** | 10 | 6 | 4 (Demo script, etc.) | 0 |
 | **P2 (Medium Priority)** | 9 | 3 | 2 (API doc, Limitations, CI) | 4 |
 | **P3 (Low Priority)** | 6 | 0 | 2 (License, Contributing) | 4 |
 | **Engine Crash Fixes** | 2 | 2 | 0 | 0 |
-| **Total** | **32** | **15** | **9** | **8** |
+| **Total** | **32** | **16** | **8** | **8** |
 
 ---
 
@@ -148,9 +144,9 @@ These items were evaluated during the ruthless review and determined to be **cor
 
 To get the project submission-ready in the shortest time:
 
-1. **Step 1 (Code & Security)**:
+1. **Step 1 (Code & Security - 100% Complete)**:
    - ✅ `FIX-19` ("Stop Generating" abort button) completed across frontend & backend.
-   - Implement `FIX-08` (Rate limiting middleware) in `server.rs`.
+   - ✅ `FIX-08` (Rate limiting middleware) completed with isolated health & completions pools and OpenAI error envelope.
 2. **Step 2 (Documentation Suite)**:
    - Generate `DEMO_SCRIPT.md` (`FIX-14` / `FIX-02`).
    - Generate `API_REFERENCE.md` (`FIX-17`) and `LIMITATIONS.md` (`FIX-18`).

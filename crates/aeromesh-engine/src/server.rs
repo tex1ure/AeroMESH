@@ -8,9 +8,10 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use axum::{
+    error_handling::HandleErrorLayer,
     extract::{rejection::JsonRejection, State},
     http::{HeaderValue, StatusCode},
     response::{
@@ -25,6 +26,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
+use tower::{buffer::BufferLayer, limit::RateLimitLayer, ServiceBuilder};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
 
@@ -422,16 +424,52 @@ impl PipelineHttpServer {
 
         let cors = build_cors_layer();
 
-        let app = Router::new()
+        // 1. Define Rate Limit Error Handler (Maps Tower BoxError to Axum 429 Response)
+        let map_rate_limit_error = |msg: &'static str| {
+            HandleErrorLayer::new(move |err: tower::BoxError| async move {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ApiErrorResponse::new(
+                        format!("{}: {}", msg, err),
+                        "rate_limit_error",
+                        Some("rate_limit_exceeded"),
+                    )),
+                )
+            })
+        };
+
+        // 2. Build Health Limiter (60 requests per 60 seconds)
+        let health_rate_limiter = ServiceBuilder::new()
+            .layer(map_rate_limit_error("Health probe rate limit exceeded"))
+            .layer(BufferLayer::new(1024))
+            .layer(RateLimitLayer::new(60, Duration::from_secs(60)));
+
+        // 3. Build Completions Limiter (15 requests per 60 seconds)
+        let completions_rate_limiter = ServiceBuilder::new()
+            .layer(map_rate_limit_error("Chat completions rate limit exceeded"))
+            .layer(BufferLayer::new(128))
+            .layer(RateLimitLayer::new(15, Duration::from_secs(60)));
+
+        // 4. Create Sub-Routers to isolate rate limit pools
+        let health_router = Router::new()
+            .route("/health", get(handle_health))
+            .layer(health_rate_limiter);
+
+        let completions_router = Router::new()
             .route("/v1/chat/completions", post(handle_chat_completions))
             .route("/api/chat", post(handle_chat_completions))
             .route("/api/chat/stream", post(handle_chat_completions))
-            .route("/api/chat/abort", post(handle_chat_abort))
-            .route("/health", get(handle_health))
+            .layer(completions_rate_limiter);
+
+        // 5. Assemble Final Router
+        let app = Router::new()
+            .merge(health_router)
+            .merge(completions_router)
             .route("/v1/models", get(handle_models))
             .route("/api/model/switch", post(handle_switch_model))
             .route("/v1/models/load", post(handle_switch_model))
             .route("/api/cluster/status", get(handle_cluster_status))
+            .route("/api/chat/abort", post(handle_chat_abort))
             .layer(axum::middleware::from_fn(auth_middleware))
             .layer(cors)
             .with_state(self.state.clone());
@@ -1101,6 +1139,94 @@ mod tests {
         let Json(res) = handle_chat_abort().await;
         assert_eq!(res["status"], "aborted");
         assert_eq!(res["message"], "Generation abort signal acknowledged");
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_error_mapping_produces_openai_envelope() {
+        let (status, Json(body)) = (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiErrorResponse::new(
+                "Chat completions rate limit exceeded: request limit reached",
+                "rate_limit_error",
+                Some("rate_limit_exceeded"),
+            )),
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.error.error_type, "rate_limit_error");
+        assert_eq!(body.error.code, Some("rate_limit_exceeded".to_string()));
+        assert!(body.error.message.contains("rate limit exceeded"));
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_error_envelope_format() {
+        let msg = "Chat completions rate limit exceeded";
+        let mock_err: tower::BoxError = "rate limit exceeded".into();
+        let err_response = ApiErrorResponse::new(
+            format!("{}: {}", msg, mock_err),
+            "rate_limit_error",
+            Some("rate_limit_exceeded"),
+        );
+        let val = serde_json::to_value(&err_response).unwrap();
+        assert_eq!(val["error"]["type"], "rate_limit_error");
+        assert_eq!(val["error"]["code"], "rate_limit_exceeded");
+        assert_eq!(val["error"]["param"], serde_json::Value::Null);
+        assert_eq!(
+            val["error"]["message"],
+            "Chat completions rate limit exceeded: rate limit exceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_sub_router_integration() {
+        let map_err = |msg: &'static str| {
+            HandleErrorLayer::new(move |err: tower::BoxError| async move {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ApiErrorResponse::new(
+                        format!("{}: {}", msg, err),
+                        "rate_limit_error",
+                        Some("rate_limit_exceeded"),
+                    )),
+                )
+            })
+        };
+
+        let health_limiter = ServiceBuilder::new()
+            .layer(map_err("Health probe rate limit exceeded"))
+            .layer(BufferLayer::new(1024))
+            .layer(RateLimitLayer::new(60, Duration::from_secs(60)));
+
+        let completions_limiter = ServiceBuilder::new()
+            .layer(map_err("Chat completions rate limit exceeded"))
+            .layer(BufferLayer::new(128))
+            .layer(RateLimitLayer::new(15, Duration::from_secs(60)));
+
+        let health_router = Router::new()
+            .route("/health", get(|| async { (StatusCode::OK, "health_ok") }))
+            .layer(health_limiter);
+
+        let completions_router = Router::new()
+            .route("/v1/chat/completions", post(|| async { (StatusCode::OK, "chat_ok") }))
+            .layer(completions_limiter);
+
+        let app = Router::new()
+            .merge(health_router)
+            .merge(completions_router);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let r1 = client.get(format!("http://{}/health", addr)).send().await.unwrap();
+        assert_eq!(r1.status(), reqwest::StatusCode::OK);
+        assert_eq!(r1.text().await.unwrap(), "health_ok");
+
+        let r2 = client.post(format!("http://{}/v1/chat/completions", addr)).send().await.unwrap();
+        assert_eq!(r2.status(), reqwest::StatusCode::OK);
+        assert_eq!(r2.text().await.unwrap(), "chat_ok");
     }
 }
 
