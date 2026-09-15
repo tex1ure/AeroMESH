@@ -1078,50 +1078,44 @@ mod tests {
 
     #[tokio::test]
     async fn test_cors_preflight_allowed_origin_returns_header() {
+        use tower::ServiceExt;
+
         let app = Router::new()
             .route("/v1/models", get(|| async { "ok" }))
             .layer(build_cors_layer());
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let client = reqwest::Client::new();
-        let resp = client
-            .request(reqwest::Method::OPTIONS, format!("http://{}/v1/models", addr))
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::OPTIONS)
+            .uri("/v1/models")
             .header("Origin", "http://127.0.0.1:7860")
             .header("Access-Control-Request-Method", "GET")
-            .send()
-            .await
+            .body(axum::body::Body::empty())
             .unwrap();
 
-        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
         let origin_header = resp.headers().get("access-control-allow-origin");
         assert_eq!(origin_header.unwrap(), "http://127.0.0.1:7860");
     }
 
     #[tokio::test]
     async fn test_cors_preflight_unauthorized_origin_omits_header() {
+        use tower::ServiceExt;
+
         let app = Router::new()
             .route("/v1/models", get(|| async { "ok" }))
             .layer(build_cors_layer());
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let client = reqwest::Client::new();
-        let resp = client
-            .request(reqwest::Method::OPTIONS, format!("http://{}/v1/models", addr))
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::OPTIONS)
+            .uri("/v1/models")
             .header("Origin", "http://evil.com")
             .header("Access-Control-Request-Method", "GET")
-            .send()
-            .await
+            .body(axum::body::Body::empty())
             .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
 
         let origin_header = resp.headers().get("access-control-allow-origin");
         assert!(origin_header.is_none());
@@ -1213,20 +1207,29 @@ mod tests {
             .merge(health_router)
             .merge(completions_router);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
+        use tower::ServiceExt;
 
-        let client = reqwest::Client::new();
-        let r1 = client.get(format!("http://{}/health", addr)).send().await.unwrap();
-        assert_eq!(r1.status(), reqwest::StatusCode::OK);
-        assert_eq!(r1.text().await.unwrap(), "health_ok");
+        let req1 = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/health")
+            .body(axum::body::Body::empty())
+            .unwrap();
 
-        let r2 = client.post(format!("http://{}/v1/chat/completions", addr)).send().await.unwrap();
-        assert_eq!(r2.status(), reqwest::StatusCode::OK);
-        assert_eq!(r2.text().await.unwrap(), "chat_ok");
+        let r1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+        let body_bytes1 = axum::body::to_bytes(r1.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body_bytes1[..], b"health_ok");
+
+        let req2 = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/v1/chat/completions")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let r2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        let body_bytes2 = axum::body::to_bytes(r2.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body_bytes2[..], b"chat_ok");
     }
 }
 
