@@ -11,13 +11,13 @@
 | Category | Total Items | Completed | Remaining To Do | Accepted by Design |
 |---|:---:|:---:|:---:|:---:|
 | **Critical Engine & Crash Fixes (P0)** | 5 | **5** (100%) | 0 | 0 |
-| **Security & Authentication (P0 / P1)** | 4 | **2** (50%) | 2 | 0 |
+| **Security & Authentication (P0 / P1)** | 4 | **4** (100%) | 0 | 0 |
 | **Input Validation & Safety (P1 / P2)** | 3 | **3** (100%) | 0 | 0 |
-| **Frontend & Usability (P2)** | 2 | **1** (50%) | 1 | 0 |
-| **Documentation & Presentation (P1 / P2)** | 6 | **3** (50%) | 3 | 0 |
+| **Frontend & Usability (P2)** | 2 | **2** (100%) | 0 | 0 |
+| **Documentation & Presentation (P1 / P2)** | 6 | **4** (67%) | 2 | 0 |
 | **Legal & Open Source Polish (P3)** | 3 | 0 | 3 | 0 |
 | **Intentional Design Decisions (No Action)** | 8 | 0 | 0 | **8** |
-| **Total** | **31** | **14** | **9** | **8** |
+| **Total** | **31** | **18** | **5** | **8** |
 
 ---
 
@@ -109,18 +109,18 @@ These are the remaining actionable tasks, ranked by order of priority and ease o
 
 ### High Priority — Code & Security (Do First)
 
-#### [ ] 1. Restrict CORS from `*` to Localhost (`FIX-11`)
+#### [x] 1. Restrict CORS from `*` to Localhost (`FIX-11`)
 - **What is needed**: In `crates/aeromesh-engine/src/server.rs`, replace `.layer(CorsLayer::permissive())` with an explicit origin whitelist:
   - Allow `http://127.0.0.1:7860` and `http://localhost:7860` (the FastAPI frontend).
 - **Why it matters**: Permissive CORS allows any website you visit in your web browser to quietly send requests to your local LLM engine.
 - **Effort**: ~10 minutes | **Difficulty**: Very Easy
 
-#### [ ] 2. "Stop Generating" Abort Button (`FIX-19`)
+#### [x] 2. "Stop Generating" Abort Button (`FIX-19`)
 - **What is needed**: In `static/js/app.js`, attach a JavaScript `AbortController` to the Server-Sent Events (SSE) fetch stream. When the user clicks the "Stop" button in the UI, call `controller.abort()` to halt token streaming immediately.
 - **Why it matters**: Essential user experience feature; lets the user cancel long generations without having to refresh the browser.
 - **Effort**: ~15 minutes | **Difficulty**: Easy
 
-#### [ ] 3. Rate Limiting Middleware (`FIX-08`)
+#### [x] 3. Rate Limiting Middleware (`FIX-08`)
 - **What is needed**: In `crates/aeromesh-engine/src/server.rs`, attach `tower::limit::RateLimitLayer` to routes (e.g., 60 req/min for `/health`, 15 req/min for `/v1/chat/completions`).
 - **Why it matters**: Protects the engine from accidental request floods or loops.
 - **Effort**: ~25 minutes | **Difficulty**: Easy
@@ -129,7 +129,7 @@ These are the remaining actionable tasks, ranked by order of priority and ease o
 
 ### Medium Priority — Documentation & Demo Assets (Quick Wins)
 
-#### [ ] 6. Presenter Demo Battlecard (`DEMO_SCRIPT.md` / `FIX-14`)
+#### [x] 6. Presenter Demo Battlecard (`DEMO_SCRIPT.md` / `FIX-14`)
 - **What is needed**: Create a simple, step-by-step markdown cheat sheet for running a flawless live demonstration:
   - Exact PowerShell commands to run on Laptop A (Coordinator) and Laptop B (Worker).
   - Expected console outputs so the presenter knows it succeeded.

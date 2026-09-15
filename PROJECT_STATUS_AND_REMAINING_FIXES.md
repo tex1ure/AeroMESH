@@ -50,6 +50,7 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 |---|---|---|---|
 | **FIX-01** | **No Empirical Benchmark Data**<br>Performance claims (tok/s, payload size) were unmeasured. | Created [`BENCHMARKS.md`](BENCHMARKS.md) with empirical hardware tables, TTFT, tokens/sec, and payload compression (5.04 KB/tok vs 20.48 KB/tok, 75% reduction). | `BENCHMARKS.md` |
 | **FIX-15** | **Inadequate Technical Documentation**<br>Project lacked deep architecture and protocol documentation. | Rewrote root [`README.md`](README.md) (32 KB) with detailed pipeline diagrams, memory topologies, CLI reference, and tensor slicing specs. | `README.md` |
+| **FIX-14 / FIX-02** | **Missing Live Demo Battlecard & Presenter Playbook**<br>No step-by-step procedure existed for orchestrating a zero-failure live presentation across two laptops or recovering from venue Wi-Fi drops. | Created [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md) with pre-flight checklist, exact PowerShell launch commands for Laptop A and B, expected console logs, screen-by-screen architectural talking points, and an instant single-machine emergency fallback command (`.\start.ps1 all`) using shared memory IPC. | `DEMO_SCRIPT.md` |
 | **TELEMETRY** | **UI Showed "Coordinator Offline" During Generation**<br>Polling `/api/cluster/status` contended on the generation lock. | Added thread-safe `cluster_meta: RwLock<ClusterMeta>` to `AppState`, live inferring indicators (`⚡ Inferring (P2P)`), generating pulse CSS animations, and dynamic token counters. | `server.rs`<br>`app.js`<br>`claymorphic.css` |
 
 ### D. Input Validation & Bounds Safety
@@ -78,15 +79,7 @@ All critical code and security fixes (`FIX-08` Rate Limiting, `FIX-11` Strict CO
 
 These items require no complex code changes, take minimal time, and significantly boost the professional polish of the repository:
 
-3. **FIX-14 / FIX-02 (P1, Demo): `DEMO_SCRIPT.md`**
-   - **Description**: A comprehensive presenter's battlecard containing:
-     - Exact PowerShell commands to run on Laptop A (Coordinator) and Laptop B (Worker).
-     - Expected console outputs.
-     - 3 key talking points per screen (zero-weight transfer, 75% compression, P2P Tailscale mesh).
-     - Instant fallback command (`.\start.ps1 all` for single-machine loopback) if network fails.
-   - **Effort**: Easy (~20 mins) • **Impact**: High
-
-4. **FIX-17 (P2, Documentation): `API_REFERENCE.md`**
+1. **FIX-17 (P2, Documentation): `API_REFERENCE.md`**
    - **Description**: Standalone API documentation containing curl examples, request/response JSON schemas, SSE event formats, and error codes for `/v1/chat/completions`, `/v1/models`, `/health`, and `/api/cluster/status`.
    - **Effort**: Easy (~20 mins) • **Impact**: Medium
 
@@ -131,12 +124,12 @@ These items were evaluated during the ruthless review and determined to be **cor
 
 | Category | Total Issues | Resolved | Remaining Actionable | Accepted Constraints |
 |---|:---:|:---:|:---:|:---:|
-| **P0 (Critical / Blockers)** | 5 | 3 | 2 (Demo script, Screenshots) | 0 |
-| **P1 (High Priority)** | 10 | 6 | 4 (Demo script, etc.) | 0 |
-| **P2 (Medium Priority)** | 9 | 3 | 2 (API doc, Limitations, CI) | 4 |
+| **P0 (Critical / Blockers)** | 5 | 4 | 1 (Screenshots) | 0 |
+| **P1 (High Priority)** | 10 | 7 | 3 (API doc, Limitations, etc.) | 0 |
+| **P2 (Medium Priority)** | 9 | 3 | 2 (API doc, CI) | 4 |
 | **P3 (Low Priority)** | 6 | 0 | 2 (License, Contributing) | 4 |
 | **Engine Crash Fixes** | 2 | 2 | 0 | 0 |
-| **Total** | **32** | **16** | **8** | **8** |
+| **Total** | **32** | **18** | **6** | **8** |
 
 ---
 
@@ -148,7 +141,7 @@ To get the project submission-ready in the shortest time:
    - ✅ `FIX-19` ("Stop Generating" abort button) completed across frontend & backend.
    - ✅ `FIX-08` (Rate limiting middleware) completed with isolated health & completions pools and OpenAI error envelope.
 2. **Step 2 (Documentation Suite)**:
-   - Generate `DEMO_SCRIPT.md` (`FIX-14` / `FIX-02`).
+   - ✅ `DEMO_SCRIPT.md` (`FIX-14` / `FIX-02`) completed presenter battlecard and failover guide.
    - Generate `API_REFERENCE.md` (`FIX-17`) and `LIMITATIONS.md` (`FIX-18`).
    - Add `LICENSE` (`FIX-25`) and `CONTRIBUTING.md` (`FIX-27`).
 3. **Step 3 (DevOps & CI)**:
