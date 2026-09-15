@@ -42,6 +42,7 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 |---|---|---|---|
 | **FIX-03** | **No Authentication on HTTP API or TCP Worker Port**<br>Any network peer could invoke `/v1/chat/completions` or send raw frames to TCP port 50052. | (1) Added Axum `auth_middleware` checking `Authorization: Bearer <AEROMESH_API_KEY>` with constant-time equality.<br>(2) FastAPI gateway forwards the bearer token.<br>(3) Upgraded binary protocol to `PROTOCOL_VERSION = 3` with 32-byte mutual auth token (`AEROMESH_WORKER_SECRET`) on port 50052. | `server.rs`<br>`app.py`<br>`activation.rs`<br>`pipeline.rs` |
 | **FIX-11** | **Overly Permissive CORS Allowed Arbitrary External Origins**<br>In `server.rs`, Axum used `.layer(CorsLayer::permissive())`, allowing any external website in the user's browser to send cross-origin requests to `localhost:8080`. | Replaced permissive CORS with strict `build_cors_layer()` allowing only local Web UI origins (`http://127.0.0.1:7860`, `http://localhost:7860`) with optional `AEROMESH_ALLOWED_ORIGIN` env var override. Exempted preflight `OPTIONS` requests from authentication. Added 3 automated tests. | `server.rs` |
+| **FIX-08** | **No Rate Limiting on API Endpoints**<br>Unauthenticated rapid health probes or spamming completions requests could overwhelm the async runtime and exhaust inference resources. | Added Tower `RateLimitLayer` and `BufferLayer` across two isolated sub-routers: a 60 req/min pool for `/health` (1024 buffer) and a shared 15 req/min pool for `/v1/chat/completions`, `/api/chat`, and `/api/chat/stream` (128 buffer). Created `map_rate_limit_error` mapping Tower errors to standard OpenAI 429 JSON envelope (`rate_limit_error`). Added 2 unit/integration tests. | `server.rs`<br>`Cargo.toml` |
 | **SEC-DOC** | **Missing Threat Model & Security Disclosure**<br>No documentation of trust boundaries or ports. | Created [`SECURITY.md`](SECURITY.md) covering threat model, timing attack mitigations, control surfaces, and loopback rules. | `SECURITY.md` |
 
 ### C. Performance, Telemetry & Documentation
@@ -49,6 +50,7 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 |---|---|---|---|
 | **FIX-01** | **No Empirical Benchmark Data**<br>Performance claims (tok/s, payload size) were unmeasured. | Created [`BENCHMARKS.md`](BENCHMARKS.md) with empirical hardware tables, TTFT, tokens/sec, and payload compression (5.04 KB/tok vs 20.48 KB/tok, 75% reduction). | `BENCHMARKS.md` |
 | **FIX-15** | **Inadequate Technical Documentation**<br>Project lacked deep architecture and protocol documentation. | Rewrote root [`README.md`](README.md) (32 KB) with detailed pipeline diagrams, memory topologies, CLI reference, and tensor slicing specs. | `README.md` |
+| **FIX-14 / FIX-02** | **Missing Live Demo Battlecard & Presenter Playbook**<br>No step-by-step procedure existed for orchestrating a zero-failure live presentation across two laptops or recovering from venue Wi-Fi drops. | Created [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md) with pre-flight checklist, exact PowerShell launch commands for Laptop A and B, expected console logs, screen-by-screen architectural talking points, and an instant single-machine emergency fallback command (`.\start.ps1 all`) using shared memory IPC. | `DEMO_SCRIPT.md` |
 | **TELEMETRY** | **UI Showed "Coordinator Offline" During Generation**<br>Polling `/api/cluster/status` contended on the generation lock. | Added thread-safe `cluster_meta: RwLock<ClusterMeta>` to `AppState`, live inferring indicators (`⚡ Inferring (P2P)`), generating pulse CSS animations, and dynamic token counters. | `server.rs`<br>`app.js`<br>`claymorphic.css` |
 
 ### D. Input Validation & Bounds Safety
@@ -58,23 +60,18 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 | **FIX-07** | **Non-Standard Error Envelopes on Validation Failure**<br>Validation rejections returned Axum plain text or non-standard JSON, causing third-party OpenAI client SDKs to crash with deserialization errors. | Enhanced `ApiErrorResponse` with structured constructors (`unprocessable`, `bad_request_with_param`, `service_unavailable`, `not_found`) conforming to OpenAI schema (`{"error": {"message": "...", "type": "invalid_request_error", "param": "...", "code": 422}}`). Added `JsonRejection` interception for HTTP 400 on malformed JSON syntax. | `server.rs` |
 | **FIX-24** | **No Context Window / VRAM Boundary Enforcement**<br>Prompts exceeding `n_ctx = 4096` or requests where `prompt_tokens + max_tokens > n_ctx` were not checked upfront, causing out-of-bounds KV-cache allocation or silent segmentation faults in native CUDA kernels. | Added pre-flight token count validation (`prompt_tokens.len() + max_tokens <= n_ctx`). Rejects overflowing requests upfront with typed HTTP 422 error: `"Total tokens (X prompt + Y max_tokens = Z) exceed model context window of 4096"`. Added context validation guards across `LlamaPipelineInstance` and `PipelineCoordinatorClient`. | `server.rs`<br>`pipeline.rs` |
 
+### E. Frontend UX & Stream Lifecycle (FIX-19)
+| Issue ID | What Was Broken | How It Was Fixed | Affected Files |
+|---|---|---|---|
+| **FIX-19** | **No "Stop Generating" Abort Capability**<br>Streaming responses could not be cancelled by the user mid-generation, causing unwanted token generation, wasted GPU cycles, and UI lockup until max_tokens elapsed. | Made `send-btn` context-aware (dual-purpose Send/Stop toggle), wired up `AbortController` to the fetch SSE stream, handled `AbortError` gracefully in console (`Generation aborted by user.`), added `Escape` key abort trigger, and integrated `/api/chat/abort` backup endpoints across Axum and FastAPI with native token loop cancellation. | `static/js/app.js`<br>`app.py`<br>`server.rs`<br>`claymorphic.css` |
+
 ---
 
 ## 3. Remaining Fixes & Action Items
 
-### Tier 1: High-Impact Code & Security Fixes (Immediate Next Steps)
+### Tier 1: High-Impact Code & Security Fixes (Completed)
 
-These are actionable code improvements that directly increase reliability, security, and demo usability:
-
-1. **FIX-19 (P2, Frontend): "Stop Generating" Abort Button**
-   - **Current State**: Once a response starts streaming, the user cannot cancel it without refreshing the page.
-   - **Required Action**: Attach an `AbortController` to the fetch/SSE stream in `static/js/app.js` and wire up the UI Stop button to trigger `abort()`.
-   - **Effort**: Easy (~20 mins) • **Impact**: Medium
-
-2. **FIX-08 (P1, Security): Rate Limiting Middleware**
-   - **Current State**: No rate limiter on Axum routes.
-   - **Required Action**: Attach `tower::limit::RateLimitLayer` (e.g. 60 req/min for health, 15 req/min for completions).
-   - **Effort**: Easy (~30 mins) • **Impact**: Medium
+All critical code and security fixes (`FIX-08` Rate Limiting, `FIX-11` Strict CORS, `FIX-19` Abort Button) have been implemented and validated with 43 automated workspace unit and integration tests.
 
 ---
 
@@ -82,15 +79,7 @@ These are actionable code improvements that directly increase reliability, secur
 
 These items require no complex code changes, take minimal time, and significantly boost the professional polish of the repository:
 
-3. **FIX-14 / FIX-02 (P1, Demo): `DEMO_SCRIPT.md`**
-   - **Description**: A comprehensive presenter's battlecard containing:
-     - Exact PowerShell commands to run on Laptop A (Coordinator) and Laptop B (Worker).
-     - Expected console outputs.
-     - 3 key talking points per screen (zero-weight transfer, 75% compression, P2P Tailscale mesh).
-     - Instant fallback command (`.\start.ps1 all` for single-machine loopback) if network fails.
-   - **Effort**: Easy (~20 mins) • **Impact**: High
-
-4. **FIX-17 (P2, Documentation): `API_REFERENCE.md`**
+1. **FIX-17 (P2, Documentation): `API_REFERENCE.md`**
    - **Description**: Standalone API documentation containing curl examples, request/response JSON schemas, SSE event formats, and error codes for `/v1/chat/completions`, `/v1/models`, `/health`, and `/api/cluster/status`.
    - **Effort**: Easy (~20 mins) • **Impact**: Medium
 
@@ -135,12 +124,12 @@ These items were evaluated during the ruthless review and determined to be **cor
 
 | Category | Total Issues | Resolved | Remaining Actionable | Accepted Constraints |
 |---|:---:|:---:|:---:|:---:|
-| **P0 (Critical / Blockers)** | 5 | 3 | 2 (Demo script, Screenshots) | 0 |
-| **P1 (High Priority)** | 10 | 5 | 5 (Rate limit, Demo script, etc.) | 0 |
-| **P2 (Medium Priority)** | 9 | 2 | 3 (API doc, Limitations, Stop btn, CI) | 4 |
+| **P0 (Critical / Blockers)** | 5 | 4 | 1 (Screenshots) | 0 |
+| **P1 (High Priority)** | 10 | 7 | 3 (API doc, Limitations, etc.) | 0 |
+| **P2 (Medium Priority)** | 9 | 3 | 2 (API doc, CI) | 4 |
 | **P3 (Low Priority)** | 6 | 0 | 2 (License, Contributing) | 4 |
 | **Engine Crash Fixes** | 2 | 2 | 0 | 0 |
-| **Total** | **32** | **14** | **10** | **8** |
+| **Total** | **32** | **18** | **6** | **8** |
 
 ---
 
@@ -148,11 +137,11 @@ These items were evaluated during the ruthless review and determined to be **cor
 
 To get the project submission-ready in the shortest time:
 
-1. **Step 1 (Code & Security)**:
-   - Implement `FIX-19` ("Stop Generating" abort button) in `app.js`.
-   - Implement `FIX-08` (Rate limiting middleware) in `server.rs`.
+1. **Step 1 (Code & Security - 100% Complete)**:
+   - ✅ `FIX-19` ("Stop Generating" abort button) completed across frontend & backend.
+   - ✅ `FIX-08` (Rate limiting middleware) completed with isolated health & completions pools and OpenAI error envelope.
 2. **Step 2 (Documentation Suite)**:
-   - Generate `DEMO_SCRIPT.md` (`FIX-14` / `FIX-02`).
+   - ✅ `DEMO_SCRIPT.md` (`FIX-14` / `FIX-02`) completed presenter battlecard and failover guide.
    - Generate `API_REFERENCE.md` (`FIX-17`) and `LIMITATIONS.md` (`FIX-18`).
    - Add `LICENSE` (`FIX-25`) and `CONTRIBUTING.md` (`FIX-27`).
 3. **Step 3 (DevOps & CI)**:
