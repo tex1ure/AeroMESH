@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust-ci:
+    name: Rust workspace tests and release check
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: aeromesh-ci
+
+      - name: Show Rust toolchain versions
+        shell: pwsh
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Run workspace tests
+        shell: pwsh
+        run: |
+          cargo test --workspace
+
+      - name: Run release-mode workspace check
+        shell: pwsh
+        run: |
+          cargo check --workspace --release
+
+  gateway-ci:
+    name: FastAPI gateway tests
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn httpx pytest
+
+      - name: Run FastAPI gateway tests
+        shell: pwsh
+        run: |
+          pytest tests/test_fastapi_gateway.py -v

@@ -2,7 +2,7 @@
 
 **Last Updated**: September 15, 2026  
 **Current Git Branch**: `main` (`commit 6dfc3b7`)  
-**Workspace Test Suite**: **39 / 39 Unit Tests Passing** (`cargo test --workspace`)  
+**Workspace Test Suite**: **43 / 43 Unit Tests Passing** (`cargo test --workspace`)  
 **Release Build Status**: **Clean / Zero Errors** (`cargo check --workspace --release`)
 
 ---
@@ -53,6 +53,9 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 | **FIX-14 / FIX-02** | **Missing Live Demo Battlecard & Presenter Playbook**<br>No step-by-step procedure existed for orchestrating a zero-failure live presentation across two laptops or recovering from venue Wi-Fi drops. | Created [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md) with pre-flight checklist, exact PowerShell launch commands for Laptop A and B, expected console logs, screen-by-screen architectural talking points, and an instant single-machine emergency fallback command (`.\start.ps1 all`) using shared memory IPC. | `DEMO_SCRIPT.md` |
 | **FIX-17** | **Standalone API Reference Documentation**<br>Missing comprehensive schemas, parameter constraints, and SSE wire formats. | Created [`API_REFERENCE.md`](API_REFERENCE.md) covering request/response schemas, validation rules, cURL examples, rate limits, and OpenAI-compatible error envelopes. | `API_REFERENCE.md` |
 | **FIX-18** | **Architectural Limitations & Boundaries (`LIMITATIONS.md`)**<br>Missing proactive documentation of operational boundaries and hardware requirements. | Published [`LIMITATIONS.md`](LIMITATIONS.md) documenting the 2-node topology limit, Win32 Job Object lifecycle controls, zero-weight storage prerequisites, and stateless session constraints. | `LIMITATIONS.md`<br>`README.md` |
+| **FIX-25 & FIX-27** | **Missing License & Contributing Guide**<br>Repository lacked explicit legal licensing declarations and community contribution guidelines. | Added dual MIT OR Apache-2.0 [`LICENSE`](LICENSE), [`LICENSE-MIT`](LICENSE-MIT), [`LICENSE-APACHE`](LICENSE-APACHE), and comprehensive [`CONTRIBUTING.md`](CONTRIBUTING.md) with environment setup, build, test, and code style standards. | `LICENSE`<br>`LICENSE-MIT`<br>`LICENSE-APACHE`<br>`CONTRIBUTING.md`<br>`README.md` |
+| **FIX-22** | **Automated CI/CD Pipeline (`.github/workflows/ci.yml`)**<br>Repository lacked automated continuous integration to validate test suite and release builds on pushes and PRs. | Added GitHub Actions workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) configured for `windows-latest` running `cargo test --workspace` and `cargo check --workspace --release` with Cargo artifact caching (`Swatinem/rust-cache@v2`). | `.github/workflows/ci.yml`<br>`README.md` |
+| **FIX-04** | **No UI Screenshots or Visual Proof**<br>The README lacked visual evidence of the working claymorphic web dashboard, model controls, or live inference streaming. | Captured 4 high-resolution (1920x1080) PNG screenshots (`01-chat-workspace.png`, `02-model-loading.png`, `03-streaming-response.png`, `04-cluster-hud.png`) in `docs/screenshots/` and embedded them in `README.md` as an HTML gallery table. | `docs/screenshots/*`<br>`README.md` |
 | **TELEMETRY** | **UI Showed "Coordinator Offline" During Generation**<br>Polling `/api/cluster/status` contended on the generation lock. | Added thread-safe `cluster_meta: RwLock<ClusterMeta>` to `AppState`, live inferring indicators (`⚡ Inferring (P2P)`), generating pulse CSS animations, and dynamic token counters. | `server.rs`<br>`app.js`<br>`claymorphic.css` |
 
 ### D. Input Validation & Bounds Safety
@@ -77,21 +80,11 @@ All critical code and security fixes (`FIX-08` Rate Limiting, `FIX-11` Strict CO
 
 ---
 
-### Tier 2: Essential Documentation & Presentation Assets (Quick Wins)
+### Tier 2: Essential Documentation & Presentation Assets (Completed)
 
-These items require no complex code changes, take minimal time, and significantly boost the professional polish of the repository:
+All documentation, demo battlecards, API specifications, licensing files, and UI visual proof assets have been fully completed and integrated into `main`:
 
-1. **FIX-25 & FIX-27 (P3, Legal/Community): `LICENSE` & `CONTRIBUTING.md`**
-   - **Description**: Add standard Apache-2.0 / MIT `LICENSE` file in root and concise `CONTRIBUTING.md` with build steps and code style guidelines.
-   - **Effort**: Very Easy (~10 mins) • **Impact**: Medium
-
-2. **FIX-22 (P2, DevOps): CI/CD Pipeline (`.github/workflows/ci.yml`)**
-   - **Description**: Automated GitHub Actions workflow running `cargo test --workspace` and `cargo check --workspace --release` on every pull request and push.
-   - **Effort**: Easy (~15 mins) • **Impact**: Medium
-
-3. **FIX-04 (P0, Documentation): UI Screenshots & Visual Proof**
-   - **Description**: Capture 3–5 clean screenshots of the claymorphic web UI (chat state, model loading, telemetry HUD modal, streaming response) and embed them into `README.md`.
-   - **Effort**: Easy (~20 mins) • **Impact**: High
+- ✅ **FIX-04 (P0, Documentation): UI Screenshots & Visual Proof**: Captured 4 clean, high-resolution (1920x1080) PNG screenshots (`01-chat-workspace.png`, `02-model-loading.png`, `03-streaming-response.png`, `04-cluster-hud.png`) in `docs/screenshots/` and embedded them directly into `README.md` in a responsive two-column preview gallery.
 
 ---
 
@@ -99,7 +92,7 @@ These items require no complex code changes, take minimal time, and significantl
 
 These items were evaluated during the ruthless review and determined to be **correct architectural decisions for the scope of this project** (do not rewrite):
 
-- **FIX-16 (FastAPI Proxy Gateway)**: Adds a localhost hop between the browser and Axum, but serves static assets, provides loopback proxying, and enables rapid Python prototyping. Documented as intended architecture.
+- **FIX-16 (FastAPI Proxy Gateway)**: Fully documented and hardened intended architecture ([`docs/architecture/fastapi-proxy-gateway.md`](docs/architecture/fastapi-proxy-gateway.md)). Standardized environment configuration (`AEROMESH_UI_HOST`, `AEROMESH_UI_PORT`, `AEROMESH_BACKEND_URL`), persistent `httpx.AsyncClient` lifespan, `/health` (liveness) and `/ready` (end-to-end readiness) probes, hop-by-hop header stripping, unbuffered SSE token streaming, and dynamic GGUF offline fallback. Validated with 9 automated integration tests in [`tests/test_fastapi_gateway.py`](tests/test_fastapi_gateway.py).
 - **FIX-20 (Conversation Persistence)**: Local LLM engines (like llama.cpp server and Ollama) operate statelessly in memory. Disk persistence is not needed for the core distributed inference engine.
 - **FIX-21 (`pipeline.rs` Refactoring)**: Contains both coordinator client and worker service (~900 lines). Fully tested and stable; refactoring into multiple files is deferred to post-demo maintenance.
 - **FIX-23 (HTTP TLS Termination)**: Inter-node traffic is encrypted at Layer 3 via Tailscale WireGuard. Localhost traffic (7860/8080) does not require TLS certificates.
@@ -114,26 +107,27 @@ These items were evaluated during the ruthless review and determined to be **cor
 
 | Category | Total Issues | Resolved | Remaining Actionable | Accepted Constraints |
 |---|:---:|:---:|:---:|:---:|
-| **P0 (Critical / Blockers)** | 5 | 4 | 1 (Screenshots) | 0 |
-| **P1 (High Priority)** | 10 | 10 | 0 | 0 |
-| **P2 (Medium Priority)** | 9 | 4 | 1 (CI) | 4 |
-| **P3 (Low Priority)** | 6 | 0 | 2 (License, Contributing) | 4 |
-| **Engine Crash Fixes** | 2 | 2 | 0 | 0 |
-| **Total** | **32** | **20** | **4** | **8** |
+| **P0 (Critical / Blockers)** | 5 | **5** | **0** | 0 |
+| **P1 (High Priority)** | 10 | **10** | **0** | 0 |
+| **P2 (Medium Priority)** | 9 | **5** | **0** | 4 |
+| **P3 (Low Priority)** | 6 | **2** | **0** | 4 |
+| **Engine Crash Fixes** | 2 | **2** | **0** | 0 |
+| **Total** | **32** | **24** | **0** (100% Resolved) | **8** |
 
 ---
 
 ## 5. Recommended Execution Roadmap
 
-To get the project submission-ready in the shortest time:
+All actionable fixes across the repository are now **100% Complete**:
 
 1. **Step 1 (Code & Security - 100% Complete)**:
    - ✅ `FIX-19` ("Stop Generating" abort button) completed across frontend & backend.
    - ✅ `FIX-08` (Rate limiting middleware) completed with isolated health & completions pools and OpenAI error envelope.
-2. **Step 2 (Documentation Suite)**:
+2. **Step 2 (Documentation Suite - 100% Complete)**:
    - ✅ `DEMO_SCRIPT.md` (`FIX-14` / `FIX-02`) completed presenter battlecard and failover guide.
    - ✅ `API_REFERENCE.md` (`FIX-17`) completed standalone HTTP API specification and wire schemas.
    - ✅ `LIMITATIONS.md` (`FIX-18`) completed architectural boundaries and hardware trade-offs disclosure.
-   - Add `LICENSE` (`FIX-25`) and `CONTRIBUTING.md` (`FIX-27`).
-3. **Step 3 (DevOps & CI)**:
-   - Add `.github/workflows/ci.yml` (`FIX-22`).
+   - ✅ `LICENSE` (`FIX-25`), `LICENSE-MIT`, `LICENSE-APACHE`, and `CONTRIBUTING.md` (`FIX-27`) completed dual-license legal and contributor guidelines.
+3. **Step 3 (DevOps & Visual Proof - 100% Complete)**:
+   - ✅ `.github/workflows/ci.yml` (`FIX-22`) completed automated GitHub Actions CI workflow.
+   - ✅ `FIX-04` UI screenshots captured and embedded into `README.md`.

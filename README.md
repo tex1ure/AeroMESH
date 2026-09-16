@@ -9,6 +9,7 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 ## Table of Contents
 
 - [System Architecture](#system-architecture)
+- [Screenshots](#screenshots)
 - [How Zero-Weight Pipeline Inference Works](#how-zero-weight-pipeline-inference-works)
 - [Core Engineering Deep Dives](#core-engineering-deep-dives)
   - [GGUF Layer Partitioning & The Identity RMSNorm Solution](#gguf-layer-partitioning--the-identity-rmsnorm-solution)
@@ -28,7 +29,10 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
   - [Method 3: Full Local Test Mesh](#method-3-full-local-test-mesh)
 - [CLI Command Reference](#cli-command-reference)
 - [HTTP API & Web Interface](#http-api--web-interface)
+  - [API Endpoints](#api-endpoints)
+  - [FastAPI Web UI Gateway Architecture](#fastapi-web-ui-gateway-architecture)
 - [Troubleshooting & Operational Notes](#troubleshooting--operational-notes)
+- [License](#license)
 
 ---
 
@@ -68,6 +72,47 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 │ • Live Cluster Topology HUD     │
 └─────────────────────────────────┘
 ```
+
+---
+
+## Screenshots
+
+AeroMESH includes a dependency-free claymorphic web dashboard for chat, model slicing, cluster telemetry, and live pipeline monitoring.
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/01-chat-workspace.png">
+        <img src="docs/screenshots/01-chat-workspace.png" alt="AeroMESH chat workspace" width="100%">
+      </a>
+      <br>
+      <sub>Chat workspace</sub>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/03-streaming-response.png">
+        <img src="docs/screenshots/03-streaming-response.png" alt="Streaming response with markdown and math rendering" width="100%">
+      </a>
+      <br>
+      <sub>Streaming response</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/02-model-loading.png">
+        <img src="docs/screenshots/02-model-loading.png" alt="Model loading and slice assignment panel" width="100%">
+      </a>
+      <br>
+      <sub>Model loading / slicing</sub>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/04-cluster-hud.png">
+        <img src="docs/screenshots/04-cluster-hud.png" alt="Cluster telemetry and topology HUD" width="100%">
+      </a>
+      <br>
+      <sub>Cluster telemetry HUD</sub>
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -251,9 +296,14 @@ To prevent numerical instabilities from silently propagating through multi-node 
 
 ```
 AeroMESH/
+├── .github/                      # GitHub Actions CI/CD workflows
 ├── Cargo.toml                    # Cargo workspace definition (2021 edition)
 ├── BENCHMARKS.md                 # Latency, memory compression, and wire throughput benchmarks
+├── CONTRIBUTING.md               # Development setup, testing, and contribution guidelines
 ├── DEMO_SCRIPT.md                # Presenter battlecard and live demonstration playbook
+├── LICENSE                       # Dual-license root terms (MIT OR Apache-2.0)
+├── LICENSE-MIT                   # MIT license text
+├── LICENSE-APACHE                # Apache 2.0 license text
 ├── LIMITATIONS.md                # Architectural boundaries, hardware scope, and operational trade-offs
 ├── README.md                     # Technical architecture and user guide
 ├── setup.ps1                     # 1-Click environment bootstrap script for Windows
@@ -557,14 +607,47 @@ The AeroMesh coordinator exposes an OpenAI-compatible REST and SSE streaming int
 - `GET /api/cluster/status`: Reports cluster health, connected worker IP addresses, local layer assignments, and hidden dimension size.
 - `GET /health`: Healthcheck endpoint (returns HTTP 200 `OK`).
 
-### Web UI Architecture
+### FastAPI Web UI Gateway Architecture
 
-The frontend is served via `app.py` on `http://127.0.0.1:7860`:
+The browser connects to the claymorphic web dashboard hosted by `app.py` on `http://127.0.0.1:7860`, which proxies API traffic to the Axum engine server on `http://127.0.0.1:8080`:
+
+```
+Browser / SPA Client
+       │
+       ▼
+FastAPI Gateway / SPA Host
+app.py (http://127.0.0.1:7860)
+       │
+       ├─ Serves zero-build static assets (static/index.html, CSS, JS, KaTeX)
+       ├─ Gateway Liveness (/health) & End-to-End Readiness (/ready)
+       ├─ Enforces loopback single-origin isolation (eliminating browser CORS complexity)
+       ├─ Injects AEROMESH_API_KEY Bearer credentials for backend coordinator
+       └─ Proxies API calls & unbuffered SSE token streams to Axum
+             │
+             ▼
+      Axum Engine Server
+      aeromesh-engine (http://127.0.0.1:8080)
+             │
+             └─ Pipeline coordinator & Tailscale WireGuard mesh control plane
+```
+
+#### Why the Localhost Hop is an Intentional Architectural Choice
+- **Rapid UI Prototyping**: Modifying the dashboard, styling, or client-side orchestration requires zero Rust re-compilation (`cargo build`).
+- **Same-Origin Security**: The browser communicates with a single local origin (`:7860`), preventing cross-origin attacks from external browser tabs while Axum restricts its CORS allowlist (`FIX-11`).
+- **Credential Shielding**: The browser client does not handle raw coordinator API secrets; the gateway injects Bearer credentials directly on the loopback connection.
+- **Graceful Offline Fallback**: If the Rust engine is compiling or stopped, the gateway remains responsive, serving the UI, scanning local GGUF models on disk, and displaying guided recovery commands.
+- **Negligible Latency Overhead**: Localhost TCP loopback introduces `< 0.08 ms` of latency, which is completely imperceptible compared to GPU token inference (~50–100 ms/token).
+
+For full technical specifications, hop-by-hop header filtering rules, and SSE lifecycle mechanics, see the dedicated design document:  
+👉 [`docs/architecture/fastapi-proxy-gateway.md`](docs/architecture/fastapi-proxy-gateway.md)
+
+#### Dashboard Highlights
 - **Claymorphic Visual System**: Custom warm-dark aesthetic with zero dependencies on heavy front-end build steps (vanilla CSS + ES6 JavaScript).
 - **DeepSeek-R1 Support**: Automatically detects `<think>` and `</think>` tags in output streams and renders collapsible reasoning accordions.
 - **KaTeX Integration**: Renders inline ($...$) and display block ($$...$$) mathematical expressions dynamically as tokens stream in.
 - **Highlight.js**: Provides syntax highlighting for code blocks with one-click clipboard copying.
 - **Live Cluster Topology HUD**: Interactive modal displaying active worker nodes, RTT latencies, layer distribution, and wire transfer statistics.
+- **Context-Aware Abort Button (`FIX-19`)**: Send button toggles dynamically to a glowing red Stop button during generation, triggering immediate `AbortController` cancellation.
 - **Session Controls**: Includes manual KV cache synchronization buttons and Markdown chat export.
 
 ---
@@ -603,4 +686,11 @@ If `aeromesh` fails to locate `ggml-cuda.dll` or llama dependencies:
 
 ## License
 
-AeroMesh is licensed under the terms of the MIT License or Apache 2.0 License at your option.
+AeroMESH is licensed under either of:
+
+- MIT License, see [LICENSE-MIT](LICENSE-MIT)
+- Apache License, Version 2.0, see [LICENSE-APACHE](LICENSE-APACHE)
+
+at your option.
+
+See [LICENSE](LICENSE) for details.
