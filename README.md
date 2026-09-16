@@ -9,6 +9,7 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 ## Table of Contents
 
 - [System Architecture](#system-architecture)
+- [Screenshots](#screenshots)
 - [How Zero-Weight Pipeline Inference Works](#how-zero-weight-pipeline-inference-works)
 - [Core Engineering Deep Dives](#core-engineering-deep-dives)
   - [GGUF Layer Partitioning & The Identity RMSNorm Solution](#gguf-layer-partitioning--the-identity-rmsnorm-solution)
@@ -69,6 +70,47 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 │ • Live Cluster Topology HUD     │
 └─────────────────────────────────┘
 ```
+
+---
+
+## Screenshots
+
+AeroMESH includes a dependency-free claymorphic web dashboard for chat, model slicing, cluster telemetry, and live pipeline monitoring.
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/01-chat-workspace.png">
+        <img src="docs/screenshots/01-chat-workspace.png" alt="AeroMESH chat workspace" width="100%">
+      </a>
+      <br>
+      <sub>Chat workspace</sub>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/03-streaming-response.png">
+        <img src="docs/screenshots/03-streaming-response.png" alt="Streaming response with markdown and math rendering" width="100%">
+      </a>
+      <br>
+      <sub>Streaming response</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/02-model-loading.png">
+        <img src="docs/screenshots/02-model-loading.png" alt="Model loading and slice assignment panel" width="100%">
+      </a>
+      <br>
+      <sub>Model loading / slicing</sub>
+    </td>
+    <td align="center" width="50%">
+      <a href="docs/screenshots/04-cluster-hud.png">
+        <img src="docs/screenshots/04-cluster-hud.png" alt="Cluster telemetry and topology HUD" width="100%">
+      </a>
+      <br>
+      <sub>Cluster telemetry HUD</sub>
+    </td>
+  </tr>
+</table>
 
 ---
 

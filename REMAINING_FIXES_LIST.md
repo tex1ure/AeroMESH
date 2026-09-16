@@ -14,11 +14,11 @@
 | **Security & Authentication (P0 / P1)** | 4 | **4** (100%) | 0 | 0 |
 | **Input Validation & Safety (P1 / P2)** | 3 | **3** (100%) | 0 | 0 |
 | **Frontend & Usability (P2)** | 2 | **2** (100%) | 0 | 0 |
-| **Documentation & Presentation (P1 / P2)** | 7 | **6** (86%) | 1 (Screenshots) | 0 |
+| **Documentation & Presentation (P1 / P2)** | 7 | **7** (100%) | 0 | 0 |
 | **DevOps & CI (P2)** | 1 | **1** (100%) | 0 | 0 |
 | **Legal & Open Source Polish (P3)** | 2 | **2** (100%) | 0 | 0 |
 | **Intentional Design Decisions (No Action)** | 8 | 0 | 0 | **8** |
-| **Total** | **32** | **23** | **1** | **8** |
+| **Total** | **32** | **24** | **0** | **8** |
 
 ---
 
@@ -164,9 +164,10 @@ These are the remaining actionable tasks, ranked by order of priority and ease o
 - **Why it matters**: Proves to viewers and contributors that code quality is continuously tested.
 - **Effort**: ~15 minutes | **Difficulty**: Easy
 
-#### [ ] 10. UI Screenshots in README (`FIX-04`)
-- **What is needed**: Take 3–4 clean screenshots of the claymorphic UI (chat screen, model loading, telemetry HUD) and add them to `README.md`.
-- **Why it matters**: Visual proof makes the project look 10x more impressive instantly.
+#### [X] 10. UI Screenshots in README (`FIX-04`)
+- **Status**: Completed. Captured 4 clean, high-resolution (1920x1080) PNG screenshots (`01-chat-workspace.png`, `02-model-loading.png`, `03-streaming-response.png`, `04-cluster-hud.png`) under `docs/screenshots/` and embedded them directly into `README.md` in a responsive two-column preview gallery.
+- **What was added**: Visual proof of the working claymorphic chat workspace, model selection & slice panel, mid-stream token generation with DeepSeek-R1 `<think>` foldout, syntax highlighting & KaTeX math rendering, and cluster topology HUD modal.
+- **Why it matters**: Visual proof establishes credibility, showcases the claymorphic design, and proves the system is a functional, polished edge cluster.
 - **Effort**: ~20 minutes | **Difficulty**: Easy
 
 ---
@@ -216,7 +217,7 @@ To finish all remaining items efficiently, tackle them in this order:
    - Create `API_REFERENCE.md` (`FIX-17`).
    - Create `LIMITATIONS.md` (`FIX-18`).
 
-3. **Step 3 (Polish & DevOps — ~25 mins)**:
+3. **Step 3 (Polish & DevOps — 100% Complete)**:
    - ✅ Create `LICENSE` (`FIX-25`), `LICENSE-MIT`, `LICENSE-APACHE`, and `CONTRIBUTING.md` (`FIX-27`).
    - ✅ Create `.github/workflows/ci.yml` (`FIX-22`).
-   - Take and embed UI screenshots (`FIX-04`).
+   - ✅ Take and embed UI screenshots (`FIX-04`).
