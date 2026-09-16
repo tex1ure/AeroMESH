@@ -252,6 +252,9 @@ To prevent numerical instabilities from silently propagating through multi-node 
 ```
 AeroMESH/
 ├── Cargo.toml                    # Cargo workspace definition (2021 edition)
+├── BENCHMARKS.md                 # Latency, memory compression, and wire throughput benchmarks
+├── DEMO_SCRIPT.md                # Presenter battlecard and live demonstration playbook
+├── LIMITATIONS.md                # Architectural boundaries, hardware scope, and operational trade-offs
 ├── README.md                     # Technical architecture and user guide
 ├── setup.ps1                     # 1-Click environment bootstrap script for Windows
 ├── start.ps1                     # Interactive / flag-based cluster launcher

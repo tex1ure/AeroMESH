@@ -14,10 +14,10 @@
 | **Security & Authentication (P0 / P1)** | 4 | **4** (100%) | 0 | 0 |
 | **Input Validation & Safety (P1 / P2)** | 3 | **3** (100%) | 0 | 0 |
 | **Frontend & Usability (P2)** | 2 | **2** (100%) | 0 | 0 |
-| **Documentation & Presentation (P1 / P2)** | 6 | **5** (83%) | 1 | 0 |
+| **Documentation & Presentation (P1 / P2)** | 6 | **6** (100%) | 0 | 0 |
 | **Legal & Open Source Polish (P3)** | 3 | 0 | 3 | 0 |
 | **Intentional Design Decisions (No Action)** | 8 | 0 | 0 | **8** |
-| **Total** | **31** | **19** | **4** | **8** |
+| **Total** | **31** | **20** | **3** | **8** |
 
 ---
 
@@ -147,7 +147,8 @@ These are the remaining actionable tasks, ranked by order of priority and ease o
 - **Why it matters**: Anyone who wants to build on AeroMESH or write scripts can see all API endpoints at a glance.
 - **Effort**: ~15 minutes | **Difficulty**: Very Easy
 
-#### [ ] 8. Architectural Limitations & Boundaries (`LIMITATIONS.md` / `FIX-18`)
+#### [X] 8. Architectural Limitations & Boundaries (`LIMITATIONS.md` / `FIX-18`)
+- **Status**: Completed. Fully documented the 2-node topology boundary, Win32 Job Object containment rationale, zero-weight storage requirements, and ephemeral context lifecycles.
 - **What is needed**: A proactive document explaining known design boundaries:
   - 2-node maximum in current pipeline design.
   - Windows-only Win32 Job Object requirement.

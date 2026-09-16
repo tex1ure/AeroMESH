@@ -52,6 +52,7 @@ Below is the complete, plain-English breakdown of what has been fixed, what is s
 | **FIX-15** | **Inadequate Technical Documentation**<br>Project lacked deep architecture and protocol documentation. | Rewrote root [`README.md`](README.md) (32 KB) with detailed pipeline diagrams, memory topologies, CLI reference, and tensor slicing specs. | `README.md` |
 | **FIX-14 / FIX-02** | **Missing Live Demo Battlecard & Presenter Playbook**<br>No step-by-step procedure existed for orchestrating a zero-failure live presentation across two laptops or recovering from venue Wi-Fi drops. | Created [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md) with pre-flight checklist, exact PowerShell launch commands for Laptop A and B, expected console logs, screen-by-screen architectural talking points, and an instant single-machine emergency fallback command (`.\start.ps1 all`) using shared memory IPC. | `DEMO_SCRIPT.md` |
 | **FIX-17** | **Standalone API Reference Documentation**<br>Missing comprehensive schemas, parameter constraints, and SSE wire formats. | Created [`API_REFERENCE.md`](API_REFERENCE.md) covering request/response schemas, validation rules, cURL examples, rate limits, and OpenAI-compatible error envelopes. | `API_REFERENCE.md` |
+| **FIX-18** | **Architectural Limitations & Boundaries (`LIMITATIONS.md`)**<br>Missing proactive documentation of operational boundaries and hardware requirements. | Published [`LIMITATIONS.md`](LIMITATIONS.md) documenting the 2-node topology limit, Win32 Job Object lifecycle controls, zero-weight storage prerequisites, and stateless session constraints. | `LIMITATIONS.md`<br>`README.md` |
 | **TELEMETRY** | **UI Showed "Coordinator Offline" During Generation**<br>Polling `/api/cluster/status` contended on the generation lock. | Added thread-safe `cluster_meta: RwLock<ClusterMeta>` to `AppState`, live inferring indicators (`⚡ Inferring (P2P)`), generating pulse CSS animations, and dynamic token counters. | `server.rs`<br>`app.js`<br>`claymorphic.css` |
 
 ### D. Input Validation & Bounds Safety
@@ -80,23 +81,15 @@ All critical code and security fixes (`FIX-08` Rate Limiting, `FIX-11` Strict CO
 
 These items require no complex code changes, take minimal time, and significantly boost the professional polish of the repository:
 
-1. **FIX-18 (P2, Documentation): `LIMITATIONS.md`**
-   - **Description**: Proactive disclosure of architectural boundaries (preempts reviewer critique):
-     - 2-node maximum in current pipeline design.
-     - Windows-only Win32 Job Object requirement.
-     - Both nodes require local GGUF model files.
-     - Ephemeral conversation history (no database persistence).
-   - **Effort**: Very Easy (~15 mins) • **Impact**: Medium
-
-2. **FIX-25 & FIX-27 (P3, Legal/Community): `LICENSE` & `CONTRIBUTING.md`**
+1. **FIX-25 & FIX-27 (P3, Legal/Community): `LICENSE` & `CONTRIBUTING.md`**
    - **Description**: Add standard Apache-2.0 / MIT `LICENSE` file in root and concise `CONTRIBUTING.md` with build steps and code style guidelines.
    - **Effort**: Very Easy (~10 mins) • **Impact**: Medium
 
-3. **FIX-22 (P2, DevOps): CI/CD Pipeline (`.github/workflows/ci.yml`)**
+2. **FIX-22 (P2, DevOps): CI/CD Pipeline (`.github/workflows/ci.yml`)**
    - **Description**: Automated GitHub Actions workflow running `cargo test --workspace` and `cargo check --workspace --release` on every pull request and push.
    - **Effort**: Easy (~15 mins) • **Impact**: Medium
 
-4. **FIX-04 (P0, Documentation): UI Screenshots & Visual Proof**
+3. **FIX-04 (P0, Documentation): UI Screenshots & Visual Proof**
    - **Description**: Capture 3–5 clean screenshots of the claymorphic web UI (chat state, model loading, telemetry HUD modal, streaming response) and embed them into `README.md`.
    - **Effort**: Easy (~20 mins) • **Impact**: High
 
@@ -122,11 +115,11 @@ These items were evaluated during the ruthless review and determined to be **cor
 | Category | Total Issues | Resolved | Remaining Actionable | Accepted Constraints |
 |---|:---:|:---:|:---:|:---:|
 | **P0 (Critical / Blockers)** | 5 | 4 | 1 (Screenshots) | 0 |
-| **P1 (High Priority)** | 10 | 7 | 3 (Limitations, etc.) | 0 |
+| **P1 (High Priority)** | 10 | 10 | 0 | 0 |
 | **P2 (Medium Priority)** | 9 | 4 | 1 (CI) | 4 |
 | **P3 (Low Priority)** | 6 | 0 | 2 (License, Contributing) | 4 |
 | **Engine Crash Fixes** | 2 | 2 | 0 | 0 |
-| **Total** | **32** | **19** | **5** | **8** |
+| **Total** | **32** | **20** | **4** | **8** |
 
 ---
 
@@ -140,7 +133,7 @@ To get the project submission-ready in the shortest time:
 2. **Step 2 (Documentation Suite)**:
    - ✅ `DEMO_SCRIPT.md` (`FIX-14` / `FIX-02`) completed presenter battlecard and failover guide.
    - ✅ `API_REFERENCE.md` (`FIX-17`) completed standalone HTTP API specification and wire schemas.
-   - Generate `LIMITATIONS.md` (`FIX-18`).
+   - ✅ `LIMITATIONS.md` (`FIX-18`) completed architectural boundaries and hardware trade-offs disclosure.
    - Add `LICENSE` (`FIX-25`) and `CONTRIBUTING.md` (`FIX-27`).
 3. **Step 3 (DevOps & CI)**:
    - Add `.github/workflows/ci.yml` (`FIX-22`).
