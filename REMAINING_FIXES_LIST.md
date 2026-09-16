@@ -14,10 +14,11 @@
 | **Security & Authentication (P0 / P1)** | 4 | **4** (100%) | 0 | 0 |
 | **Input Validation & Safety (P1 / P2)** | 3 | **3** (100%) | 0 | 0 |
 | **Frontend & Usability (P2)** | 2 | **2** (100%) | 0 | 0 |
-| **Documentation & Presentation (P1 / P2)** | 6 | **6** (100%) | 0 | 0 |
-| **Legal & Open Source Polish (P3)** | 3 | 0 | 3 | 0 |
+| **Documentation & Presentation (P1 / P2)** | 7 | **6** (86%) | 1 (Screenshots) | 0 |
+| **DevOps & CI (P2)** | 1 | 0 | 1 (CI/CD) | 0 |
+| **Legal & Open Source Polish (P3)** | 2 | **2** (100%) | 0 | 0 |
 | **Intentional Design Decisions (No Action)** | 8 | 0 | 0 | **8** |
-| **Total** | **31** | **20** | **3** | **8** |
+| **Total** | **32** | **22** | **2** | **8** |
 
 ---
 
@@ -171,11 +172,13 @@ These are the remaining actionable tasks, ranked by order of priority and ease o
 
 ### Low Priority — Open-Source Legal & Community Polish
 
-#### [ ] 11. Open Source License (`LICENSE` / `FIX-25`)
+#### [X] 11. Open Source License (`LICENSE` / `FIX-25`)
+- **Status**: Completed. Dual-licensed under MIT OR Apache-2.0. Published root `LICENSE`, `LICENSE-MIT`, and `LICENSE-APACHE`.
 - **What is needed**: Add standard Apache-2.0 or MIT `LICENSE` file in the root directory.
 - **Effort**: ~5 minutes | **Difficulty**: Trivial
 
-#### [ ] 12. Contribution Guidelines (`CONTRIBUTING.md` / `FIX-27`)
+#### [X] 12. Contribution Guidelines (`CONTRIBUTING.md` / `FIX-27`)
+- **Status**: Completed. Published comprehensive `CONTRIBUTING.md` detailing setup, build, test, and code style standards.
 - **What is needed**: Add standard `CONTRIBUTING.md` outlining repository structure, build commands, and pull request guidelines.
 - **Effort**: ~10 minutes | **Difficulty**: Very Easy
 
@@ -213,6 +216,6 @@ To finish all remaining items efficiently, tackle them in this order:
    - Create `LIMITATIONS.md` (`FIX-18`).
 
 3. **Step 3 (Polish & DevOps — ~25 mins)**:
-   - Create `LICENSE` (`FIX-25`) and `CONTRIBUTING.md` (`FIX-27`).
+   - ✅ Create `LICENSE` (`FIX-25`), `LICENSE-MIT`, `LICENSE-APACHE`, and `CONTRIBUTING.md` (`FIX-27`).
    - Create `.github/workflows/ci.yml` (`FIX-22`).
    - Take and embed UI screenshots (`FIX-04`).

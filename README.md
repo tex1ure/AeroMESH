@@ -29,6 +29,7 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 - [CLI Command Reference](#cli-command-reference)
 - [HTTP API & Web Interface](#http-api--web-interface)
 - [Troubleshooting & Operational Notes](#troubleshooting--operational-notes)
+- [License](#license)
 
 ---
 
@@ -253,7 +254,11 @@ To prevent numerical instabilities from silently propagating through multi-node 
 AeroMESH/
 ├── Cargo.toml                    # Cargo workspace definition (2021 edition)
 ├── BENCHMARKS.md                 # Latency, memory compression, and wire throughput benchmarks
+├── CONTRIBUTING.md               # Development setup, testing, and contribution guidelines
 ├── DEMO_SCRIPT.md                # Presenter battlecard and live demonstration playbook
+├── LICENSE                       # Dual-license root terms (MIT OR Apache-2.0)
+├── LICENSE-MIT                   # MIT license text
+├── LICENSE-APACHE                # Apache 2.0 license text
 ├── LIMITATIONS.md                # Architectural boundaries, hardware scope, and operational trade-offs
 ├── README.md                     # Technical architecture and user guide
 ├── setup.ps1                     # 1-Click environment bootstrap script for Windows
@@ -603,4 +608,11 @@ If `aeromesh` fails to locate `ggml-cuda.dll` or llama dependencies:
 
 ## License
 
-AeroMesh is licensed under the terms of the MIT License or Apache 2.0 License at your option.
+AeroMESH is licensed under either of:
+
+- MIT License, see [LICENSE-MIT](LICENSE-MIT)
+- Apache License, Version 2.0, see [LICENSE-APACHE](LICENSE-APACHE)
+
+at your option.
+
+See [LICENSE](LICENSE) for details.
