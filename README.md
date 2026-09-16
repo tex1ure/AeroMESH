@@ -252,6 +252,9 @@ To prevent numerical instabilities from silently propagating through multi-node 
 ```
 AeroMESH/
 ├── Cargo.toml                    # Cargo workspace definition (2021 edition)
+├── BENCHMARKS.md                 # Latency, memory compression, and wire throughput benchmarks
+├── DEMO_SCRIPT.md                # Presenter battlecard and live demonstration playbook
+├── LIMITATIONS.md                # Architectural boundaries, hardware scope, and operational trade-offs
 ├── README.md                     # Technical architecture and user guide
 ├── setup.ps1                     # 1-Click environment bootstrap script for Windows
 ├── start.ps1                     # Interactive / flag-based cluster launcher
@@ -543,6 +546,8 @@ cargo run --bin aeromesh -- prime-cache --model models/model.gguf
 ## HTTP API & Web Interface
 
 The AeroMesh coordinator exposes an OpenAI-compatible REST and SSE streaming interface on port `8080` (or your configured `--port`):
+
+- **API Reference**: See [`API_REFERENCE.md`](API_REFERENCE.md) for full endpoint specifications, SSE streaming schemas, parameter constraints, cURL examples, and error matrices.
 
 ### API Endpoints
 
