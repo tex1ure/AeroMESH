@@ -1,0 +1,298 @@
+/* ==========================================================================
+   AEROMESH RESPONSIVE GUARDRAILS (FIX-26)
+   Scope: Non-destructive fallback for tablet and mobile viewports.
+   Target Philosophy: Desktop-First. Multi-laptop distributed edge inference
+   is the primary presentation target (1920x1080, 1600x900, 1440x900, 1366x768).
+   These rules ensure graceful degradation, prevent layout breakage, and
+   keep chat & HUD controls usable on screens <= 1024px, <= 768px, and <= 480px.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. TABLET & COMPACT LAPTOP BREAKPOINTS (<= 1024px)
+   -------------------------------------------------------------------------- */
+@media (max-width: 1024px) {
+  .chat-inner {
+    max-width: 100%;
+    padding: 0 10px;
+  }
+
+  .input-dock-container {
+    max-width: 100%;
+    padding: 0 10px;
+  }
+
+  #hero-state {
+    max-width: 100%;
+    padding: 20px 10px 10px 10px;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   2. MOBILE DRAWER & PHONE BREAKPOINTS (<= 768px)
+   -------------------------------------------------------------------------- */
+@media (max-width: 768px) {
+  /* Prevent any horizontal screen drifting */
+  html, body, #app-container {
+    overflow-x: hidden;
+  }
+
+  /* Sidebar transforms into an overlay drawer */
+  #sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 100;
+    width: 280px;
+    min-width: 280px;
+    box-shadow: 12px 0 36px rgba(0, 0, 0, 0.9);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  #sidebar.collapsed {
+    transform: translateX(-100%);
+    margin-left: 0;
+  }
+
+  /* Reveal sidebar close button inside drawer on mobile */
+  #sidebar-close-btn {
+    display: flex !important;
+  }
+
+  /* Top Navigation Bar responsive compaction */
+  .top-nav {
+    padding: 0 12px;
+    height: 56px;
+    gap: 8px;
+  }
+
+  .top-left-group {
+    gap: 8px;
+    min-width: 0;
+    flex-shrink: 1;
+  }
+
+  .model-selector-pill {
+    padding: 5px 10px;
+    font-size: 12px;
+    max-width: 180px;
+  }
+
+  #active-model-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 120px;
+  }
+
+  .top-right-group {
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  /* Hide verbose 'Sync KV' text on phones, retain icon button */
+  #btn-reset-session span {
+    display: none;
+  }
+
+  #btn-reset-session {
+    padding: 5px 8px !important;
+  }
+
+  .cluster-pill-badge {
+    padding: 4px 8px;
+    font-size: 10.5px;
+  }
+
+  #top-status-text {
+    max-width: 80px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Chat Viewport adjustments */
+  #chat-viewport {
+    padding: 16px 10px 180px 10px;
+  }
+
+  .chat-inner {
+    gap: 16px;
+  }
+
+  /* Hero State compact stacking */
+  #hero-state {
+    padding: 16px 0;
+    gap: 14px;
+  }
+
+  .hero-emblem {
+    width: 54px;
+    height: 54px;
+  }
+
+  .hero-title {
+    font-size: 22px;
+  }
+
+  .hero-subtitle {
+    font-size: 13px;
+    padding: 0 8px;
+  }
+
+  .hero-suggestions-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .suggestion-card {
+    padding: 12px 14px;
+  }
+
+  /* Message Rows & Bubbles */
+  .message-row {
+    gap: 10px;
+  }
+
+  .message-avatar {
+    width: 30px;
+    height: 30px;
+    min-width: 30px;
+  }
+
+  .user-bubble {
+    max-width: 88%;
+    padding: 11px 14px;
+    font-size: 13.5px;
+  }
+
+  .assistant-card {
+    padding: 14px 16px;
+  }
+
+  /* Code block overflow protection */
+  .code-block-wrapper pre {
+    padding: 10px;
+    font-size: 12px;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  /* Floating Bottom Input Dock */
+  .bottom-input-anchor {
+    padding: 0 10px 12px 10px;
+  }
+
+  .input-dock-container {
+    gap: 6px;
+  }
+
+  .input-toolbar-row {
+    padding: 0 4px;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  /* Hide desktop keyboard shortcut hint on touchscreens */
+  .input-toolbar-row > div:last-child {
+    display: none;
+  }
+
+  .toolbar-pills {
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .clay-tool-pill {
+    padding: 3px 8px;
+    font-size: 10.5px;
+  }
+
+  .input-capsule {
+    padding: 8px 10px 8px 14px;
+    border-radius: var(--radius-lg);
+  }
+
+  #chat-input {
+    font-size: 14px;
+  }
+
+  .input-footer-disclaimer {
+    font-size: 10px;
+    line-height: 1.3;
+    padding: 0 4px;
+  }
+
+  /* Telemetry & Topology Modal on Mobile */
+  .clay-modal {
+    width: 95%;
+    max-width: 95vw;
+    max-height: 88vh;
+    overflow-y: auto;
+    padding: 16px;
+    gap: 12px;
+    border-radius: var(--radius-md);
+  }
+
+  .modal-title {
+    font-size: 15px;
+  }
+
+  .cluster-diagram {
+    padding: 10px;
+    gap: 8px;
+  }
+
+  .node-box {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  .mesh-link-container {
+    padding: 6px 8px;
+  }
+
+  .direct-wireguard-badge {
+    font-size: 10.5px;
+    padding: 3px 8px;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   3. ULTRA-COMPACT MOBILE SCREENS (<= 420px)
+   -------------------------------------------------------------------------- */
+@media (max-width: 420px) {
+  .top-nav {
+    padding: 0 8px;
+  }
+
+  .model-selector-pill {
+    max-width: 140px;
+    padding: 4px 8px;
+  }
+
+  #active-model-name {
+    max-width: 85px;
+  }
+
+  .user-bubble {
+    max-width: 92%;
+    padding: 10px 12px;
+  }
+
+  .action-buttons-group {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .telemetry-tag {
+    font-size: 10px;
+    flex-wrap: wrap;
+  }
+
+  .node-box {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+}

@@ -422,6 +422,9 @@
     currentChatId = chatId;
     renderHistoryList();
     renderMessages();
+    if (window.innerWidth <= 768 && elements.sidebar) {
+      elements.sidebar.classList.add('collapsed');
+    }
   }
 
   function deleteChat(chatId, e) {
@@ -1077,6 +1080,20 @@
     elements.sidebarToggleBtn.onclick = () => {
       elements.sidebar.classList.toggle('collapsed');
     };
+
+    if (elements.sidebarCloseBtn) {
+      elements.sidebarCloseBtn.onclick = () => {
+        elements.sidebar.classList.add('collapsed');
+      };
+    }
+
+    if (elements.chatViewport) {
+      elements.chatViewport.addEventListener('click', () => {
+        if (window.innerWidth <= 768 && elements.sidebar && !elements.sidebar.classList.contains('collapsed')) {
+          elements.sidebar.classList.add('collapsed');
+        }
+      });
+    }
 
     elements.btnNewChat.onclick = () => createNewChat();
     elements.btnClearAll.onclick = () => clearAllChats();

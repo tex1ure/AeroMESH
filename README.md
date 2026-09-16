@@ -33,6 +33,7 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
   - [FastAPI Web UI Gateway Architecture](#fastapi-web-ui-gateway-architecture)
 - [Conversation Persistence and Stateless Inference](#conversation-persistence-and-stateless-inference)
 - [TLS, HTTPS, and Transport Security](#tls-https-and-transport-security)
+- [Device Targeting and Mobile Support](#device-targeting-and-mobile-support)
 - [Troubleshooting & Operational Notes](#troubleshooting--operational-notes)
 - [License](#license)
 
@@ -710,6 +711,31 @@ AeroMESH intentionally does not manage TLS certificates inside the core Rust eng
 
 For full architectural specifications, see:  
 👉 [`docs/architecture/tls-transport-security-policy.md`](docs/architecture/tls-transport-security-policy.md)
+
+---
+
+## Device Targeting and Mobile Support
+
+The AeroMESH web dashboard is optimized for desktop and laptop control nodes.
+
+The primary use case is multi-laptop distributed edge inference, where operators monitor cluster topology, model slicing, worker health, and streaming inference from a desktop-class browser session.
+
+Mobile responsiveness is not a primary presentation target. The UI remains readable and functional on smaller screens, but advanced cluster controls, topology views, and telemetry panels are designed primarily for desktop layouts.
+
+### Primary Supported Resolutions
+- `1920x1080` (Full HD Desktop / Laptop — Primary Target)
+- `1600x900` / `1440x900` (Widescreen Laptops)
+- `1366x768` / `1280x800` (Standard Consumer Laptops)
+
+### Small-Screen Fallback Guardrails
+Small-screen support is implemented via non-destructive CSS guardrails (`static/css/responsive.css`):
+- Mobile viewport scaling (`width=device-width, initial-scale=1.0`).
+- Collapsible fixed overlay sidebar drawer with dedicated close button and click-away dismissal.
+- Vertically scrolling, unclipped Cluster HUD telemetry modal.
+- Horizontal scroll containment for code blocks and performance metrics.
+
+For full design specifications, see the architectural policy document:  
+👉 [`docs/architecture/device-targeting-responsive-policy.md`](docs/architecture/device-targeting-responsive-policy.md)
 
 ---
 
