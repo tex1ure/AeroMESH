@@ -1,7 +1,7 @@
 # AeroMESH — Complete Fixes & Remaining Tasks List
 
-> **Current Status**: All P0 blockers, critical engine crashes, input validation bounds, and context window guards are **FIXED and tested** (36/36 workspace tests passing).  
-> **Git Branch**: `main` (synchronized with `origin/main` at commit `fa3837a`).  
+> **Current Status**: All P0 blockers, critical engine crashes, input validation bounds, context window guards, rate limiting, and CORS restrictions are **FIXED and tested** (43/43 workspace tests passing).  
+> **Git Branch**: `main` and `upX` (synchronized with `origin/main` at commit `3b8d685`).  
 > **Purpose of this file**: A simple, human-readable checklist of everything that was fixed, everything that remains to be done, and architectural decisions kept as-is.
 
 ---
@@ -23,7 +23,7 @@
 
 ## 1. What We Already Fixed & Tested ([X] DONE)
 
-These are critical bugs, crashes, vulnerabilities, and validation defects that were identified and completely patched. All 36 automated unit tests currently pass.
+These are critical bugs, crashes, vulnerabilities, and validation defects that were identified and completely patched. All 43 automated unit tests currently pass.
 
 ### [X] 1. Dangling Pointer Segfault on Model Switch (`CRASH-01`)
 - **What was broken**: When switching models (`/v1/chat/completions`), the engine called `close()` which freed underlying C++ memory and left pointers null. If loading the new model failed, the coordinator kept running with null pointers. The very next chat request attempted to tokenize using a null vocabulary pointer, causing an instant native segmentation fault (`0xC0000005`) that crashed the entire program.
