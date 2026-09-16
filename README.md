@@ -34,6 +34,7 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 - [Conversation Persistence and Stateless Inference](#conversation-persistence-and-stateless-inference)
 - [TLS, HTTPS, and Transport Security](#tls-https-and-transport-security)
 - [Device Targeting and Mobile Support](#device-targeting-and-mobile-support)
+- [Cluster Size Support and N-Stage Roadmap](#cluster-size-support-and-n-stage-roadmap)
 - [Troubleshooting & Operational Notes](#troubleshooting--operational-notes)
 - [License](#license)
 
@@ -736,6 +737,45 @@ Small-screen support is implemented via non-destructive CSS guardrails (`static/
 
 For full design specifications, see the architectural policy document:  
 👉 [`docs/architecture/device-targeting-responsive-policy.md`](docs/architecture/device-targeting-responsive-policy.md)
+
+---
+
+## Cluster Size Support and N-Stage Roadmap
+
+AeroMESH currently demonstrates and targets **heterogeneous 2-node pipeline parallelism** across consumer laptops:
+
+```text
+Coordinator Node / Stage 1 (Laptop A)
+  ├─ Tokenization
+  ├─ Embeddings
+  ├─ Layers 0..K
+  └─ Sends ActivationFrame to worker over Tailscale WireGuard
+        │
+        ▼
+Worker Node / Stage 2 (Laptop B)
+  ├─ Layers K+1..N
+  ├─ True output norm
+  ├─ LM head
+  ├─ Token sampling
+  └─ Returns TokenResponseFrame to coordinator
+```
+
+This 2-node design is the primary verified, benchmarked, and demonstrated configuration.
+
+### Why 2-Node Topology is the Primary Demonstration Target
+1. **Immediate Autoregressive Loopback**: A 2-stage pipeline creates a direct closed feedback loop without intermediate tensor relay hops or pipeline bubble stalls.
+2. **Real-World Multi-Laptop Deployment**: Operators typically pair two consumer laptops (e.g. an RTX 4060 8GB coordinator and an RTX 3050 4GB worker) to run models like DeepSeek-R1-Distill-Qwen-14B that exceed any single laptop's VRAM.
+3. **Zero Orphaned State**: Win32 Job Objects on Windows cleanly reclaim worker daemons on both machines upon completion.
+
+### N-Stage Pipeline Roadmap ($N \ge 3$ Nodes)
+Supporting 3+ nodes in an $N$-stage pipeline ring (Head Stage $\to$ Intermediate Stages $\to$ Tail Stage $\to$ Coordinator Loopback) is architecturally planned for future milestones:
+- **Head Node**: Tokenization, embeddings, layers $0 \dots K_1$, Identity RMSNorm.
+- **Intermediate Nodes**: Receives `ActivationFrame`, evaluates middle layers $K_1+1 \dots K_2$, forwards new `ActivationFrame` downstream without sampling.
+- **Tail Node**: Evaluates final layers $K_2+1 \dots N$, applies true output norm and LM head, penalty-samples token, returns `TokenResponseFrame` to coordinator.
+
+For full architectural blueprints, slicing requirements, and protocol specifications, see the roadmap documents:  
+👉 [`ROADMAP.md`](ROADMAP.md)  
+👉 [`docs/architecture/n-stage-pipeline-roadmap.md`](docs/architecture/n-stage-pipeline-roadmap.md)
 
 ---
 
