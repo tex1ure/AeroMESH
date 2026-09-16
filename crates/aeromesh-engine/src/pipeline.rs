@@ -1,3 +1,17 @@
+// ===========================================================================
+// NOTE (FIX-21): This module intentionally contains both coordinator client
+// and worker service logic in a single file for demo stability and zero-risk
+// execution.
+//
+// Planned post-demo refactoring:
+// - Extract `PipelineCoordinatorClient` into `pipeline/coordinator_client.rs`.
+// - Extract `PipelineWorkerService` into `pipeline/worker_service.rs`.
+// - Retain `pipeline.rs` as a thin module root with public re-exports.
+// - Full blueprint: docs/architecture/pipeline-refactoring-plan.md
+//
+// Do not perform structural refactoring on this module before the demo.
+// ===========================================================================
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
