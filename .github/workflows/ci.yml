@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust-ci:
+    name: Rust workspace tests and release check
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: aeromesh-ci
+
+      - name: Show Rust toolchain versions
+        shell: pwsh
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Run workspace tests
+        shell: pwsh
+        run: |
+          cargo test --workspace
+
+      - name: Run release-mode workspace check
+        shell: pwsh
+        run: |
+          cargo check --workspace --release

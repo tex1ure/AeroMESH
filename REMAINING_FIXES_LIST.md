@@ -15,10 +15,10 @@
 | **Input Validation & Safety (P1 / P2)** | 3 | **3** (100%) | 0 | 0 |
 | **Frontend & Usability (P2)** | 2 | **2** (100%) | 0 | 0 |
 | **Documentation & Presentation (P1 / P2)** | 7 | **6** (86%) | 1 (Screenshots) | 0 |
-| **DevOps & CI (P2)** | 1 | 0 | 1 (CI/CD) | 0 |
+| **DevOps & CI (P2)** | 1 | **1** (100%) | 0 | 0 |
 | **Legal & Open Source Polish (P3)** | 2 | **2** (100%) | 0 | 0 |
 | **Intentional Design Decisions (No Action)** | 8 | 0 | 0 | **8** |
-| **Total** | **32** | **22** | **2** | **8** |
+| **Total** | **32** | **23** | **1** | **8** |
 
 ---
 
@@ -158,7 +158,8 @@ These are the remaining actionable tasks, ranked by order of priority and ease o
 - **Why it matters**: Preempts reviewer critiques by showing these were conscious engineering decisions, not oversights.
 - **Effort**: ~10 minutes | **Difficulty**: Very Easy
 
-#### [ ] 9. Automated GitHub Actions CI (`.github/workflows/ci.yml` / `FIX-22`)
+#### [X] 9. Automated GitHub Actions CI (`.github/workflows/ci.yml` / `FIX-22`)
+- **Status**: Completed. Created `.github/workflows/ci.yml` configured on `windows-latest` runner running `cargo test --workspace` and `cargo check --workspace --release` with Cargo caching.
 - **What is needed**: Create `.github/workflows/ci.yml` that automatically runs `cargo test --workspace` and `cargo check --workspace --release` on every push and pull request.
 - **Why it matters**: Proves to viewers and contributors that code quality is continuously tested.
 - **Effort**: ~15 minutes | **Difficulty**: Easy
@@ -217,5 +218,5 @@ To finish all remaining items efficiently, tackle them in this order:
 
 3. **Step 3 (Polish & DevOps — ~25 mins)**:
    - ✅ Create `LICENSE` (`FIX-25`), `LICENSE-MIT`, `LICENSE-APACHE`, and `CONTRIBUTING.md` (`FIX-27`).
-   - Create `.github/workflows/ci.yml` (`FIX-22`).
+   - ✅ Create `.github/workflows/ci.yml` (`FIX-22`).
    - Take and embed UI screenshots (`FIX-04`).

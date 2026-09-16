@@ -252,6 +252,7 @@ To prevent numerical instabilities from silently propagating through multi-node 
 
 ```
 AeroMESH/
+├── .github/                      # GitHub Actions CI/CD workflows
 ├── Cargo.toml                    # Cargo workspace definition (2021 edition)
 ├── BENCHMARKS.md                 # Latency, memory compression, and wire throughput benchmarks
 ├── CONTRIBUTING.md               # Development setup, testing, and contribution guidelines
