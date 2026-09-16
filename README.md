@@ -31,6 +31,7 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 - [HTTP API & Web Interface](#http-api--web-interface)
   - [API Endpoints](#api-endpoints)
   - [FastAPI Web UI Gateway Architecture](#fastapi-web-ui-gateway-architecture)
+- [Conversation Persistence and Stateless Inference](#conversation-persistence-and-stateless-inference)
 - [Troubleshooting & Operational Notes](#troubleshooting--operational-notes)
 - [License](#license)
 
@@ -649,6 +650,37 @@ For full technical specifications, hop-by-hop header filtering rules, and SSE li
 - **Live Cluster Topology HUD**: Interactive modal displaying active worker nodes, RTT latencies, layer distribution, and wire transfer statistics.
 - **Context-Aware Abort Button (`FIX-19`)**: Send button toggles dynamically to a glowing red Stop button during generation, triggering immediate `AbortController` cancellation.
 - **Session Controls**: Includes manual KV cache synchronization buttons and Markdown chat export.
+
+---
+
+## Conversation Persistence and Stateless Inference
+
+AeroMESH follows the same runtime model as local LLM engines such as `llama-server`, `vLLM`, and Ollama: the inference engine is stateless with respect to durable conversation history.
+
+The core AeroMESH engine does not write conversation transcripts, session logs, or KV-cache state to disk by default.
+
+### What is persisted?
+- **Model weights**: Stored as GGUF files on local NVMe storage and memory-mapped during execution. Model weights are persistent file artifacts.
+
+### What is not persisted?
+- **Active KV cache state**: Temporary inference context held in RAM/VRAM during active generation.
+- **Pipeline session state**: In-memory activation frames and sequence states synchronized between coordinator and worker.
+- **Chat history**: The core engine contains no database layer. Transcripts are held in memory during inference.
+
+### Session IDs are not durable conversation IDs
+AeroMESH uses `session_id` and `sequence_id` values in the binary wire protocol to coordinate pipeline execution and match request/response frames across network latency. These values are ephemeral coordination tokens, not database primary keys.
+
+### Multi-turn behavior
+Multi-turn conversations are supported by resending prior message history as context (`messages: [...]`), which is the standard approach across OpenAI-compatible servers.
+
+### Where persistence belongs
+If conversation persistence is desired, it is handled at the application layer:
+- **Browser-Side Storage**: The AeroMESH web UI stores chat sessions locally in browser `localStorage` (`aeromesh_conversations_v2`), surviving page reloads without touching the server disk.
+- **Markdown Export**: Users can export full chat transcripts to Markdown via the web UI.
+- **Privacy Defaults**: Not writing prompts or completions to server disk protects user privacy and complies with zero-trace edge policies.
+
+For full technical specifications, see the architectural policy document:  
+👉 [`docs/architecture/stateless-conversation-policy.md`](docs/architecture/stateless-conversation-policy.md)
 
 ---
 
