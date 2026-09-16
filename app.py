@@ -70,10 +70,11 @@ PORT = AEROMESH_UI_PORT
 AEROMESH_API_KEY = os.getenv("AEROMESH_API_KEY", "")
 GATEWAY_API_KEY = os.getenv("AEROMESH_GATEWAY_API_KEY", "")
 
-if AEROMESH_UI_HOST == "0.0.0.0":
+if AEROMESH_UI_HOST not in {"127.0.0.1", "::1", "localhost"}:
     logger.warning(
-        "AeroMESH gateway is binding to all network interfaces (0.0.0.0). "
-        "This is intended for local development and trusted tailnets only."
+        "AeroMESH gateway is binding to non-loopback interface (%s). "
+        "Ensure this interface is protected by Tailscale WireGuard or a trusted firewall (FIX-23).",
+        AEROMESH_UI_HOST,
     )
 
 # Hop-by-hop headers that must not be forwarded by a proxy

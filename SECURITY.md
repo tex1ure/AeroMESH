@@ -107,3 +107,25 @@ When deploying across multiple physical machines (e.g., Laptop A as Coordinator,
    tailscale ping <worker-tailscale-ip>
    cargo run --bin aeromesh -- probe <worker-tailscale-ip>:50052
    ```
+
+---
+
+## 5. Transport Security & TLS Termination Policy (FIX-23)
+
+AeroMESH explicitly delegates cryptographic transport security to the network and operating system layers:
+
+### A. Localhost HTTP Traffic (Ports 7860 & 8080)
+- **Zero TLS Requirement**: Communication between the local web browser, the FastAPI gateway (`:7860`), and the Axum engine (`:8080`) is plain HTTP.
+- **Kernel Process Boundary**: Packets on `127.0.0.1` / `::1` never leave the local host network stack and cannot be intercepted by remote network peers.
+- **Local Origin Isolation**: Axum restricts CORS strictly to `127.0.0.1:7860` (`FIX-11`), preventing cross-origin browser script attacks.
+
+### B. Inter-Node Cluster Traffic (Port 50052)
+- **Layer 3 WireGuard Encryption**: All cross-machine traffic (activation vectors, token streams, handshake frames) must be routed over Tailscale.
+- **Noise Protocol Primitives**: Tailscale provides ChaCha20-Poly1305 authenticated encryption with ephemeral key exchanges, eliminating the need for application-layer TLS certificate management.
+
+### C. Edge TLS Termination for Public Access
+AeroMESH core binaries do not manage X.509 certificates, Let's Encrypt ACME renewal, or HTTPS listeners. If public or tailnet-wide HTTPS is required, terminate TLS externally:
+- **Tailscale Serve**: `tailscale serve https / http://127.0.0.1:7860` (provides automated Let's Encrypt certificates for your tailnet).
+- **Reverse Proxy**: Deploy Caddy or Nginx in front of port 7860 with `proxy_buffering off` to preserve unbuffered SSE token streaming.
+
+For full architectural specifications, see [`docs/architecture/tls-transport-security-policy.md`](docs/architecture/tls-transport-security-policy.md).

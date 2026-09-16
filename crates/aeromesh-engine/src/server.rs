@@ -28,7 +28,7 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use tower::{buffer::BufferLayer, limit::RateLimitLayer, ServiceBuilder};
 use tower_http::cors::{Any, CorsLayer};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::pipeline::{CoordinatorStatus, PipelineCoordinatorClient};
 
@@ -475,6 +475,12 @@ impl PipelineHttpServer {
             .with_state(self.state.clone());
 
         let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+        if !addr.ip().is_loopback() {
+            warn!(
+                addr = %addr,
+                "⚠️ AeroMesh engine API is binding to a non-loopback interface. Ensure this interface is protected by Tailscale WireGuard or a trusted firewall (FIX-23)."
+            );
+        }
         info!(addr = %addr, "🌐 AeroMesh OpenAI-Compatible SSE API Server Listening");
 
         let listener = tokio::net::TcpListener::bind(addr).await?;

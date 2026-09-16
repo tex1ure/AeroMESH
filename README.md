@@ -32,6 +32,7 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
   - [API Endpoints](#api-endpoints)
   - [FastAPI Web UI Gateway Architecture](#fastapi-web-ui-gateway-architecture)
 - [Conversation Persistence and Stateless Inference](#conversation-persistence-and-stateless-inference)
+- [TLS, HTTPS, and Transport Security](#tls-https-and-transport-security)
 - [Troubleshooting & Operational Notes](#troubleshooting--operational-notes)
 - [License](#license)
 
@@ -681,6 +682,34 @@ If conversation persistence is desired, it is handled at the application layer:
 
 For full technical specifications, see the architectural policy document:  
 👉 [`docs/architecture/stateless-conversation-policy.md`](docs/architecture/stateless-conversation-policy.md)
+
+---
+
+## TLS, HTTPS, and Transport Security
+
+AeroMESH does not require application-level TLS certificates for local HTTP traffic.
+
+The web interface runs locally on:
+```text
+http://127.0.0.1:7860
+```
+and the Rust Axum engine API runs on:
+```text
+http://127.0.0.1:8080
+```
+
+Because the browser, FastAPI gateway, and Axum engine execute on the same machine during normal operations, traffic is confined to the operating system loopback interface (`127.0.0.1`). Kernel process boundaries isolate this communication from external network eavesdropping without the complexity of managing local X.509 certificate authorities.
+
+### Inter-Node Encryption via Tailscale WireGuard
+All inter-node cluster traffic (activation frames, token responses, and health telemetry on port `50052`) is routed over **Tailscale**. Tailscale provides Layer 3 **WireGuard encryption** (ChaCha20-Poly1305 with Curve25519 key exchange), ensuring point-to-point cryptographic privacy across WiFi, mobile hotspots, and untrusted WAN links.
+
+### Public & Production HTTPS Exposure
+AeroMESH intentionally does not manage TLS certificates inside the core Rust engine. If external or enterprise HTTPS access is required:
+- **Tailscale Serve**: Run `tailscale serve https / http://127.0.0.1:7860` for automated Let's Encrypt certificates within your private tailnet.
+- **Edge Reverse Proxy**: Terminate TLS at Caddy or Nginx with `proxy_buffering off` to preserve unbuffered token streaming.
+
+For full architectural specifications, see:  
+👉 [`docs/architecture/tls-transport-security-policy.md`](docs/architecture/tls-transport-security-policy.md)
 
 ---
 
