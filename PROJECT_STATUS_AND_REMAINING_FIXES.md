@@ -92,7 +92,7 @@ All documentation, demo battlecards, API specifications, licensing files, and UI
 
 These items were evaluated during the ruthless review and determined to be **correct architectural decisions for the scope of this project** (do not rewrite):
 
-- **FIX-16 (FastAPI Proxy Gateway)**: Adds a localhost hop between the browser and Axum, but serves static assets, provides loopback proxying, and enables rapid Python prototyping. Documented as intended architecture.
+- **FIX-16 (FastAPI Proxy Gateway)**: Fully documented and hardened intended architecture ([`docs/architecture/fastapi-proxy-gateway.md`](docs/architecture/fastapi-proxy-gateway.md)). Standardized environment configuration (`AEROMESH_UI_HOST`, `AEROMESH_UI_PORT`, `AEROMESH_BACKEND_URL`), persistent `httpx.AsyncClient` lifespan, `/health` (liveness) and `/ready` (end-to-end readiness) probes, hop-by-hop header stripping, unbuffered SSE token streaming, and dynamic GGUF offline fallback. Validated with 9 automated integration tests in [`tests/test_fastapi_gateway.py`](tests/test_fastapi_gateway.py).
 - **FIX-20 (Conversation Persistence)**: Local LLM engines (like llama.cpp server and Ollama) operate statelessly in memory. Disk persistence is not needed for the core distributed inference engine.
 - **FIX-21 (`pipeline.rs` Refactoring)**: Contains both coordinator client and worker service (~900 lines). Fully tested and stable; refactoring into multiple files is deferred to post-demo maintenance.
 - **FIX-23 (HTTP TLS Termination)**: Inter-node traffic is encrypted at Layer 3 via Tailscale WireGuard. Localhost traffic (7860/8080) does not require TLS certificates.

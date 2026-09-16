@@ -192,7 +192,7 @@ During the ruthless review, the following 8 items were carefully evaluated. They
 
 | Item ID | Topic | Why It Is Left As-Is |
 |---|---|---|
-| **FIX-16** | **FastAPI Proxy Layer** | FastAPI on port 7860 serves the static HTML/CSS/JS frontend and proxies API requests to Axum on port 8080. This cleanly decouples the frontend from the Rust engine and allows quick Python scripting without recompiling Rust. |
+| **FIX-16** | **FastAPI Proxy Gateway** | Documented and hardened intentional architecture ([`docs/architecture/fastapi-proxy-gateway.md`](docs/architecture/fastapi-proxy-gateway.md)). FastAPI on port 7860 serves the static claymorphic frontend, provides browser single-origin isolation, injects Bearer credentials, handles unbuffered SSE token streaming, and provides graceful offline fallback. Validated by 9 automated tests in [`tests/test_fastapi_gateway.py`](tests/test_fastapi_gateway.py). |
 | **FIX-20** | **Conversation Persistence** | Chat history is kept in memory during the browser session, not saved to disk or SQLite. Local inference engines (like llama.cpp server and Ollama) are intentionally stateless. |
 | **FIX-21** | **`pipeline.rs` Modularity** | `pipeline.rs` contains both coordinator logic and worker service (~900 lines). It works reliably and is covered by unit tests; refactoring into multiple files before a demo introduces unnecessary regression risk. |
 | **FIX-23** | **HTTP TLS Termination** | Traffic between laptops is already encrypted at the network layer via Tailscale WireGuard. Localhost traffic (7860/8080) does not require HTTPS certificates. |
