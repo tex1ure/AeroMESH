@@ -18,8 +18,8 @@
   let clusterState = 'offline';
   let lastClusterPayload = null;
 
-  let maxTokens = 256;
-  const tokenSteps = [128, 256, 512, 1024, 2048];
+  let maxTokens = 1024;
+  const tokenSteps = [256, 512, 1024, 2048, 4096];
   let enableReasoning = true;
   let clearKvOnSend = false;
 
@@ -538,6 +538,13 @@
     const thinkStart = cleanText.indexOf('<think>');
     
     if (thinkStart === -1) {
+      // Self-healing: if </think> is present without <think>, everything before </think> was reasoning!
+      const thinkEnd = cleanText.indexOf('</think>');
+      if (thinkEnd !== -1) {
+        let thinkText = cleanText.substring(0, thinkEnd).trim();
+        let answerText = cleanText.substring(thinkEnd + 8).replace(/<\/think>/gi, '').trim();
+        return { thinkText, answerText, isStillThinking: false };
+      }
       return { thinkText: null, answerText: cleanText, isStillThinking: false };
     }
 
@@ -548,7 +555,7 @@
     }
 
     let thinkText = cleanText.substring(thinkStart + 7, thinkEnd).replace(/<think>/gi, '').trim();
-    let answerText = cleanText.substring(thinkEnd + 8).trim();
+    let answerText = cleanText.substring(thinkEnd + 8).replace(/<\/think>/gi, '').trim();
     return { thinkText, answerText, isStillThinking: false };
   }
 

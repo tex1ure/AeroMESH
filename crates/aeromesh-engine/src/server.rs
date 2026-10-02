@@ -762,19 +762,34 @@ async fn handle_chat_abort() -> Json<serde_json::Value> {
     }))
 }
 
-fn format_chat_prompt(messages: &[ChatMessage]) -> String {
+fn format_chat_prompt(messages: &[ChatMessage], model_name: &str) -> String {
     if messages.is_empty() {
         return String::new();
     }
 
+    let model_lower = model_name.to_lowercase();
+    let is_reasoning = model_lower.contains("ds")
+        || model_lower.contains("deepseek")
+        || model_lower.contains("r1");
+
     let mut prompt = String::new();
-    let has_system = messages.iter().any(|m| m.role.eq_ignore_ascii_case("system"));
-    if !has_system {
-        prompt.push_str("<|im_start|>system\nYou are a helpful, intelligent AI assistant.<|im_end|>\n");
+
+    // DeepSeek-R1 official specification: DO NOT inject a generic system prompt.
+    // Standard models (like Qwen test.gguf) benefit from standard system prompt.
+    if !is_reasoning {
+        let has_system = messages.iter().any(|m| m.role.eq_ignore_ascii_case("system"));
+        if !has_system {
+            prompt.push_str("<|im_start|>system\nYou are a helpful, intelligent AI assistant.<|im_end|>\n");
+        }
     }
 
     for msg in messages {
         let role = msg.role.trim().to_lowercase();
+        // Skip system message for reasoning models if present
+        if is_reasoning && role == "system" {
+            continue;
+        }
+
         // Sanitize content: strip accidental raw control tokens to prevent prompt structure poisoning
         let mut content = msg.content.trim().to_string();
         for control_tag in &["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|eot_id|>", "</s>"] {
@@ -785,7 +800,13 @@ fn format_chat_prompt(messages: &[ChatMessage]) -> String {
             prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, clean_content));
         }
     }
-    prompt.push_str("<|im_start|>assistant\n");
+
+    if is_reasoning {
+        prompt.push_str("<|im_start|>assistant\n<think>\n");
+    } else {
+        prompt.push_str("<|im_start|>assistant\n");
+    }
+
     prompt
 }
 
@@ -809,19 +830,6 @@ async fn handle_chat_completions(
     if let Err(err_resp) = req.validate() {
         return err_resp.into_response();
     }
-
-    let is_streaming = req.stream.unwrap_or(true);
-    let prompt = format_chat_prompt(&req.messages);
-
-    let max_tokens = req.max_tokens.unwrap_or(256);
-    let temp = req.temperature.unwrap_or(0.7);
-    let top_p = req.top_p.unwrap_or(0.9);
-    let session_id = req.session_id.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    });
 
     // Auto-switch model if request specifies a different model
     if let Some(ref target_model) = req.model {
@@ -853,6 +861,24 @@ async fn handle_chat_completions(
             }
         }
     }
+
+    let active_model = state.model_name.lock().await.clone();
+    let is_reasoning = active_model.to_lowercase().contains("ds")
+        || active_model.to_lowercase().contains("deepseek")
+        || active_model.to_lowercase().contains("r1");
+
+    let is_streaming = req.stream.unwrap_or(true);
+    let prompt = format_chat_prompt(&req.messages, &active_model);
+
+    let max_tokens = req.max_tokens.unwrap_or(if is_reasoning { 2048 } else { 512 });
+    let temp = req.temperature.unwrap_or(if is_reasoning { 0.6 } else { 0.7 });
+    let top_p = req.top_p.unwrap_or(if is_reasoning { 0.95 } else { 0.9 });
+    let session_id = req.session_id.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    });
 
     // Readiness check: ensure model is fully loaded and ready before generation
     {
@@ -892,6 +918,9 @@ async fn handle_chat_completions(
         let state_clone = state.clone();
 
         tokio::spawn(async move {
+            if is_reasoning {
+                let _ = token_tx.send(b"<think>\n".to_vec()).await;
+            }
             let mut client = state_clone.coordinator.lock().await;
             if let Err(e) = client
                 .generate_pipeline(&prompt, max_tokens, temp, top_p, session_id, Some(token_tx))
@@ -901,7 +930,7 @@ async fn handle_chat_completions(
             }
         });
 
-        let model_name = state.model_name.lock().await.clone();
+        let model_name = active_model.clone();
         let stream = ReceiverStream::new(token_rx);
 
         let mut accumulator = Utf8StreamAccumulator::new();
@@ -930,13 +959,16 @@ async fn handle_chat_completions(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
-        let current_model = state.model_name.lock().await.clone();
+        let current_model = active_model.clone();
         let mut client = state.coordinator.lock().await;
         match client
             .generate_pipeline(&prompt, max_tokens, temp, top_p, session_id, None)
             .await
         {
-            Ok((generated_text, _metrics)) => {
+            Ok((mut generated_text, _metrics)) => {
+                if is_reasoning && !generated_text.starts_with("<think>") {
+                    generated_text = format!("<think>\n{}", generated_text);
+                }
                 let resp = ChatCompletionResponse {
                     id: format!("chatcmpl-{}", session_id),
                     object: "chat.completion".to_string(),

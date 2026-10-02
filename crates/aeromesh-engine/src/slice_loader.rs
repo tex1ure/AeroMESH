@@ -508,12 +508,26 @@ impl LlamaPipelineInstance {
         let sparams = unsafe { llama_sampler_chain_default_params() };
         let sampler = unsafe { llama_sampler_chain_init(sparams) };
         unsafe {
-            llama_sampler_chain_add(sampler, llama_sampler_init_penalties(512, 1.15, 0.20, 0.15));
-            llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
-            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1));
-            llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
-            llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7));
-            llama_sampler_chain_add(sampler, llama_sampler_init_dist(42));
+            let model_path_str = model_path.to_string_lossy().to_lowercase();
+            let is_reasoning_model = model_path_str.contains("ds")
+                || model_path_str.contains("deepseek")
+                || model_path_str.contains("r1");
+
+            if is_reasoning_model {
+                // Official DeepSeek-R1 specifications: Repetition penalty MUST be 1.0 (disabled)
+                // with temp 0.6 and top_p 0.95. Penalizing reasoning tokens destroys the CoT chain
+                // and causes vocabulary collapse into rare Unicode/Chinese characters.
+                llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
+                llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95, 1));
+                llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.6));
+                llama_sampler_chain_add(sampler, llama_sampler_init_dist(u32::MAX));
+            } else {
+                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, 1.05, 0.0, 0.0));
+                llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
+                llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1));
+                llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7));
+                llama_sampler_chain_add(sampler, llama_sampler_init_dist(u32::MAX));
+            }
         }
 
         info!(
