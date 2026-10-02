@@ -767,11 +767,6 @@ fn format_chat_prompt(messages: &[ChatMessage]) -> String {
         return String::new();
     }
 
-    // If message is already pre-formatted with ChatML or instruct tokens, pass directly
-    if messages.len() == 1 && (messages[0].content.contains("<|im_start|>") || messages[0].content.contains("<|user|>") || messages[0].content.contains("[INST]")) {
-        return messages[0].content.clone();
-    }
-
     let mut prompt = String::new();
     let has_system = messages.iter().any(|m| m.role.eq_ignore_ascii_case("system"));
     if !has_system {
@@ -780,8 +775,15 @@ fn format_chat_prompt(messages: &[ChatMessage]) -> String {
 
     for msg in messages {
         let role = msg.role.trim().to_lowercase();
-        let content = msg.content.trim();
-        prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, content));
+        // Sanitize content: strip accidental raw control tokens to prevent prompt structure poisoning
+        let mut content = msg.content.trim().to_string();
+        for control_tag in &["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|eot_id|>", "</s>"] {
+            content = content.replace(control_tag, "");
+        }
+        let clean_content = content.trim();
+        if !clean_content.is_empty() {
+            prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, clean_content));
+        }
     }
     prompt.push_str("<|im_start|>assistant\n");
     prompt
