@@ -103,7 +103,7 @@ enum Commands {
         layers: Option<String>,
 
         /// Comma-separated list of remote worker peer addresses (e.g. 100.101.147.24:50052)
-        #[arg(long)]
+        #[arg(long, alias = "workers")]
         peers: Option<String>,
 
         /// Execution mode: "pipeline" (0.0 MB wire transfer) or "rpc" (CUDA RPC backend)
@@ -138,7 +138,7 @@ enum Commands {
         layers: Option<String>,
 
         /// Comma-separated list of remote worker peer addresses (e.g. 100.101.147.24:50052)
-        #[arg(long)]
+        #[arg(long, alias = "workers")]
         peers: Option<String>,
 
         /// Host to bind HTTP API server
