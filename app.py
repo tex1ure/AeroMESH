@@ -306,10 +306,11 @@ async def get_models():
     """
     Fetches active models from the running AeroMesh coordinator.
     If coordinator is offline, dynamically discovers local GGUF models from models/ directory.
+    Excludes internal partitioning slice files (_stage1 / _stage2).
     """
     client = get_backend_client()
     try:
-        resp = await client.get("/v1/models", headers=get_auth_headers(), timeout=1.5)
+        resp = await client.get("/v1/models", headers=get_auth_headers(), timeout=2.5)
         if resp.status_code == 200:
             return resp.json()
     except Exception:
@@ -320,8 +321,11 @@ async def get_models():
     models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
     if os.path.exists(models_dir):
         for f in glob.glob(os.path.join(models_dir, "*.gguf")):
+            name = os.path.basename(f)
+            if name.endswith("_stage1.gguf") or name.endswith("_stage2.gguf"):
+                continue
             local_models.append({
-                "id": os.path.basename(f),
+                "id": name,
                 "object": "model",
                 "owned_by": "local_disk",
                 "path": f
@@ -336,17 +340,31 @@ async def get_models():
 @app.post("/api/model/switch", dependencies=[Depends(verify_gateway_access)])
 @app.post("/v1/models/load", dependencies=[Depends(verify_gateway_access)])
 async def switch_model(payload: dict):
-    """Proxies model switch requests directly to the AeroMesh coordinator."""
+    """
+    Proxies model switch requests directly to the AeroMesh coordinator.
+    Uses 180s timeout to allow large models (e.g. 9GB+) to slice and memory map on disk.
+    """
     client = get_backend_client()
     try:
-        resp = await client.post("/api/model/switch", json=payload, headers=get_auth_headers(), timeout=30.0)
-        return JSONResponse(status_code=resp.status_code, content=resp.json())
+        resp = await client.post("/api/model/switch", json=payload, headers=get_auth_headers(), timeout=180.0)
+        try:
+            content = resp.json()
+        except Exception:
+            content = {"status": "ok" if resp.status_code == 200 else "error", "message": resp.text}
+        return JSONResponse(status_code=resp.status_code, content=content)
     except httpx.ConnectError:
         return JSONResponse(
             status_code=502,
             content={"error": "backend_unreachable", "detail": f"Cannot connect to AeroMESH backend at {AEROMESH_BACKEND_URL}"}
         )
+    except httpx.TimeoutException:
+        logger.warning("Model switch request timed out after 180s")
+        return JSONResponse(
+            status_code=504,
+            content={"status": "error", "message": "Model switch operation timed out (large model slicing / GPU allocation in progress). Check server logs."}
+        )
     except Exception as e:
+        logger.error(f"Error during model switch: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 

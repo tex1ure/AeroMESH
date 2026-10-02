@@ -583,7 +583,7 @@ pub struct SwitchModelRequest {
 async fn handle_switch_model(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SwitchModelRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let model_req = req.model.trim().to_string();
     let model_path = if std::path::Path::new(&model_req).exists() {
         std::path::PathBuf::from(&model_req)
@@ -592,7 +592,10 @@ async fn handle_switch_model(
     } else {
         return Err((
             StatusCode::NOT_FOUND,
-            format!("Model '{}' not found in models/ directory", model_req),
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Model '{}' not found in models/ directory", model_req)
+            })),
         ));
     };
 
@@ -602,7 +605,10 @@ async fn handle_switch_model(
         error!(error = %e, "Failed to switch model");
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to switch model: {}", e),
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Failed to switch model: {}", e)
+            })),
         ));
     }
 
@@ -641,6 +647,9 @@ async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_json::V
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
                 let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if name.ends_with("_stage1.gguf") || name.ends_with("_stage2.gguf") {
+                    continue;
+                }
                 model_list.push(serde_json::json!({
                     "id": name,
                     "object": "model",

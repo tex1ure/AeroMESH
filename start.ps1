@@ -36,9 +36,17 @@ param (
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-# 1. Ensure Compiler & Toolchain PATH and DLL directories
+# 1. Ensure Compiler & Toolchain PATH, Python, and DLL directories
 $binDir = Join-Path $PSScriptRoot "bin"
-$env:PATH = "C:\w64devkit\bin;C:\Users\" + $env:USERNAME + "\.cargo\bin;$binDir;" + $env:PATH
+$userPythonDir = "C:\Users\" + $env:USERNAME + "\AppData\Local\Programs\Python"
+$pyPathAdditions = ""
+if (Test-Path $userPythonDir) {
+    $latestPy = Get-ChildItem -Path $userPythonDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+    if ($latestPy) {
+        $pyPathAdditions = "$($latestPy.FullName);$($latestPy.FullName)\Scripts;"
+    }
+}
+$env:PATH = "C:\w64devkit\bin;C:\Users\" + $env:USERNAME + "\.cargo\bin;$binDir;$pyPathAdditions" + $env:PATH
 
 # Ensure release DLLs are present
 if (Test-Path "target\release") {
@@ -198,8 +206,29 @@ function Get-PythonCommand {
     if (Test-Path ".\.venv\Scripts\python.exe") {
         return (Resolve-Path ".\.venv\Scripts\python.exe").Path
     }
-    if (Get-Command python -ErrorAction SilentlyContinue) {
-        return "python"
+    # Test if python in PATH actually executes (to avoid Microsoft Store dummy shim)
+    try {
+        $null = & python --version 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            return "python"
+        }
+    } catch {}
+
+    # Test py launcher
+    try {
+        $null = & py -3 --version 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            return "py"
+        }
+    } catch {}
+
+    # Check common user install paths
+    $userPy = "C:\Users\" + $env:USERNAME + "\AppData\Local\Programs\Python"
+    if (Test-Path $userPy) {
+        $found = Get-ChildItem -Path $userPy -Filter "python.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($found) {
+            return $found.FullName
+        }
     }
     return ""
 }
