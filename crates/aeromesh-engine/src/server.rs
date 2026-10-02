@@ -676,27 +676,53 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
     let meta = state.cluster_meta.read().unwrap().clone();
 
     let has_workers = !meta.workers.is_empty();
+    let is_connected = if has_workers {
+        if let Ok(coord) = state.coordinator.try_lock() {
+            coord.transport.is_some()
+        } else {
+            true
+        }
+    } else {
+        true
+    };
+
     let transport = if has_workers {
-        "Tailscale Direct WireGuard"
+        if is_connected {
+            "Tailscale Direct WireGuard"
+        } else {
+            "Tailscale WireGuard (Worker Disconnected)"
+        }
     } else {
         "Intra-Host Shared Memory (SHM)"
     };
     let link_badge = if has_workers {
-        "Direct WireGuard (P2P Mesh)"
+        if is_connected {
+            "Direct WireGuard (P2P Mesh)"
+        } else {
+            "Worker Offline"
+        }
     } else {
         "SHM Ring Buffer (Loopback)"
     };
     let per_token_kb = (meta.hidden_dim as f64 + 4.0 + 42.0) / 1024.0;
 
+    let cluster_status = if !has_workers {
+        "STANDALONE"
+    } else if is_connected {
+        "ONLINE"
+    } else {
+        "WORKER_DISCONNECTED"
+    };
+
     Json(serde_json::json!({
-        "state": state_str,
+        "state": if !is_connected && has_workers { "worker_unreachable" } else { state_str },
         "status": "ok",
-        "connected": true,
-        "cluster_status": "ONLINE",
+        "connected": is_connected,
+        "cluster_status": cluster_status,
         "active_model": current_model,
         "transport": transport,
-        "is_direct_wireguard": has_workers,
-        "rtt_ms": if has_workers { 1.14 } else { 0.1 },
+        "is_direct_wireguard": has_workers && is_connected,
+        "rtt_ms": if has_workers && is_connected { 1.14 } else { 0.0 },
         "link_badge": link_badge,
         "per_token_kb": format!("{:.2} KB/tok", per_token_kb),
         "quantization": "Per-Row INT8 Dynamic Scaling (75% Wire Reduction)",

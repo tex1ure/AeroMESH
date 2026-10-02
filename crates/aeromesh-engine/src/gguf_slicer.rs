@@ -25,26 +25,38 @@ pub fn slice_gguf_for_pipeline<P: AsRef<Path>, Q: AsRef<Path>>(
     let stage1_path = out_dir.join(format!("{}_stage1.gguf", stem));
     let stage2_path = out_dir.join(format!("{}_stage2.gguf", stem));
 
-    // If both slice files exist and are newer than source, reuse them
+    // If both slice files exist, match the requested split_at layer boundary, and are newer than source, reuse them
     if stage1_path.exists() && stage2_path.exists() {
-        if let (Ok(src_meta), Ok(s1_meta), Ok(s2_meta)) = (
-            std::fs::metadata(src_path),
-            std::fs::metadata(&stage1_path),
-            std::fs::metadata(&stage2_path),
-        ) {
-            if let (Ok(src_time), Ok(s1_time), Ok(s2_time)) = (
-                src_meta.modified(),
-                s1_meta.modified(),
-                s2_meta.modified(),
-            ) {
-                if s1_time >= src_time && s2_time >= src_time && s1_meta.len() > 1000 && s2_meta.len() > 1000 {
-                    info!(
-                        stage1 = %stage1_path.display(),
-                        stage2 = %stage2_path.display(),
-                        "⚡ Reusing existing partitioned sliced GGUF files"
-                    );
-                    return Ok((stage1_path, stage2_path));
+        if let Ok(loader) = crate::GgufSliceLoader::open(&stage1_path) {
+            if loader.total_layers == split_at {
+                if let (Ok(src_meta), Ok(s1_meta), Ok(s2_meta)) = (
+                    std::fs::metadata(src_path),
+                    std::fs::metadata(&stage1_path),
+                    std::fs::metadata(&stage2_path),
+                ) {
+                    if let (Ok(src_time), Ok(s1_time), Ok(s2_time)) = (
+                        src_meta.modified(),
+                        s1_meta.modified(),
+                        s2_meta.modified(),
+                    ) {
+                        if s1_time >= src_time && s2_time >= src_time && s1_meta.len() > 1000 && s2_meta.len() > 1000 {
+                            info!(
+                                stage1 = %stage1_path.display(),
+                                stage2 = %stage2_path.display(),
+                                split_at = split_at,
+                                "⚡ Reusing existing partitioned sliced GGUF files"
+                            );
+                            return Ok((stage1_path, stage2_path));
+                        }
+                    }
                 }
+            } else {
+                info!(
+                    stage1 = %stage1_path.display(),
+                    cached_split = loader.total_layers,
+                    requested_split = split_at,
+                    "🔄 Sliced model cache invalidated: layer split mismatch. Re-slicing GGUF..."
+                );
             }
         }
     }

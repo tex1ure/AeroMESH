@@ -42,7 +42,9 @@ $env:PATH = "C:\w64devkit\bin;C:\Users\" + $env:USERNAME + "\.cargo\bin;$binDir;
 
 # Ensure release DLLs are present
 if (Test-Path "target\release") {
-    Get-ChildItem -Path "bin\*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "target\release" -Force -ErrorAction SilentlyContinue
+    try {
+        Get-ChildItem -Path "bin\*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "target\release" -Force -ErrorAction SilentlyContinue
+    } catch {}
 }
 
 function Initialize-AeroMeshSecrets {

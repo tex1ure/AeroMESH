@@ -845,7 +845,19 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
             }
         }
 
-        if !transport_ok && self.transport.is_none() {
+        if !transport_ok {
+            if !self.worker_addrs.is_empty() {
+                let err_msg = format!(
+                    "Stage 2 Worker node ({:?}) is disconnected or unreachable. Ensure 'aeromesh worker' is running on the worker machine.",
+                    self.worker_addrs
+                );
+                tracing::error!("{}", err_msg);
+                if let Some(ref tx) = token_tx {
+                    let _ = tx.send(err_msg.as_bytes().to_vec()).await;
+                }
+                bail!(err_msg);
+            }
+
             let inst = self.get_instance_mut()?;
             first_token_id = inst.sample_next_token(0.7, 0.9, 0)?;
             is_first_eos = inst.is_eog(first_token_id);
@@ -919,6 +931,18 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 }
 
                 if !decode_transport_ok {
+                    if !self.worker_addrs.is_empty() {
+                        let err_msg = format!(
+                            "Connection to Stage 2 Worker ({:?}) lost during token generation (step {}).",
+                            self.worker_addrs, seq_id
+                        );
+                        tracing::error!("{}", err_msg);
+                        if let Some(ref tx) = token_tx {
+                            let _ = tx.send(err_msg.as_bytes().to_vec()).await;
+                        }
+                        bail!(err_msg);
+                    }
+
                     let inst = self.get_instance_mut()?;
                     next_token_id = inst.sample_next_token(0.7, 0.9, seq_id as u32)?;
                     let token_piece_bytes = inst.token_to_piece(next_token_id).unwrap_or_default();

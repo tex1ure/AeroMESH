@@ -239,15 +239,19 @@
       elements.clusterStatusLabel.style.color = 'var(--accent-mint)';
 
       // 1. Sidebar dynamic stats (NO "cargo run -- serve" hint when online)
-      const isDirectWg = workers.length > 0 || data.is_direct_wireguard || (data.transport && data.transport.includes('WireGuard'));
+      const isDirectWg = data.connected && (data.is_direct_wireguard || (data.transport && data.transport.includes('WireGuard')));
+      const workerDisconnected = workers.length > 0 && data.connected === false;
+
       elements.clusterStatsDynamic.innerHTML = `
         <div class="cluster-stats-row">
           <span>Status:</span>
-          <span style="color: var(--accent-mint); font-weight: 600;">${state === 'online_generating' ? '⚡ Inferring (2 Nodes)' : 'Active (Idle)'}</span>
+          <span style="color: ${workerDisconnected ? 'var(--accent-orange)' : 'var(--accent-mint)'}; font-weight: 600;">
+            ${workerDisconnected ? '⚠️ Worker Disconnected' : (state === 'online_generating' ? '⚡ Inferring (2 Nodes)' : 'Active (Idle)')}
+          </span>
         </div>
         <div class="cluster-stats-row">
           <span>Topology:</span>
-          <span class="stat-highlight" style="${isDirectWg ? 'background: rgba(16, 185, 129, 0.15); color: var(--accent-mint);' : ''}">${isDirectWg ? '2 Nodes (Direct P2P)' : '1 Node (Local)'}</span>
+          <span class="stat-highlight" style="${isDirectWg ? 'background: rgba(16, 185, 129, 0.15); color: var(--accent-mint);' : ''}">${isDirectWg ? '2 Nodes (Direct P2P)' : (workerDisconnected ? 'Worker Offline' : '1 Node (Local)')}</span>
         </div>
         <div class="cluster-stats-row">
           <span>Coordinator:</span>
@@ -255,7 +259,7 @@
         </div>
         <div class="cluster-stats-row">
           <span>Worker:</span>
-          <span class="stat-highlight">${workers.length > 0 ? workers.join(', ') : (isDirectWg ? '100.66.49.50:50052' : 'Direct Pipeline')}</span>
+          <span class="stat-highlight" style="${workerDisconnected ? 'color: var(--accent-orange);' : ''}">${workers.length > 0 ? workers.join(', ') : (isDirectWg ? '100.66.49.50:50052' : 'Direct Pipeline')}</span>
         </div>
         <div class="cluster-stats-row">
           <span>Wire Payload:</span>
@@ -264,15 +268,22 @@
       `;
 
       // 2. Top-bar pill
-      elements.topStatusDot.classList.remove('offline');
-      if (state === 'online_generating') {
-        elements.topStatusDot.classList.add('generating');
-        elements.topStatusText.textContent = isDirectWg ? 'Cluster Inferring (2 Nodes)' : 'Cluster Inferring';
-      } else {
+      if (workerDisconnected) {
+        elements.topStatusDot.classList.add('offline');
         elements.topStatusDot.classList.remove('generating');
-        elements.topStatusText.textContent = isDirectWg ? '2 Nodes Connected (Direct WG)' : 'Pipeline Connected';
+        elements.topStatusText.textContent = 'Worker Disconnected';
+        elements.topStatusText.parentElement.style.color = 'var(--accent-orange)';
+      } else {
+        elements.topStatusDot.classList.remove('offline');
+        if (state === 'online_generating') {
+          elements.topStatusDot.classList.add('generating');
+          elements.topStatusText.textContent = isDirectWg ? 'Cluster Inferring (2 Nodes)' : 'Cluster Inferring';
+        } else {
+          elements.topStatusDot.classList.remove('generating');
+          elements.topStatusText.textContent = isDirectWg ? '2 Nodes Connected (Direct WG)' : 'Pipeline Connected (Local)';
+        }
+        elements.topStatusText.parentElement.style.color = 'var(--accent-mint)';
       }
-      elements.topStatusText.parentElement.style.color = 'var(--accent-mint)';
 
       // 3. Telemetry Modal / HUD
       elements.modalStatusDot.classList.remove('offline');
