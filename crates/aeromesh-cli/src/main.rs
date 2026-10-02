@@ -75,6 +75,10 @@ enum Commands {
         #[arg(long, default_value_t = 50052)]
         port: u16,
 
+        /// Listen address alias (e.g. "0.0.0.0:50052" or ":50052")
+        #[arg(long)]
+        listen: Option<String>,
+
         /// Path to local GGUF model file for Zero-Weight Pipeline mode
         #[arg(long)]
         model: Option<PathBuf>,
@@ -334,14 +338,40 @@ async fn main() -> Result<()> {
             println!("========================================================\n");
         }
 
-        Commands::Worker { host, port, model, layers, cache } => {
+        Commands::Worker { host, port, listen, model, layers, cache } => {
+            let (final_host, final_port) = if let Some(ref l) = listen {
+                if let Ok(addr) = l.parse::<SocketAddr>() {
+                    (addr.ip().to_string(), addr.port())
+                } else if let Some((h, p)) = l.split_once(':') {
+                    let p_num = p.parse::<u16>().unwrap_or(port);
+                    let h_str = if h.is_empty() { "0.0.0.0" } else { h };
+                    (h_str.to_string(), p_num)
+                } else if let Ok(p_num) = l.parse::<u16>() {
+                    ("0.0.0.0".to_string(), p_num)
+                } else {
+                    (host, port)
+                }
+            } else {
+                (host, port)
+            };
+
             if let Some(m_path) = model {
                 // Native Zero-Weight Pipeline Worker Mode
                 let resolved_path = resolve_model_path(Some(&m_path))?;
                 let loader = GgufSliceLoader::open(&resolved_path)?;
                 let total_layers = loader.total_layers;
 
-                let slice_config = if let Some(l_str) = layers {
+                let is_pre_sliced = resolved_path.to_string_lossy().contains("_stage2");
+
+                let slice_config = if is_pre_sliced {
+                    info!(
+                        model = %resolved_path.display(),
+                        layers = total_layers,
+                        "⚡ Pre-sliced Stage 2 GGUF detected. Automatically mapping to all local slice layers (0..={})",
+                        total_layers.saturating_sub(1)
+                    );
+                    LayerSliceConfig::new(0, total_layers.saturating_sub(1), total_layers)?
+                } else if let Some(l_str) = layers {
                     parse_layer_range(&l_str, total_layers)?
                 } else {
                     // Default to second half
@@ -350,7 +380,7 @@ async fn main() -> Result<()> {
                 };
 
                 let service = PipelineWorkerService::new(&resolved_path, slice_config, 99)?;
-                service.run_server(&host, port).await?;
+                service.run_server(&final_host, final_port).await?;
             } else {
                 // Auto-prime local disk cache from SSD if model is present on disk
                 if cache {
@@ -363,14 +393,14 @@ async fn main() -> Result<()> {
                 }
 
                 // Supervised CUDA RPC Backend Worker
-                info!("🛡️ Starting AeroMesh Worker Daemon on {}:{} (cache: {})", host, port, cache);
+                info!("🛡️ Starting AeroMesh Worker Daemon on {}:{} (cache: {})", final_host, final_port, cache);
                 let mut supervisor = EngineSupervisor::new(&current_dir)?;
-                supervisor.spawn_rpc_worker(&host, port, cache)?;
+                supervisor.spawn_rpc_worker(&final_host, final_port, cache)?;
 
                 println!("\n========================================================");
                 println!("   AEROMESH CUDA RPC WORKER RUNNING");
                 println!("========================================================");
-                println!("  Bound Address:  {}:{}", host, port);
+                println!("  Bound Address:  {}:{}", final_host, final_port);
                 println!("  Protection:     Windows Job Object Active (Leak-Proof VRAM)");
                 println!("  Tensor Caching: {}", if cache { "✅ ENABLED (Zero-Network reloads from disk cache)" } else { "❌ DISABLED" });
                 println!("  Status:         Listening for Coordinator Tensor Offloads...");
@@ -697,24 +727,30 @@ fn parse_layer_range(s: &str, total_layers: usize) -> Result<LayerSliceConfig> {
         return LayerSliceConfig::new(mid, total_layers.saturating_sub(1), total_layers);
     }
 
-    if let Some((start_str, end_str)) = s.split_once("..=") {
+    let (start, end) = if let Some((start_str, end_str)) = s.split_once("..=") {
         let start: usize = start_str.trim().parse()?;
         let end: usize = end_str.trim().parse()?;
-        LayerSliceConfig::new(start, end, total_layers)
+        (start, end)
     } else if let Some((start_str, end_str)) = s.split_once("..") {
         let start: usize = start_str.trim().parse()?;
         let end: usize = end_str.trim().parse()?;
-        let inclusive_end = if end >= total_layers {
-            total_layers.saturating_sub(1)
-        } else if end > start {
+        let inclusive_end = if end > start {
             end - 1
         } else {
             start
         };
-        LayerSliceConfig::new(start, inclusive_end, total_layers)
+        (start, inclusive_end)
     } else if let Ok(single) = s.parse::<usize>() {
-        LayerSliceConfig::new(single, single, total_layers)
+        (single, single)
     } else {
         anyhow::bail!("Invalid layer range format: '{}'. Expected e.g. '16..32' or '16..=31'", s);
+    };
+
+    // Auto-map if user supplied global model coordinates (e.g. 24..48) for an already sliced stage2 file (0..24)
+    if start >= total_layers {
+        return LayerSliceConfig::new(0, total_layers.saturating_sub(1), total_layers);
     }
+
+    let clamped_end = end.min(total_layers.saturating_sub(1));
+    LayerSliceConfig::new(start, clamped_end, total_layers)
 }
