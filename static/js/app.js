@@ -976,6 +976,18 @@
             const delta = dataJson.choices?.[0]?.delta?.content || '';
             if (delta) {
               accumulatedText += delta;
+
+              // Immediately truncate and stop if special stop sequences appear
+              let hitStopTag = false;
+              for (const stopTag of ['<|im_end|>', '<|im_start|>', '<|endoftext|>', '<|eot_id|>', '</s>']) {
+                const tagIdx = accumulatedText.indexOf(stopTag);
+                if (tagIdx !== -1) {
+                  accumulatedText = accumulatedText.substring(0, tagIdx);
+                  hitStopTag = true;
+                  break;
+                }
+              }
+
               tokenCount++;
               chat.messages[assistantMessageIndex].content = accumulatedText;
 

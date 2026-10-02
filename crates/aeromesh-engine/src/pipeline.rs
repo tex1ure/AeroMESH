@@ -954,7 +954,14 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                         || token_text.contains("</s>");
                 }
 
-                if is_eos {
+                let is_stop_token = is_eos
+                    || token_text.contains("<|im_end|>")
+                    || token_text.contains("<|im_start|>")
+                    || token_text.contains("<|endoftext|>")
+                    || token_text.contains("<|eot_id|>")
+                    || token_text.contains("</s>");
+
+                if is_stop_token {
                     break;
                 }
 
@@ -962,6 +969,20 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 let _ = std::io::Write::flush(&mut std::io::stdout());
 
                 generated_text.push_str(&token_text);
+
+                // Check if accumulated text contains any stop sequence across chunk boundaries
+                let mut hit_stop = false;
+                for stop_tag in &["<|im_end|>", "<|im_start|>", "<|endoftext|>", "<|eot_id|>", "</s>"] {
+                    if let Some(idx) = generated_text.find(stop_tag) {
+                        generated_text.truncate(idx);
+                        hit_stop = true;
+                        break;
+                    }
+                }
+                if hit_stop {
+                    break;
+                }
+
                 if let Some(ref tx) = token_tx {
                     if tx.send(token_text.as_bytes().to_vec()).await.is_err() {
                         info!("🛑 Client disconnected / aborted during decode. Halting generation loop.");
