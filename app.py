@@ -514,11 +514,11 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("\n========================================================")
-    print("   [+] AEROMESH CLAYMORPHIC CHAT GATEWAY                 ")
+    print("   [+] AEROMESH LIQUID GLASS CHAT GATEWAY                 ")
     print("========================================================")
     print(f"  Web Interface URL:      http://{AEROMESH_UI_HOST}:{AEROMESH_UI_PORT}")
     print(f"  Target Coordinator API: {AEROMESH_BACKEND_URL}")
-    print(f"  Theme:                  Warm Grey & Smoked Orange Claymorphism")
+    print(f"  Theme:                  Liquid Glass & Fluid Topological Mesh")
     print(f"  Dynamic Backend:        ENABLED")
     print("========================================================\n")
     uvicorn.run(app, host=AEROMESH_UI_HOST, port=AEROMESH_UI_PORT)

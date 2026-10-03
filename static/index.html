@@ -6,7 +6,7 @@
   <title>AeroMesh • Distributed LLM Cluster Interface</title>
   
   <!-- Favicon -->
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e58244' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polygon points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>">
+  <link rel="icon" type="image/png" href="/static/img/favicon.png">
 
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
@@ -23,10 +23,13 @@
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 
-  <!-- Custom Luxury Warm Dark Claymorphic CSS -->
-  <link rel="stylesheet" href="/static/css/claymorphic.css">
+  <!-- AeroMESH Liquid Glass Design System -->
+  <link rel="stylesheet" href="/static/css/liquid_glass.css">
 </head>
 <body>
+
+<!-- Interactive Liquid Topological Canvas -->
+<canvas id="liquid-canvas"></canvas>
 
 <div id="app-container">
 
@@ -38,7 +41,7 @@
       <div class="brand-row">
         <div class="brand-badge">
           <div class="brand-icon">
-            <i data-lucide="zap"></i>
+            <img src="/static/img/logo_emblem.png" alt="AeroMESH Logo" class="brand-logo-img">
           </div>
           <div>
             <div class="brand-title">AeroMESH <span class="brand-tag">P2P MESH</span></div>
@@ -142,7 +145,7 @@
         <!-- Hero State (Displayed when chat is empty) -->
         <div id="hero-state">
           <div class="hero-emblem">
-            <i data-lucide="zap" style="width: 34px; height: 34px;"></i>
+            <img src="/static/img/logo_emblem.png" alt="AeroMESH Logo" class="hero-logo-img">
           </div>
           <div>
             <h1 class="hero-title">AeroMESH <span>Cluster</span></h1>
@@ -256,7 +259,7 @@
   <div class="clay-modal">
     <div class="modal-header">
       <div class="modal-title">
-        <i data-lucide="cpu" style="color: var(--accent-orange);"></i>
+        <img src="/static/img/logo_emblem.png" alt="AeroMESH Logo" style="width: 22px; height: 22px; object-fit: contain;">
         <span>AeroMesh Cluster Topology</span>
       </div>
       <button class="modal-close-btn" id="modal-close-btn">
@@ -285,7 +288,8 @@
   </div>
 </div>
 
-<!-- Application Script -->
+<!-- Application Scripts -->
+<script src="/static/js/liquid_mesh.js"></script>
 <script src="/static/js/app.js"></script>
 
 </body>

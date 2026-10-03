@@ -577,7 +577,7 @@
     } else {
       const avatar = document.createElement('div');
       avatar.className = 'message-avatar assistant-avatar';
-      avatar.innerHTML = '<i data-lucide="zap" style="width: 16px; height: 16px;"></i>';
+      avatar.innerHTML = '<img src="/static/img/logo_emblem.png" alt="AeroMESH" class="avatar-logo-img">';
 
       const card = document.createElement('div');
       card.className = 'assistant-card';
@@ -674,7 +674,7 @@
 
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar assistant-avatar';
-    avatar.innerHTML = '<i data-lucide="zap" style="width: 16px; height: 16px;"></i>';
+    avatar.innerHTML = '<img src="/static/img/logo_emblem.png" alt="AeroMESH" class="avatar-logo-img">';
 
     const card = document.createElement('div');
     card.className = 'assistant-card';
@@ -1083,6 +1083,9 @@
   }
 
   function updateSendButtonState(generating) {
+    if (window.setMeshGenerating) {
+      window.setMeshGenerating(generating);
+    }
     if (generating) {
       elements.sendBtn.classList.add('stop-btn-clay');
       elements.sendBtn.title = 'Stop Generation (Esc)';
