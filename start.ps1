@@ -52,7 +52,8 @@ $env:PATH = "C:\w64devkit\bin;C:\Users\" + $env:USERNAME + "\.cargo\bin;$binDir;
 if (Test-Path "target\release") {
     try {
         Get-ChildItem -Path "bin\*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "target\release" -Force -ErrorAction SilentlyContinue
-    } catch {}
+    }
+    catch {}
 }
 
 function Initialize-AeroMeshSecrets {
@@ -103,7 +104,8 @@ function Initialize-AeroMeshSecrets {
             if ($existing -notmatch "AEROMESH_WORKER_SECRET=") {
                 Add-Content -Path $envPath -Value "AEROMESH_WORKER_SECRET=$workerSecret"
             }
-        } else {
+        }
+        else {
             Set-Content -Path $envPath -Value $lines -Encoding UTF8
         }
     }
@@ -141,7 +143,8 @@ function Test-PeerReachable {
         $ok = $iar.AsyncWaitHandle.WaitOne(2000, $false)
         $client.Close()
         return $ok
-    } catch {
+    }
+    catch {
         return $false
     }
 }
@@ -157,7 +160,8 @@ function Wait-ServerReady {
                 Write-Host "  [+] Engine Ready! Model loaded in GPU memory." -ForegroundColor Green
                 return $true
             }
-        } catch {}
+        }
+        catch {}
         Start-Sleep -Milliseconds 600
     }
     return $false
@@ -212,7 +216,8 @@ function Get-PythonCommand {
         if ($LASTEXITCODE -eq 0) {
             return "python"
         }
-    } catch {}
+    }
+    catch {}
 
     # Test py launcher
     try {
@@ -220,7 +225,8 @@ function Get-PythonCommand {
         if ($LASTEXITCODE -eq 0) {
             return "py"
         }
-    } catch {}
+    }
+    catch {}
 
     # Check common user install paths
     $userPy = "C:\Users\" + $env:USERNAME + "\AppData\Local\Programs\Python"
@@ -238,7 +244,8 @@ function Get-TailscaleIPv4 {
         try {
             $ip = (tailscale ip -4 2>$null).Trim()
             if ($ip) { return $ip }
-        } catch {}
+        }
+        catch {}
     }
     return "127.0.0.1"
 }
@@ -347,7 +354,8 @@ if ($Role -eq "worker") {
     $rpcServerExe = Join-Path $PSScriptRoot "bin\ggml-rpc-server.exe"
     if (Test-Path $rpcServerExe) {
         & $rpcServerExe -H 0.0.0.0 -p $workerPort -c
-    } else {
+    }
+    else {
         cargo run --release --bin aeromesh -- worker --port $workerPort --cache
     }
     exit 0
@@ -404,10 +412,12 @@ if ($Role -eq "all") {
         $env:PORT = "7860"
         if ($pythonExe -eq "python") {
             python app.py
-        } else {
+        }
+        else {
             & $pythonExe app.py
         }
-    } finally {
+    }
+    finally {
         Write-Host ""
         Write-Host "Shutting down local cluster mesh..." -ForegroundColor Yellow
         if ($rustProc -and -not $rustProc.HasExited) {
@@ -450,7 +460,8 @@ if ($Role -eq "coordinator") {
         $isPeerReachable = Test-PeerReachable $Peers
         if ($isPeerReachable) {
             $workerStatusStr = "$Peers (✅ ONLINE)"
-        } else {
+        }
+        else {
             $workerStatusStr = "$Peers (⚠️ UNREACHABLE - Check Laptop B / start.ps1 worker)"
         }
     }
@@ -473,7 +484,8 @@ if ($Role -eq "coordinator") {
     }
     if ($Peers -and $isPeerReachable) {
         $serverArgs += @("--rpc", "$Peers")
-    } elseif ($Peers -and -not $isPeerReachable) {
+    }
+    elseif ($Peers -and -not $isPeerReachable) {
         Write-Host "  [-] WARNING: Could not connect to $Peers." -ForegroundColor DarkYellow
         Write-Host "      Starting in high-speed local GPU mode. Run '.\start.ps1 worker' on Laptop B to enable distributed cluster." -ForegroundColor Gray
         Write-Host ""
@@ -494,10 +506,12 @@ if ($Role -eq "coordinator") {
         $env:PORT = "7860"
         if ($pythonExe -eq "python") {
             python app.py
-        } else {
+        }
+        else {
             & $pythonExe app.py
         }
-    } finally {
+    }
+    finally {
         Write-Host ""
         Write-Host "Shutting down coordinator API server..." -ForegroundColor Yellow
         if ($rustProc -and -not $rustProc.HasExited) {
