@@ -8,10 +8,18 @@
 
   // --- STATE MANAGEMENT ---
   const STORAGE_KEY = 'aeromesh_conversations_v2';
+  const MAX_CONCURRENT_CHATS = 2;
   let conversations = [];
   let currentChatId = null;
-  let isGenerating = false;
-  let activeAbortController = null;
+
+  // Active concurrent streaming sessions: Map<chatId, streamState>
+  const activeStreams = new Map();
+  function isAnyChatGenerating() {
+    return activeStreams.size > 0;
+  }
+  function isCurrentChatGenerating() {
+    return activeStreams.has(currentChatId);
+  }
 
   let activeModel = 'Loading...';
   let availableModels = [];
@@ -182,7 +190,7 @@
         let mapped = 'offline';
         if (data.state === 'offline' || data.status === 'offline' || data.connected === false) {
           mapped = 'offline';
-        } else if (data.state === 'online_generating' || (isGenerating && data.connected !== false)) {
+        } else if (data.state === 'online_generating' || (isAnyChatGenerating() && data.connected !== false)) {
           mapped = 'online_generating';
         } else if (
           data.state === 'online_idle' ||
@@ -190,7 +198,7 @@
           data.connected === true ||
           data.cluster_status === 'ONLINE'
         ) {
-          mapped = isGenerating ? 'online_generating' : 'online_idle';
+          mapped = isAnyChatGenerating() ? 'online_generating' : 'online_idle';
         }
         setClusterState(mapped, data);
         return;
@@ -202,7 +210,7 @@
   }
 
   function setClusterState(state, payload = null) {
-    if (isGenerating && state !== 'offline') {
+    if (isAnyChatGenerating() && state !== 'offline') {
       state = 'online_generating';
     }
     clusterState = state;
@@ -427,16 +435,23 @@
   }
 
   function switchChat(chatId) {
-    if (isGenerating && activeAbortController) {
-      activeAbortController.abort();
+    // Detach liveCard reference from old chat so background stream doesn't manipulate wrong DOM
+    if (currentChatId && activeStreams.has(currentChatId)) {
+      const leavingStream = activeStreams.get(currentChatId);
+      leavingStream.liveCard = null;
     }
+
     currentChatId = chatId;
     renderHistoryList();
     renderMessages();
+    updateSendButtonState(activeStreams.has(currentChatId));
   }
 
   function deleteChat(chatId, e) {
     if (e) e.stopPropagation();
+    if (activeStreams.has(chatId)) {
+      stopChatGeneration(chatId);
+    }
     conversations = conversations.filter((c) => c.id !== chatId);
     if (conversations.length === 0) {
       createNewChat();
@@ -449,6 +464,9 @@
 
   function clearAllChats() {
     if (confirm('Clear all conversation history from this browser?')) {
+      for (const [chatId] of activeStreams) {
+        stopChatGeneration(chatId);
+      }
       conversations = [];
       createNewChat();
     }
@@ -485,13 +503,22 @@
     );
 
     filtered.forEach((chat) => {
+      const isChatRunning = activeStreams.has(chat.id);
       const item = document.createElement('div');
-      item.className = `chat-history-item ${chat.id === currentChatId ? 'active' : ''}`;
+      item.className = `chat-history-item ${chat.id === currentChatId ? 'active' : ''} ${isChatRunning ? 'running' : ''}`;
       item.onclick = () => switchChat(chat.id);
 
       const title = document.createElement('div');
       title.className = 'chat-title-text';
       title.textContent = chat.title;
+      item.appendChild(title);
+
+      if (isChatRunning) {
+        const badge = document.createElement('span');
+        badge.className = 'chat-running-badge';
+        badge.innerHTML = '<span class="status-dot generating"></span><span>Running</span>';
+        item.appendChild(badge);
+      }
 
       const actions = document.createElement('div');
       actions.className = 'chat-item-actions';
@@ -503,7 +530,6 @@
       delBtn.onclick = (e) => deleteChat(chat.id, e);
 
       actions.appendChild(delBtn);
-      item.appendChild(title);
       item.appendChild(actions);
 
       elements.historyList.appendChild(item);
@@ -523,8 +549,23 @@
 
     elements.heroState.style.display = 'none';
 
+    const activeStreamInfo = activeStreams.get(currentChatId);
+
     chat.messages.forEach((msg, idx) => {
-      appendMessageElement(msg.role, msg.content, msg.metrics, idx);
+      if (activeStreamInfo && idx === activeStreamInfo.assistantMessageIndex) {
+        // Re-attach live assistant card for currently running stream
+        const liveCard = createLiveAssistantRow();
+        activeStreamInfo.liveCard = liveCard;
+        liveCard.update(activeStreamInfo.accumulatedText, {
+          tokPerSec: activeStreamInfo.liveTps || '18.4',
+          tokenCount: activeStreamInfo.tokenCount,
+          wireMB: activeStreamInfo.wireMB || '0.00',
+          perTokenKB: activeStreamInfo.perTokenKB || '0.0 KB (SHM)',
+          isDistributed: activeStreamInfo.isDistributed || false
+        });
+      } else {
+        appendMessageElement(msg.role, msg.content, msg.metrics, idx);
+      }
     });
 
     scrollToBottom();
@@ -886,13 +927,65 @@
     elements.chatViewport.scrollTop = elements.chatViewport.scrollHeight;
   }
 
+  // --- CONCURRENCY MANAGEMENT & STREAM ABORT ---
+  function showConcurrencyWarning() {
+    let toast = document.getElementById('concurrency-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'concurrency-toast';
+      toast.className = 'concurrency-toast';
+      document.body.appendChild(toast);
+    }
+    toast.innerHTML = `
+      <i data-lucide="alert-triangle"></i>
+      <span><strong>2 chats are currently running in the background</strong>. Please wait for one to finish or stop an ongoing chat.</span>
+    `;
+    if (window.lucide) lucide.createIcons();
+
+    toast.classList.add('show');
+    const capsule = elements.chatInput.closest('.input-capsule');
+    if (capsule) {
+      capsule.classList.add('shake-warning');
+      setTimeout(() => capsule.classList.remove('shake-warning'), 500);
+    }
+
+    if (window._concurrencyToastTimer) clearTimeout(window._concurrencyToastTimer);
+    window._concurrencyToastTimer = setTimeout(() => {
+      toast.classList.remove('show');
+    }, 4500);
+  }
+
+  function stopChatGeneration(chatId) {
+    if (!activeStreams.has(chatId)) return;
+    const stream = activeStreams.get(chatId);
+    if (stream.abortController) {
+      stream.abortController.abort();
+    }
+    activeStreams.delete(chatId);
+    try {
+      fetch('/api/chat/abort', { method: 'POST' }).catch(() => {});
+    } catch (e) {}
+
+    if (chatId === currentChatId) {
+      updateSendButtonState(false);
+    }
+    if (activeStreams.size === 0) {
+      setClusterState('online_idle');
+    }
+    renderHistoryList();
+  }
+
   // --- STREAMING INFERENCE ---
   async function handleSendMessage(promptOverride = null) {
-    if (isGenerating) {
-      if (activeAbortController) {
-        activeAbortController.abort();
-        try { fetch('/api/chat/abort', { method: 'POST' }); } catch (e) {}
-      }
+    // 1. If currently viewed chat is generating, the button acts as "Stop"
+    if (activeStreams.has(currentChatId)) {
+      stopChatGeneration(currentChatId);
+      return;
+    }
+
+    // 2. Concurrency limit: maximum 2 concurrent chat streams
+    if (activeStreams.size >= MAX_CONCURRENT_CHATS) {
+      showConcurrencyWarning();
       return;
     }
 
@@ -917,10 +1010,7 @@
     // Render User Message directly
     appendMessageElement('user', messageText);
 
-    isGenerating = true;
-    updateSendButtonState(true);
-    setClusterState('online_generating');
-
+    const targetChatId = currentChatId;
     const assistantMessageIndex = chat.messages.length;
     chat.messages.push({ role: 'assistant', content: '', metrics: null });
 
@@ -929,8 +1019,8 @@
       content: m.content
     }));
 
-    const numericSessionId = currentChatId
-      ? Math.abs(currentChatId.split('').reduce((acc, char) => ((acc << 5) - acc + char.charCodeAt(0)) | 0, 0)) || 1001
+    const numericSessionId = targetChatId
+      ? Math.abs(targetChatId.split('').reduce((acc, char) => ((acc << 5) - acc + char.charCodeAt(0)) | 0, 0)) || 1001
       : 1001;
 
     const payload = {
@@ -942,13 +1032,29 @@
       reasoning: enableReasoning
     };
 
-    activeAbortController = new AbortController();
-    const startTime = performance.now();
-    let tokenCount = 0;
-    let accumulatedText = '';
-
-    // Create live assistant card once in DOM
+    const abortController = new AbortController();
     const liveCard = createLiveAssistantRow();
+
+    const streamInfo = {
+      chatId: targetChatId,
+      abortController: abortController,
+      reader: null,
+      assistantMessageIndex: assistantMessageIndex,
+      startTime: performance.now(),
+      tokenCount: 0,
+      accumulatedText: '',
+      liveCard: liveCard,
+      messageText: messageText,
+      liveTps: '18.4',
+      wireMB: '0.00',
+      perTokenKB: '0.0 KB (SHM)',
+      isDistributed: false
+    };
+
+    activeStreams.set(targetChatId, streamInfo);
+    updateSendButtonState(true);
+    setClusterState('online_generating');
+    renderHistoryList();
 
     const STOP_SEQUENCES = [
       '<|im_end|>',
@@ -968,7 +1074,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-        signal: activeAbortController.signal
+        signal: abortController.signal
       });
 
       if (!response.ok) {
@@ -976,6 +1082,7 @@
       }
 
       const reader = response.body.getReader();
+      streamInfo.reader = reader;
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
       let streamHalted = false;
@@ -1009,43 +1116,47 @@
           }
 
           if (delta) {
-            accumulatedText += delta;
+            streamInfo.accumulatedText += delta;
 
             // Immediately truncate and stop if special stop sequences appear
             let hitStopTag = false;
             for (const stopTag of STOP_SEQUENCES) {
-              const tagIdx = accumulatedText.indexOf(stopTag);
+              const tagIdx = streamInfo.accumulatedText.indexOf(stopTag);
               if (tagIdx !== -1) {
-                accumulatedText = accumulatedText.substring(0, tagIdx);
+                streamInfo.accumulatedText = streamInfo.accumulatedText.substring(0, tagIdx);
                 hitStopTag = true;
                 break;
               }
             }
 
-            tokenCount++;
-            chat.messages[assistantMessageIndex].content = accumulatedText;
+            streamInfo.tokenCount++;
+            chat.messages[assistantMessageIndex].content = streamInfo.accumulatedText;
 
-            const elapsedSec = (performance.now() - startTime) / 1000;
-            const liveTps = elapsedSec > 0 ? (tokenCount / elapsedSec).toFixed(1) : '18.4';
+            const elapsedSec = (performance.now() - streamInfo.startTime) / 1000;
+            streamInfo.liveTps = elapsedSec > 0 ? (streamInfo.tokenCount / elapsedSec).toFixed(1) : '18.4';
             const promptTokens = Math.max(14, Math.ceil(messageText.length / 3.2));
             const isDistributed = (lastClusterPayload && lastClusterPayload.workers && lastClusterPayload.workers.length > 0) || (lastClusterPayload && lastClusterPayload.is_direct_wireguard);
-            const wireBytes = isDistributed ? (promptTokens * 5166 + tokenCount * 5166) : 0;
-            const wireMB = (wireBytes / (1024 * 1024)).toFixed(2);
-            const perTokenKB = isDistributed ? '5.16 KB/tok' : '0.0 KB (SHM)';
+            streamInfo.isDistributed = isDistributed;
+            const wireBytes = isDistributed ? (promptTokens * 5166 + streamInfo.tokenCount * 5166) : 0;
+            streamInfo.wireMB = (wireBytes / (1024 * 1024)).toFixed(2);
+            streamInfo.perTokenKB = isDistributed ? '5.16 KB/tok' : '0.0 KB (SHM)';
 
-            liveCard.update(accumulatedText, {
-              tokPerSec: liveTps,
-              tokenCount,
-              wireMB,
-              perTokenKB,
-              isDistributed
-            });
+            // Live update DOM only if user is actively viewing THIS chat
+            if (streamInfo.liveCard && currentChatId === targetChatId) {
+              streamInfo.liveCard.update(streamInfo.accumulatedText, {
+                tokPerSec: streamInfo.liveTps,
+                tokenCount: streamInfo.tokenCount,
+                wireMB: streamInfo.wireMB,
+                perTokenKB: streamInfo.perTokenKB,
+                isDistributed: streamInfo.isDistributed
+              });
+            }
 
             if (hitStopTag) {
               streamHalted = true;
               try {
                 reader.cancel();
-                if (activeAbortController) activeAbortController.abort();
+                abortController.abort();
                 fetch('/api/chat/abort', { method: 'POST' }).catch(() => {});
               } catch (_) {}
               break;
@@ -1054,18 +1165,18 @@
         }
       }
 
-      const durationSec = (performance.now() - startTime) / 1000;
-      const tokPerSec = durationSec > 0 ? (tokenCount / durationSec).toFixed(1) : '18.4';
+      const durationSec = (performance.now() - streamInfo.startTime) / 1000;
+      const tokPerSec = durationSec > 0 ? (streamInfo.tokenCount / durationSec).toFixed(1) : '18.4';
       const promptTokens = Math.max(14, Math.ceil(messageText.length / 3.2));
       const isDistributed = (lastClusterPayload && lastClusterPayload.workers && lastClusterPayload.workers.length > 0) || (lastClusterPayload && lastClusterPayload.is_direct_wireguard);
-      const wireBytes = isDistributed ? (promptTokens * 5166 + tokenCount * 5166) : 0;
+      const wireBytes = isDistributed ? (promptTokens * 5166 + streamInfo.tokenCount * 5166) : 0;
       const wireMB = (wireBytes / (1024 * 1024)).toFixed(2);
       const perTokenKB = isDistributed ? '5.16 KB/tok' : '0.0 KB (SHM)';
 
       const metrics = {
         tokPerSec,
         durationSec: durationSec.toFixed(2),
-        tokens: tokenCount,
+        tokens: streamInfo.tokenCount,
         wireMB,
         perTokenKB,
         isDistributed,
@@ -1073,26 +1184,34 @@
       };
 
       chat.messages[assistantMessageIndex].metrics = metrics;
-      liveCard.finalize(accumulatedText, metrics);
+      if (streamInfo.liveCard && currentChatId === targetChatId) {
+        streamInfo.liveCard.finalize(streamInfo.accumulatedText, metrics);
+      }
       saveConversations();
     } catch (err) {
       if (err.name === 'AbortError') {
-        console.log('Generation aborted by user.');
-        accumulatedText += '\n\n*(Generation stopped by user)*';
+        console.log(`Generation for ${targetChatId} aborted by user.`);
+        streamInfo.accumulatedText += '\n\n*(Generation stopped by user)*';
       } else {
-        console.error('Stream error:', err);
-        accumulatedText += `\n\n❌ **Communication Error**: ${err.message}`;
+        console.error(`Stream error for ${targetChatId}:`, err);
+        streamInfo.accumulatedText += `\n\n❌ **Communication Error**: ${err.message}`;
       }
-      chat.messages[assistantMessageIndex].content = accumulatedText;
-      liveCard.finalize(accumulatedText, null);
+      chat.messages[assistantMessageIndex].content = streamInfo.accumulatedText;
+      if (streamInfo.liveCard && currentChatId === targetChatId) {
+        streamInfo.liveCard.finalize(streamInfo.accumulatedText, null);
+      }
       saveConversations();
     } finally {
-      isGenerating = false;
-      activeAbortController = null;
-      updateSendButtonState(false);
+      activeStreams.delete(targetChatId);
+      if (currentChatId === targetChatId) {
+        updateSendButtonState(false);
+      }
+      renderHistoryList();
       clearKvOnSend = false;
       elements.pillClearKv.classList.remove('active');
-      setClusterState('online_idle');
+      if (activeStreams.size === 0) {
+        setClusterState('online_idle');
+      }
     }
   }
 
@@ -1158,11 +1277,8 @@
     });
 
     window.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && isGenerating) {
-        if (activeAbortController) {
-          activeAbortController.abort();
-          try { fetch('/api/chat/abort', { method: 'POST' }); } catch (e) {}
-        }
+      if (e.key === 'Escape' && activeStreams.has(currentChatId)) {
+        stopChatGeneration(currentChatId);
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
         e.preventDefault();
@@ -1171,12 +1287,9 @@
     });
 
     elements.sendBtn.onclick = () => {
-      if (isGenerating && activeAbortController) {
-        // Trigger abort if currently streaming
-        activeAbortController.abort();
-        try { fetch('/api/chat/abort', { method: 'POST' }); } catch (e) {}
-      } else if (!isGenerating) {
-        // Normal send behavior
+      if (activeStreams.has(currentChatId)) {
+        stopChatGeneration(currentChatId);
+      } else {
         handleSendMessage();
       }
     };
