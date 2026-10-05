@@ -970,7 +970,7 @@ pub fn inspect_activations(tag: &str, tensor: &[f32], shape: &[usize]) -> Result
     if l2_norm == 0.0 {
         tracing::warn!("⚠️ ActivationWatchdog [{}]: L2 norm is 0.0 (all-zero tensor)! Shape: {:?}", tag, shape);
     }
-    if max.abs() > 100.0 || min.abs() > 100.0 {
+    if max.abs() > 500.0 || min.abs() > 500.0 {
         tracing::warn!("⚠️ ActivationWatchdog [{}]: High activation magnitude detected: min={:.3}, max={:.3}", tag, min, max);
     }
 

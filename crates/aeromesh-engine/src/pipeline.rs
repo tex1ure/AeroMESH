@@ -15,7 +15,20 @@ use aeromesh_core::{
     TokenResponseFrame, FLAG_CLEAR_KV, FLAG_IS_PROMPT,
 };
 
-use crate::slice_loader::{GgufSliceLoader, LayerSliceConfig, LlamaPipelineInstance};
+use crate::slice_loader::{ChatTemplateFormat, GgufSliceLoader, LayerSliceConfig, LlamaPipelineInstance};
+
+pub const STOP_TOKENS: &[&str] = &[
+    "<|im_end|>",
+    "<|im_start|>",
+    "<｜end of sentence｜>",
+    "<｜User｜>",
+    "<｜Assistant｜>",
+    "<｜begin of sentence｜>",
+    "<|endoftext|>",
+    "<|eot_id|>",
+    "<|start_header_id|>",
+    "</s>",
+];
 
 pub const SOCKET_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -369,10 +382,7 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 let piece_bytes = inst.token_to_piece(next_token_id).unwrap_or_default();
                 let token_text = String::from_utf8_lossy(&piece_bytes).to_string();
                 let is_eos = inst.is_eog(next_token_id)
-                    || token_text.contains("<|im_end|>")
-                    || token_text.contains("<|endoftext|>")
-                    || token_text.contains("<|eot_id|>")
-                    || token_text.contains("</s>");
+                    || STOP_TOKENS.iter().any(|&tag| token_text.contains(tag));
 
                 let resp = TokenResponseFrame {
                     session_id: active_session_id,
@@ -527,6 +537,14 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
 
         pub fn n_ctx(&self) -> usize {
             self.instance.as_ref().map(|i| i.n_ctx).unwrap_or(4096)
+        }
+
+        pub fn detect_chat_format(&self) -> ChatTemplateFormat {
+            if let Ok(inst) = self.get_instance() {
+                inst.detect_chat_format()
+            } else {
+                ChatTemplateFormat::ChatML
+            }
         }
 
         pub fn switch_model<P: AsRef<Path>>(&mut self, new_model_path: P) -> Result<()> {
@@ -865,24 +883,28 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
             first_token_text = String::from_utf8_lossy(&piece_bytes).to_string();
         }
 
-        print!("{}", first_token_text);
-        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let is_first_stop = is_first_eos || STOP_TOKENS.iter().any(|&tag| first_token_text.contains(tag));
 
-        generated_text.push_str(&first_token_text);
-        if let Some(ref tx) = token_tx {
-            if tx.send(first_token_text.as_bytes().to_vec()).await.is_err() {
-                info!("🛑 Client disconnected / aborted during prefill. Halting generation loop.");
-                return Ok((generated_text, perf_metrics));
+        if !is_first_stop && !first_token_text.is_empty() {
+            print!("{}", first_token_text);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+
+            generated_text.push_str(&first_token_text);
+            if let Some(ref tx) = token_tx {
+                if tx.send(first_token_text.as_bytes().to_vec()).await.is_err() {
+                    info!("🛑 Client disconnected / aborted during prefill. Halting generation loop.");
+                    return Ok((generated_text, perf_metrics));
+                }
             }
+            total_tokens += 1;
         }
 
-        total_tokens += 1;
         let mut current_token_id = first_token_id;
         let mut current_pos = prompt_len;
         let mut decode_act_buf = vec![0.0f32; self.hidden_dim];
 
         // Step 3: Autoregressive Decode Loop with Per-Row INT8 Quantized Transport
-        if !is_first_eos {
+        if !is_first_eos && !is_first_stop {
             for seq_id in 1..max_tokens {
                 let decode_tokens = [current_token_id];
                 if let Err(e) = self.get_instance_mut()?.evaluate_tokens_to_activations_into(&decode_tokens, current_pos, &mut decode_act_buf) {
@@ -948,18 +970,13 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                     let token_piece_bytes = inst.token_to_piece(next_token_id).unwrap_or_default();
                     token_text = String::from_utf8_lossy(&token_piece_bytes).to_string();
                     is_eos = inst.is_eog(next_token_id)
-                        || token_text.contains("<|im_end|>")
-                        || token_text.contains("<|endoftext|>")
-                        || token_text.contains("<|eot_id|>")
-                        || token_text.contains("</s>");
+                        || STOP_TOKENS.iter().any(|&tag| token_text.contains(tag));
                 }
 
                 let is_stop_token = is_eos
-                    || token_text.contains("<|im_end|>")
-                    || token_text.contains("<|im_start|>")
-                    || token_text.contains("<|endoftext|>")
-                    || token_text.contains("<|eot_id|>")
-                    || token_text.contains("</s>");
+                    || STOP_TOKENS.iter().any(|&tag| token_text.contains(tag))
+                    || token_text == "<|im"
+                    || token_text == "<｜";
 
                 if is_stop_token {
                     break;
@@ -972,7 +989,7 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
 
                 // Check if accumulated text contains any stop sequence across chunk boundaries
                 let mut hit_stop = false;
-                for stop_tag in &["<|im_end|>", "<|im_start|>", "<|endoftext|>", "<|eot_id|>", "</s>"] {
+                for &stop_tag in STOP_TOKENS {
                     if let Some(idx) = generated_text.find(stop_tag) {
                         generated_text.truncate(idx);
                         hit_stop = true;

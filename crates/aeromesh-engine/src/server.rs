@@ -31,6 +31,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
 
 use crate::pipeline::{CoordinatorStatus, PipelineCoordinatorClient};
+use crate::slice_loader::ChatTemplateFormat;
 
 // ---------------------------------------------------------------------------
 // Standard OpenAI Error Envelope (FIX-06 & FIX-07)
@@ -241,6 +242,8 @@ pub struct ChatCompletionRequest {
     pub stream: Option<bool>,
     #[serde(default)]
     pub session_id: Option<u64>,
+    #[serde(default)]
+    pub reasoning: Option<bool>,
 }
 
 fn default_max_tokens() -> Option<usize> {
@@ -762,52 +765,126 @@ async fn handle_chat_abort() -> Json<serde_json::Value> {
     }))
 }
 
-fn format_chat_prompt(messages: &[ChatMessage], model_name: &str) -> String {
+fn sanitize_chat_content(content: &str) -> String {
+    let mut clean = content.trim().to_string();
+    for tag in &[
+        "<|im_start|>",
+        "<|im_end|>",
+        "<｜User｜>",
+        "<｜Assistant｜>",
+        "<｜begin of sentence｜>",
+        "<｜end of sentence｜>",
+        "<|endoftext|>",
+        "<|eot_id|>",
+        "</s>",
+    ] {
+        clean = clean.replace(tag, "");
+    }
+    clean.trim().to_string()
+}
+
+fn format_chat_prompt(messages: &[ChatMessage], format: ChatTemplateFormat, is_reasoning: bool) -> String {
     if messages.is_empty() {
         return String::new();
     }
 
-    let model_lower = model_name.to_lowercase();
-    let is_reasoning = model_lower.contains("ds")
-        || model_lower.contains("deepseek")
-        || model_lower.contains("r1");
+    match format {
+        ChatTemplateFormat::DeepSeek => {
+            let mut prompt = String::new();
+            let mut system_text = String::new();
 
-    let mut prompt = String::new();
+            for msg in messages {
+                let role = msg.role.trim().to_lowercase();
+                let clean = sanitize_chat_content(&msg.content);
+                if clean.is_empty() {
+                    continue;
+                }
+                if role == "system" {
+                    if !system_text.is_empty() {
+                        system_text.push('\n');
+                    }
+                    system_text.push_str(&clean);
+                }
+            }
 
-    // DeepSeek-R1 official specification: DO NOT inject a generic system prompt.
-    // Standard models (like Qwen test.gguf) benefit from standard system prompt.
-    if !is_reasoning {
-        let has_system = messages.iter().any(|m| m.role.eq_ignore_ascii_case("system"));
-        if !has_system {
-            prompt.push_str("<|im_start|>system\nYou are a helpful, intelligent AI assistant.<|im_end|>\n");
+            let mut is_first_user = true;
+            for msg in messages {
+                let role = msg.role.trim().to_lowercase();
+                let clean = sanitize_chat_content(&msg.content);
+                if clean.is_empty() || role == "system" {
+                    continue;
+                }
+
+                if role == "user" {
+                    prompt.push_str("<｜User｜>");
+                    if is_first_user && !system_text.is_empty() {
+                        prompt.push_str(&system_text);
+                        prompt.push_str("\n\n");
+                    }
+                    prompt.push_str(&clean);
+                    is_first_user = false;
+                } else if role == "assistant" {
+                    prompt.push_str("<｜Assistant｜>");
+                    prompt.push_str(&clean);
+                    prompt.push_str("<｜end of sentence｜>");
+                }
+            }
+
+            prompt.push_str("<｜Assistant｜>");
+            if is_reasoning {
+                prompt.push_str("<think>\n");
+            }
+            prompt
+        }
+        ChatTemplateFormat::ChatML => {
+            let mut prompt = String::new();
+            let has_system = messages.iter().any(|m| m.role.eq_ignore_ascii_case("system"));
+            if !has_system && !is_reasoning {
+                prompt.push_str("<|im_start|>system\nYou are a helpful, intelligent AI assistant.<|im_end|>\n");
+            }
+
+            for msg in messages {
+                let role = msg.role.trim().to_lowercase();
+                let clean = sanitize_chat_content(&msg.content);
+                if clean.is_empty() {
+                    continue;
+                }
+                prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, clean));
+            }
+
+            prompt.push_str("<|im_start|>assistant\n");
+            if is_reasoning {
+                prompt.push_str("<think>\n");
+            }
+            prompt
+        }
+        ChatTemplateFormat::Llama3 => {
+            let mut prompt = String::new();
+            prompt.push_str("<|begin_of_text|>");
+            for msg in messages {
+                let role = msg.role.trim().to_lowercase();
+                let clean = sanitize_chat_content(&msg.content);
+                if clean.is_empty() {
+                    continue;
+                }
+                prompt.push_str(&format!("<|start_header_id|>{role}<|end_header_id|>\n\n{clean}<|eot_id|>"));
+            }
+            prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+            prompt
+        }
+        ChatTemplateFormat::Raw => {
+            let mut prompt = String::new();
+            for msg in messages {
+                let role = msg.role.trim().to_lowercase();
+                let clean = sanitize_chat_content(&msg.content);
+                if !clean.is_empty() {
+                    prompt.push_str(&format!("{}: {}\n", role, clean));
+                }
+            }
+            prompt.push_str("assistant: ");
+            prompt
         }
     }
-
-    for msg in messages {
-        let role = msg.role.trim().to_lowercase();
-        // Skip system message for reasoning models if present
-        if is_reasoning && role == "system" {
-            continue;
-        }
-
-        // Sanitize content: strip accidental raw control tokens to prevent prompt structure poisoning
-        let mut content = msg.content.trim().to_string();
-        for control_tag in &["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|eot_id|>", "</s>"] {
-            content = content.replace(control_tag, "");
-        }
-        let clean_content = content.trim();
-        if !clean_content.is_empty() {
-            prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, clean_content));
-        }
-    }
-
-    if is_reasoning {
-        prompt.push_str("<|im_start|>assistant\n<think>\n");
-    } else {
-        prompt.push_str("<|im_start|>assistant\n");
-    }
-
-    prompt
 }
 
 async fn handle_chat_completions(
@@ -862,26 +939,8 @@ async fn handle_chat_completions(
         }
     }
 
-    let active_model = state.model_name.lock().await.clone();
-    let is_reasoning = active_model.to_lowercase().contains("ds")
-        || active_model.to_lowercase().contains("deepseek")
-        || active_model.to_lowercase().contains("r1");
-
-    let is_streaming = req.stream.unwrap_or(true);
-    let prompt = format_chat_prompt(&req.messages, &active_model);
-
-    let max_tokens = req.max_tokens.unwrap_or(if is_reasoning { 2048 } else { 512 });
-    let temp = req.temperature.unwrap_or(if is_reasoning { 0.6 } else { 0.7 });
-    let top_p = req.top_p.unwrap_or(if is_reasoning { 0.95 } else { 0.9 });
-    let session_id = req.session_id.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    });
-
-    // Readiness check: ensure model is fully loaded and ready before generation
-    {
+    // Readiness check: ensure model is fully loaded and query format & context window
+    let (chat_format, n_ctx) = {
         let coord = state.coordinator.lock().await;
         if !coord.is_ready() {
             let err_msg = match coord.status() {
@@ -897,20 +956,40 @@ async fn handle_chat_completions(
 
             return ApiErrorResponse::service_unavailable(err_msg, Some("model_not_ready")).into_response();
         }
+        (coord.detect_chat_format(), coord.n_ctx())
+    };
 
-        // FIX-24: Validate max_tokens against active model context window
-        let n_ctx = coord.n_ctx();
-        if max_tokens > n_ctx {
-            return ApiErrorResponse::unprocessable(
-                format!(
-                    "'max_tokens' ({}) exceeds active model context window ({} tokens)",
-                    max_tokens, n_ctx
-                ),
-                Some("max_tokens"),
-                Some("context_window_exceeded"),
-            )
-            .into_response();
-        }
+    let active_model = state.model_name.lock().await.clone();
+    let is_reasoning_default = active_model.to_lowercase().contains("ds")
+        || active_model.to_lowercase().contains("deepseek")
+        || active_model.to_lowercase().contains("r1")
+        || chat_format == ChatTemplateFormat::DeepSeek;
+
+    let is_reasoning = req.reasoning.unwrap_or(is_reasoning_default);
+    let is_streaming = req.stream.unwrap_or(true);
+    let prompt = format_chat_prompt(&req.messages, chat_format, is_reasoning);
+
+    let max_tokens = req.max_tokens.unwrap_or(if is_reasoning { 2048 } else { 512 });
+    let temp = req.temperature.unwrap_or(if is_reasoning { 0.6 } else { 0.7 });
+    let top_p = req.top_p.unwrap_or(if is_reasoning { 0.95 } else { 0.9 });
+    let session_id = req.session_id.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    });
+
+    // FIX-24: Validate max_tokens against active model context window
+    if max_tokens > n_ctx {
+        return ApiErrorResponse::unprocessable(
+            format!(
+                "'max_tokens' ({}) exceeds active model context window ({} tokens)",
+                max_tokens, n_ctx
+            ),
+            Some("max_tokens"),
+            Some("context_window_exceeded"),
+        )
+        .into_response();
     }
 
     if is_streaming {
@@ -1041,6 +1120,7 @@ mod tests {
             top_p: Some(0.9),
             stream: Some(true),
             session_id: Some(12345),
+            reasoning: None,
         }
     }
 

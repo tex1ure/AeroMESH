@@ -433,6 +433,14 @@ mod tests {
 use crate::llama_ffi::*;
 use std::ffi::{c_char, CString};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ChatTemplateFormat {
+    DeepSeek,
+    ChatML,
+    Llama3,
+    Raw,
+}
+
 pub struct LlamaPipelineInstance {
     model: *mut LlamaModel,
     ctx: *mut LlamaContext,
@@ -557,6 +565,32 @@ impl LlamaPipelineInstance {
     /// Returns true if all native C++ pointers are valid and non-null.
     pub fn is_ready(&self) -> bool {
         !self.model.is_null() && !self.ctx.is_null() && !self.vocab.is_null() && !self.sampler.is_null()
+    }
+
+    /// Automatically detects the chat template format supported by the model's vocabulary.
+    pub fn detect_chat_format(&self) -> ChatTemplateFormat {
+        if !self.is_ready() {
+            return ChatTemplateFormat::ChatML;
+        }
+        // DeepSeek models use `<｜User｜>` as a single special control token (token 151644)
+        if let Ok(toks) = self.tokenize("<｜User｜>", false) {
+            if toks.len() == 1 {
+                return ChatTemplateFormat::DeepSeek;
+            }
+        }
+        // ChatML / Qwen models use `<|im_start|>` as a single special control token
+        if let Ok(toks) = self.tokenize("<|im_start|>", false) {
+            if toks.len() == 1 {
+                return ChatTemplateFormat::ChatML;
+            }
+        }
+        // Llama 3 models use `<|start_header_id|>` as a single special control token
+        if let Ok(toks) = self.tokenize("<|start_header_id|>", false) {
+            if toks.len() == 1 {
+                return ChatTemplateFormat::Llama3;
+            }
+        }
+        ChatTemplateFormat::ChatML
     }
 
     /// Validates that the native instance is initialized and ready, returning a typed error otherwise.
@@ -907,4 +941,37 @@ mod tests_instance_safety {
         inst.close();
         assert!(!inst.is_ready());
     }
+
+    #[test]
+    fn test_chat_format_detection() {
+        crate::ensure_llama_initialized();
+        let ds_path = if std::path::Path::new("models/DS.gguf").exists() {
+            Some(std::path::PathBuf::from("models/DS.gguf"))
+        } else if std::path::Path::new("../../models/DS.gguf").exists() {
+            Some(std::path::PathBuf::from("../../models/DS.gguf"))
+        } else {
+            None
+        };
+        if let Some(ref path) = ds_path {
+            let slice = LayerSliceConfig::new(0, 0, 48).unwrap();
+            if let Ok(inst) = LlamaPipelineInstance::open(path, slice, 0, 512) {
+                assert_eq!(inst.detect_chat_format(), ChatTemplateFormat::DeepSeek);
+            }
+        }
+
+        let test_path = if std::path::Path::new("models/test.gguf").exists() {
+            Some(std::path::PathBuf::from("models/test.gguf"))
+        } else if std::path::Path::new("../../models/test.gguf").exists() {
+            Some(std::path::PathBuf::from("../../models/test.gguf"))
+        } else {
+            None
+        };
+        if let Some(ref path) = test_path {
+            let slice = LayerSliceConfig::new(0, 0, 28).unwrap();
+            if let Ok(inst) = LlamaPipelineInstance::open(path, slice, 0, 512) {
+                assert_eq!(inst.detect_chat_format(), ChatTemplateFormat::ChatML);
+            }
+        }
+    }
 }
+

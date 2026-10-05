@@ -936,7 +936,8 @@
       messages: formattedMessages,
       max_tokens: maxTokens,
       stream: true,
-      session_id: numericSessionId
+      session_id: numericSessionId,
+      reasoning: enableReasoning
     };
 
     activeAbortController = new AbortController();
@@ -946,6 +947,19 @@
 
     // Create live assistant card once in DOM
     const liveCard = createLiveAssistantRow();
+
+    const STOP_SEQUENCES = [
+      '<|im_end|>',
+      '<|im_start|>',
+      '<｜end of sentence｜>',
+      '<｜User｜>',
+      '<｜Assistant｜>',
+      '<｜begin of sentence｜>',
+      '<|endoftext|>',
+      '<|eot_id|>',
+      '<|start_header_id|>',
+      '</s>'
+    ];
 
     try {
       const response = await fetch('/api/chat/stream', {
@@ -962,8 +976,9 @@
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
+      let streamHalted = false;
 
-      while (true) {
+      while (!streamHalted) {
         const { value, done } = await reader.read();
         if (done) break;
 
@@ -976,65 +991,62 @@
           if (!trimmed || !trimmed.startsWith('data: ')) continue;
           const dataStr = trimmed.substring(6).trim();
 
-          if (dataStr === '[DONE]') break;
+          if (dataStr === '[DONE]') {
+            streamHalted = true;
+            break;
+          }
 
+          let delta = '';
           try {
             const dataJson = JSON.parse(dataStr);
-            const delta = dataJson.choices?.[0]?.delta?.content || '';
-            if (delta) {
-              accumulatedText += delta;
-
-              // Immediately truncate and stop if special stop sequences appear
-              let hitStopTag = false;
-              for (const stopTag of ['<|im_end|>', '<|im_start|>', '<|endoftext|>', '<|eot_id|>', '</s>']) {
-                const tagIdx = accumulatedText.indexOf(stopTag);
-                if (tagIdx !== -1) {
-                  accumulatedText = accumulatedText.substring(0, tagIdx);
-                  hitStopTag = true;
-                  break;
-                }
-              }
-
-              tokenCount++;
-              chat.messages[assistantMessageIndex].content = accumulatedText;
-
-              const elapsedSec = (performance.now() - startTime) / 1000;
-              const liveTps = elapsedSec > 0 ? (tokenCount / elapsedSec).toFixed(1) : '18.4';
-              const promptTokens = Math.max(14, Math.ceil(messageText.length / 3.2));
-              const isDistributed = (lastClusterPayload && lastClusterPayload.workers && lastClusterPayload.workers.length > 0) || (lastClusterPayload && lastClusterPayload.is_direct_wireguard);
-              const wireBytes = isDistributed ? (promptTokens * 5166 + tokenCount * 5166) : 0;
-              const wireMB = (wireBytes / (1024 * 1024)).toFixed(2);
-              const perTokenKB = isDistributed ? '5.16 KB/tok' : '0.0 KB (SHM)';
-
-              liveCard.update(accumulatedText, {
-                tokPerSec: liveTps,
-                tokenCount,
-                wireMB,
-                perTokenKB,
-                isDistributed
-              });
-            }
+            delta = dataJson.choices?.[0]?.delta?.content || '';
           } catch (e) {
             if (dataStr && !dataStr.startsWith('{')) {
-              accumulatedText += dataStr;
-              tokenCount++;
-              chat.messages[assistantMessageIndex].content = accumulatedText;
+              delta = dataStr;
+            }
+          }
 
-              const elapsedSec = (performance.now() - startTime) / 1000;
-              const liveTps = elapsedSec > 0 ? (tokenCount / elapsedSec).toFixed(1) : '18.4';
-              const promptTokens = Math.max(14, Math.ceil(messageText.length / 3.2));
-              const isDistributed = (lastClusterPayload && lastClusterPayload.workers && lastClusterPayload.workers.length > 0) || (lastClusterPayload && lastClusterPayload.is_direct_wireguard);
-              const wireBytes = isDistributed ? (promptTokens * 5166 + tokenCount * 5166) : 0;
-              const wireMB = (wireBytes / (1024 * 1024)).toFixed(2);
-              const perTokenKB = isDistributed ? '5.16 KB/tok' : '0.0 KB (SHM)';
+          if (delta) {
+            accumulatedText += delta;
 
-              liveCard.update(accumulatedText, {
-                tokPerSec: liveTps,
-                tokenCount,
-                wireMB,
-                perTokenKB,
-                isDistributed
-              });
+            // Immediately truncate and stop if special stop sequences appear
+            let hitStopTag = false;
+            for (const stopTag of STOP_SEQUENCES) {
+              const tagIdx = accumulatedText.indexOf(stopTag);
+              if (tagIdx !== -1) {
+                accumulatedText = accumulatedText.substring(0, tagIdx);
+                hitStopTag = true;
+                break;
+              }
+            }
+
+            tokenCount++;
+            chat.messages[assistantMessageIndex].content = accumulatedText;
+
+            const elapsedSec = (performance.now() - startTime) / 1000;
+            const liveTps = elapsedSec > 0 ? (tokenCount / elapsedSec).toFixed(1) : '18.4';
+            const promptTokens = Math.max(14, Math.ceil(messageText.length / 3.2));
+            const isDistributed = (lastClusterPayload && lastClusterPayload.workers && lastClusterPayload.workers.length > 0) || (lastClusterPayload && lastClusterPayload.is_direct_wireguard);
+            const wireBytes = isDistributed ? (promptTokens * 5166 + tokenCount * 5166) : 0;
+            const wireMB = (wireBytes / (1024 * 1024)).toFixed(2);
+            const perTokenKB = isDistributed ? '5.16 KB/tok' : '0.0 KB (SHM)';
+
+            liveCard.update(accumulatedText, {
+              tokPerSec: liveTps,
+              tokenCount,
+              wireMB,
+              perTokenKB,
+              isDistributed
+            });
+
+            if (hitStopTag) {
+              streamHalted = true;
+              try {
+                reader.cancel();
+                if (activeAbortController) activeAbortController.abort();
+                fetch('/api/chat/abort', { method: 'POST' }).catch(() => {});
+              } catch (_) {}
+              break;
             }
           }
         }
