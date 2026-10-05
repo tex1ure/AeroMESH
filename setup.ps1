@@ -66,7 +66,16 @@ if (-not (Test-Path "llama.cpp")) {
 $releaseBin = "llama.cpp\build\bin\Release"
 if (Test-Path $releaseBin) {
     Copy-Item -Path "$releaseBin\*" -Destination "bin" -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "  ✅ Synchronized CUDA backend binaries to 'bin' folder." -ForegroundColor Green
+    Get-ChildItem -Path "llama.cpp\build" -Recurse -Filter "*.lib" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "bin\" -Force -ErrorAction SilentlyContinue }
+    Write-Host "  ✅ Synchronized CUDA backend binaries and libraries to 'bin' folder." -ForegroundColor Green
+} elseif (Test-Path "C:\AeroMesh\AeroMesh-vap-2026\llama.cpp\build\bin\Release") {
+    Copy-Item -Path "C:\AeroMesh\AeroMesh-vap-2026\llama.cpp\build\bin\Release\*" -Destination "bin" -Recurse -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path "C:\AeroMesh\AeroMesh-vap-2026\llama.cpp\build" -Recurse -Filter "*.lib" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "bin\" -Force -ErrorAction SilentlyContinue }
+    Write-Host "  ✅ Synchronized pre-built sm_86 CUDA backend binaries and libraries to 'bin' folder." -ForegroundColor Green
+} elseif (Test-Path "C:\AeroMesh_Latest\llama-cluster\llama.cpp\build\bin\Release") {
+    Copy-Item -Path "C:\AeroMesh_Latest\llama-cluster\llama.cpp\build\bin\Release\*" -Destination "bin" -Recurse -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path "C:\AeroMesh_Latest\llama-cluster\llama.cpp\build" -Recurse -Filter "*.lib" -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName "bin\" -Force -ErrorAction SilentlyContinue }
+    Write-Host "  ✅ Synchronized pre-built CUDA backend binaries and libraries to 'bin' folder." -ForegroundColor Green
 }
 
 # Step 5: Build AeroMesh

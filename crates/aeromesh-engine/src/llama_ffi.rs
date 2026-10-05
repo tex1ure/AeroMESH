@@ -1,5 +1,5 @@
 use std::ffi::{c_char, c_void};
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Once;
 use tracing::info;
 
@@ -206,6 +206,13 @@ extern "C" {
     );
 }
 
+#[link(name = "ggml")]
+extern "C" {
+    pub fn ggml_backend_load_all();
+    pub fn ggml_backend_load_all_from_path(dir_path: *const c_char);
+    pub fn ggml_backend_reg_count() -> usize;
+}
+
 extern "C" fn quiet_llama_log_callback(level: i32, text: *const c_char, _user_data: *mut c_void) {
     if level >= 3 && !text.is_null() {
         let msg = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy();
@@ -220,14 +227,34 @@ static INIT_BACKEND_ONCE: Once = Once::new();
 /// Automatically injects `bin/` directory into Windows DLL search path and initializes llama backend.
 pub fn ensure_llama_initialized() {
     INIT_BACKEND_ONCE.call_once(|| {
+        let mut loaded_bin_dirs: Vec<PathBuf> = Vec::new();
+
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::ffi::OsStrExt;
-            let candidate_dirs = ["bin", "../bin", "../../bin", "llama.cpp/build/bin/Release"];
+            let mut candidate_dirs: Vec<PathBuf> = vec![
+                PathBuf::from("bin"),
+                PathBuf::from("../bin"),
+                PathBuf::from("../../bin"),
+                PathBuf::from("llama.cpp/build/bin/Release"),
+            ];
+
+            if let Ok(exe_path) = std::env::current_exe() {
+                if let Some(exe_dir) = exe_path.parent() {
+                    candidate_dirs.insert(0, exe_dir.to_path_buf());
+                    candidate_dirs.push(exe_dir.join("bin"));
+                    if let Some(parent) = exe_dir.parent() {
+                        candidate_dirs.push(parent.join("bin"));
+                        if let Some(grand) = parent.parent() {
+                            candidate_dirs.push(grand.join("bin"));
+                        }
+                    }
+                }
+            }
+
             for dir in &candidate_dirs {
-                let p = Path::new(dir);
-                if p.exists() && p.join("llama.dll").exists() {
-                    if let Ok(abs) = std::fs::canonicalize(p) {
+                if dir.exists() && dir.join("llama.dll").exists() {
+                    if let Ok(abs) = std::fs::canonicalize(dir) {
                         let mut wide: Vec<u16> = abs.as_os_str().encode_wide().collect();
                         wide.push(0);
                         unsafe {
@@ -238,6 +265,7 @@ pub fn ensure_llama_initialized() {
                             std::env::set_var("PATH", new_path);
                         }
                         info!(dll_dir = %abs.display(), "Injected llama.dll runtime directory into Windows search path");
+                        loaded_bin_dirs.push(abs);
                         break;
                     }
                 }
@@ -246,8 +274,23 @@ pub fn ensure_llama_initialized() {
 
         unsafe {
             llama_log_set(Some(quiet_llama_log_callback), std::ptr::null_mut());
+
+            // Explicitly load dynamic backends (ggml-cuda.dll, ggml-cpu.dll, etc.)
+            for bin_dir in &loaded_bin_dirs {
+                let clean_str = bin_dir.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+                if let Ok(c_dir) = std::ffi::CString::new(clean_str) {
+                    ggml_backend_load_all_from_path(c_dir.as_ptr());
+                }
+            }
+            if let Ok(c_bin) = std::ffi::CString::new("bin") {
+                ggml_backend_load_all_from_path(c_bin.as_ptr());
+            }
+            ggml_backend_load_all();
+
             llama_backend_init();
-            info!("✅ Native llama.cpp / GGML CUDA Backend Initialized");
+
+            let count = ggml_backend_reg_count();
+            info!(backend_count = count, "✅ Native llama.cpp / GGML Backend Initialized");
         }
     });
 }
