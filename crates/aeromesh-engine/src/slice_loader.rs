@@ -549,11 +549,15 @@ extern "C" fn llama_cb_eval_capture(
     let total_floats = ne0 * ne1;
     let n_bytes = total_floats * std::mem::size_of::<f32>();
 
-    if !state.buffer.is_null() && state.capacity_floats >= total_floats {
-        let ok = safe_ggml_backend_tensor_get(tensor, state.buffer as *mut c_void, 0, n_bytes);
+    // llama_decode may split a large batch into several ubatches (n_ubatch, default 512);
+    // the callback fires once per ubatch, so append at the running offset instead of overwriting.
+    let offset_floats = state.captured_floats;
+    if !state.buffer.is_null() && offset_floats + total_floats <= state.capacity_floats {
+        let dst = unsafe { state.buffer.add(offset_floats) };
+        let ok = safe_ggml_backend_tensor_get(tensor, dst as *mut c_void, 0, n_bytes);
         if ok {
-            state.captured = true;
-            state.captured_floats = total_floats;
+            state.captured_floats = offset_floats + total_floats;
+            state.captured = state.captured_floats == state.capacity_floats;
         }
     }
 
@@ -710,6 +714,24 @@ impl LlamaPipelineInstance {
     /// Returns true if the activation capture callback successfully intercepted the target layer tensor.
     pub fn is_activation_captured(&self) -> bool {
         self.capture_state.captured
+    }
+
+    /// Logs once per process whether raw pre-norm capture is active, plus the RMS of the first
+    /// captured row (raw residual RMS is typically >> 1.0; post-norm identity output is ~1.0).
+    fn log_capture_once(&self, out: &[f32], tag: &str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if LOGGED.swap(true, Ordering::Relaxed) || self.hidden_dim == 0 || out.len() < self.hidden_dim {
+            return;
+        }
+        let row = &out[..self.hidden_dim];
+        let rms = (row.iter().map(|v| v * v).sum::<f32>() / row.len() as f32).sqrt();
+        info!(
+            stage = tag,
+            captured = self.capture_state.captured,
+            row0_rms = rms,
+            "🔬 Activation capture check (raw pre-norm residual expected RMS >> 1.0)"
+        );
     }
 
     /// Returns true if all native C++ pointers are valid and non-null.
@@ -940,6 +962,7 @@ impl LlamaPipelineInstance {
             }
         }
 
+        self.log_capture_once(out, "stage0");
         Ok(())
     }
 
@@ -1078,6 +1101,7 @@ impl LlamaPipelineInstance {
             }
         }
 
+        self.log_capture_once(out, "intermediate");
         Ok(())
     }
 

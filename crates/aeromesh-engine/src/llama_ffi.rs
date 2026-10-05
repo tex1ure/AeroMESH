@@ -291,16 +291,7 @@ pub fn safe_ggml_backend_tensor_get(
         f(tensor, data, offset, size);
         true
     } else {
-        unsafe {
-            if !tensor.is_null() && !(*tensor).data.is_null() && !data.is_null() {
-                std::ptr::copy_nonoverlapping(
-                    ((*tensor).data as *const u8).add(offset),
-                    data as *mut u8,
-                    size,
-                );
-                return true;
-            }
-        }
+        // Never memcpy from tensor.data here: on CUDA it is a device pointer.
         false
     }
 }
