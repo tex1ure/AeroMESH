@@ -107,3 +107,24 @@ def test_unreachable_backend_returns_502(client):
     assert response.status_code == 502
     data = response.json()
     assert data.get("error") == "backend_unreachable"
+
+
+def test_multichat_concurrency_assets():
+    """Verify frontend assets include multi-chat background concurrency and 2-chat limit."""
+    import os
+    app_js_path = os.path.join(os.path.dirname(__file__), "..", "static", "js", "app.js")
+    css_path = os.path.join(os.path.dirname(__file__), "..", "static", "css", "liquid_glass.css")
+
+    with open(app_js_path, "r", encoding="utf-8") as f:
+        js_content = f.read()
+
+    assert "MAX_CONCURRENT_CHATS = 2" in js_content
+    assert "activeStreams" in js_content
+    assert "showConcurrencyWarning" in js_content
+    assert "chat-running-badge" in js_content
+
+    with open(css_path, "r", encoding="utf-8") as f:
+        css_content = f.read()
+
+    assert ".chat-running-badge" in css_content
+    assert ".concurrency-toast" in css_content
