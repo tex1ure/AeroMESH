@@ -556,7 +556,7 @@
 
     let thinkText = cleanText.substring(thinkStart + 7, thinkEnd).replace(/<think>/gi, '').trim();
     let answerText = cleanText.substring(thinkEnd + 8).replace(/<\/think>/gi, '').trim();
-    return { thinkText, answerText, isStillThinking: false };
+    return { thinkText: thinkText.length > 0 ? thinkText : null, answerText, isStillThinking: false };
   }
 
   function appendMessageElement(role, rawContent, metrics = null, index = null) {
@@ -764,6 +764,8 @@
           } else {
             badge.innerHTML = '<i data-lucide="brain" style="width: 13px; height: 13px;"></i><span>Reasoning Complete</span>';
           }
+        } else {
+          accordion.style.display = 'none';
         }
 
         if (answerText) {

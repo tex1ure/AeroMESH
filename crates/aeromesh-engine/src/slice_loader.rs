@@ -522,17 +522,19 @@ impl LlamaPipelineInstance {
                 || model_path_str.contains("r1");
 
             if is_reasoning_model {
-                // Official DeepSeek-R1 specifications: Repetition penalty MUST be 1.0 (disabled)
-                // with temp 0.6 and top_p 0.95. Penalizing reasoning tokens destroys the CoT chain
-                // and causes vocabulary collapse into rare Unicode/Chinese characters.
+                // Gentle repetition penalty (1.10) to break degenerative loops (e.g. AI AI AI...)
+                // while preserving math formulas, code tokens, and reasoning chain structure.
+                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, 1.10, 0.0, 0.0));
                 llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
                 llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95, 1));
+                llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
                 llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.6));
                 llama_sampler_chain_add(sampler, llama_sampler_init_dist(u32::MAX));
             } else {
-                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, 1.05, 0.0, 0.0));
+                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, 1.10, 0.0, 0.0));
                 llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
                 llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1));
+                llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
                 llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7));
                 llama_sampler_chain_add(sampler, llama_sampler_init_dist(u32::MAX));
             }
