@@ -431,7 +431,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 use crate::llama_ffi::*;
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, c_void, CString};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChatTemplateFormat {
@@ -439,6 +439,125 @@ pub enum ChatTemplateFormat {
     ChatML,
     Llama3,
     Raw,
+}
+
+#[repr(C)]
+pub struct ActivationCaptureState {
+    pub target_layer_idx: i32,
+    pub target_tensor_name: [u8; 64],
+    pub captured: bool,
+    pub buffer: *mut f32,
+    pub capacity_floats: usize,
+    pub captured_floats: usize,
+}
+
+impl Default for ActivationCaptureState {
+    fn default() -> Self {
+        Self {
+            target_layer_idx: -1,
+            target_tensor_name: [0u8; 64],
+            captured: false,
+            buffer: std::ptr::null_mut(),
+            capacity_floats: 0,
+            captured_floats: 0,
+        }
+    }
+}
+
+unsafe fn tensor_name_matches(
+    tensor_name: *const c_char,
+    target_name: &[u8; 64],
+    target_layer: i32,
+) -> bool {
+    if tensor_name.is_null() {
+        return false;
+    }
+    // 1. Direct name match with target_name
+    let mut i = 0;
+    let mut exact = true;
+    while i < 64 && target_name[i] != 0 {
+        if *tensor_name.add(i) != target_name[i] as c_char {
+            exact = false;
+            break;
+        }
+        i += 1;
+    }
+    if exact && *tensor_name.add(i) == 0 {
+        return true;
+    }
+
+    // 2. Prefix match for "l_out-" with target_layer
+    let prefix = b"l_out-";
+    let mut is_prefix = true;
+    for j in 0..prefix.len() {
+        if *tensor_name.add(j) != prefix[j] as c_char {
+            is_prefix = false;
+            break;
+        }
+    }
+    if is_prefix && target_layer >= 0 {
+        let mut idx: i32 = 0;
+        let mut k = prefix.len();
+        let mut has_digits = false;
+        while k < 64 && *tensor_name.add(k) != 0 {
+            let ch = *tensor_name.add(k) as u8;
+            if ch >= b'0' && ch <= b'9' {
+                idx = idx * 10 + (ch - b'0') as i32;
+                has_digits = true;
+            } else {
+                break;
+            }
+            k += 1;
+        }
+        if has_digits && idx == target_layer && *tensor_name.add(k) == 0 {
+            return true;
+        }
+    }
+
+    false
+}
+
+extern "C" fn llama_cb_eval_capture(
+    tensor: *mut GgmlTensor,
+    ask: bool,
+    user_data: *mut c_void,
+) -> bool {
+    if tensor.is_null() || user_data.is_null() {
+        return false;
+    }
+    let state = unsafe { &mut *(user_data as *mut ActivationCaptureState) };
+    if state.target_layer_idx < 0 {
+        return false;
+    }
+
+    let tensor_name_ptr = unsafe { (*tensor).name.as_ptr() };
+    let matches = unsafe {
+        tensor_name_matches(tensor_name_ptr, &state.target_tensor_name, state.target_layer_idx)
+    };
+
+    if !matches {
+        return false;
+    }
+
+    if ask {
+        return true;
+    }
+
+    // ask == false: The target tensor just finished computing on its backend!
+    let ne0 = unsafe { (*tensor).ne[0] } as usize;
+    let ne1 = unsafe { (*tensor).ne[1] } as usize;
+    let total_floats = ne0 * ne1;
+    let n_bytes = total_floats * std::mem::size_of::<f32>();
+
+    if !state.buffer.is_null() && state.capacity_floats >= total_floats {
+        let ok = safe_ggml_backend_tensor_get(tensor, state.buffer as *mut c_void, 0, n_bytes);
+        if ok {
+            state.captured = true;
+            state.captured_floats = total_floats;
+        }
+    }
+
+    true
 }
 
 pub struct LlamaPipelineInstance {
@@ -451,6 +570,7 @@ pub struct LlamaPipelineInstance {
     pub total_layers: usize,
     pub n_ctx: usize,
     pub decode_buf: Vec<f32>,
+    pub capture_state: Box<ActivationCaptureState>,
 }
 
 unsafe impl Send for LlamaPipelineInstance {}
@@ -503,9 +623,13 @@ impl LlamaPipelineInstance {
             .map(|n| (n.get() / 2).max(1))
             .unwrap_or(4) as i32;
 
+        let mut capture_state = Box::new(ActivationCaptureState::default());
+
         let mut cparams = unsafe { llama_context_default_params() };
         cparams.n_ctx = if n_ctx > 0 { n_ctx } else { 4096 };
         cparams.embeddings = true;
+        cparams.cb_eval = Some(llama_cb_eval_capture);
+        cparams.cb_eval_user_data = capture_state.as_mut() as *mut _ as *mut c_void;
 
         let ctx = unsafe { llama_init_from_model(model, cparams) };
         if ctx.is_null() {
@@ -562,7 +686,30 @@ impl LlamaPipelineInstance {
             total_layers,
             n_ctx: cparams.n_ctx as usize,
             decode_buf: vec![0.0f32; hidden_dim],
+            capture_state,
         })
+    }
+
+    /// Sets up activation capture callback to intercept raw pre-norm residual stream (unnormalized x_K)
+    /// for the specified layer before output_norm is applied.
+    pub fn prepare_activation_capture(&mut self, target_layer: i32, buffer: *mut f32, capacity: usize) {
+        self.capture_state.target_layer_idx = target_layer;
+        self.capture_state.captured = false;
+        self.capture_state.buffer = buffer;
+        self.capture_state.capacity_floats = capacity;
+        self.capture_state.captured_floats = 0;
+
+        let name = format!("l_out-{}", target_layer);
+        let mut name_bytes = [0u8; 64];
+        for (i, b) in name.bytes().enumerate().take(63) {
+            name_bytes[i] = b;
+        }
+        self.capture_state.target_tensor_name = name_bytes;
+    }
+
+    /// Returns true if the activation capture callback successfully intercepted the target layer tensor.
+    pub fn is_activation_captured(&self) -> bool {
+        self.capture_state.captured
     }
 
     /// Returns true if all native C++ pointers are valid and non-null.
@@ -738,6 +885,17 @@ impl LlamaPipelineInstance {
         }
 
         let n_tokens = tokens.len() as i32;
+        let total_floats = (n_tokens as usize) * self.hidden_dim;
+        if out.len() != total_floats {
+            out.resize(total_floats, 0.0);
+        }
+
+        // Bug 1 Fix: Arm cb_eval to intercept raw pre-norm hidden states (unnormalized x_K)
+        // at the final transformer layer of this slice ("l_out-<last_layer>").
+        // This completely avoids identity RMSNorm residual attenuation.
+        let last_layer = (self.total_layers.saturating_sub(1)) as i32;
+        self.prepare_activation_capture(last_layer, out.as_mut_ptr(), total_floats);
+
         let mut batch = unsafe { llama_batch_init(n_tokens, 0, 1) };
         batch.n_tokens = n_tokens;
 
@@ -761,22 +919,24 @@ impl LlamaPipelineInstance {
         // Explicit CUDA Stream Synchronization to ensure clean host memory reads
         unsafe { llama_synchronize(self.ctx) };
 
-        let total_floats = (n_tokens as usize) * self.hidden_dim;
-        if out.len() != total_floats {
-            out.resize(total_floats, 0.0);
-        }
-
-        for i in 0..n_tokens {
-            let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
-            if embd_ptr.is_null() {
-                bail!("Failed to get embeddings at index {} from llama_context", i);
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    embd_ptr,
-                    out.as_mut_ptr().add((i as usize) * self.hidden_dim),
-                    self.hidden_dim,
-                );
+        if !self.is_activation_captured() {
+            tracing::warn!(
+                layer = last_layer,
+                "⚠️ cb_eval did not capture l_out-{} activations; falling back to llama_get_embeddings_ith",
+                last_layer
+            );
+            for i in 0..n_tokens {
+                let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
+                if embd_ptr.is_null() {
+                    bail!("Failed to get embeddings at index {} from llama_context", i);
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        embd_ptr,
+                        out.as_mut_ptr().add((i as usize) * self.hidden_dim),
+                        self.hidden_dim,
+                    );
+                }
             }
         }
 
@@ -856,6 +1016,16 @@ impl LlamaPipelineInstance {
         }
 
         let n_tokens = seq_len as i32;
+        let total_floats = (n_tokens as usize) * self.hidden_dim;
+        if out.len() != total_floats {
+            out.resize(total_floats, 0.0);
+        }
+
+        // Bug 1 Fix: Arm cb_eval to intercept raw pre-norm hidden states (unnormalized x_K)
+        // at the final transformer layer of this intermediate slice ("l_out-<last_layer>").
+        let last_layer = (self.total_layers.saturating_sub(1)) as i32;
+        self.prepare_activation_capture(last_layer, out.as_mut_ptr(), total_floats);
+
         let mut batch = unsafe { llama_batch_init(n_tokens, self.hidden_dim as i32, 1) };
         batch.n_tokens = n_tokens;
 
@@ -872,7 +1042,7 @@ impl LlamaPipelineInstance {
                 *batch.pos.add(i as usize) = (start_pos as i32) + i;
                 *batch.n_seq_id.add(i as usize) = 1;
                 *(*batch.seq_id.add(i as usize)) = 0;
-                // CRITICAL: Request output embeddings for all tokens in intermediate stage
+                // Request output for all tokens in intermediate stage
                 *batch.logits.add(i as usize) = 1;
             }
         }
@@ -887,22 +1057,24 @@ impl LlamaPipelineInstance {
         // Explicit CUDA Stream Synchronization
         unsafe { llama_synchronize(self.ctx) };
 
-        let total_floats = (n_tokens as usize) * self.hidden_dim;
-        if out.len() != total_floats {
-            out.resize(total_floats, 0.0);
-        }
-
-        for i in 0..n_tokens {
-            let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
-            if embd_ptr.is_null() {
-                bail!("Failed to get intermediate embeddings at index {} from llama_context", i);
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    embd_ptr,
-                    out.as_mut_ptr().add((i as usize) * self.hidden_dim),
-                    self.hidden_dim,
-                );
+        if !self.is_activation_captured() {
+            tracing::warn!(
+                layer = last_layer,
+                "⚠️ cb_eval did not capture intermediate l_out-{} activations; falling back to llama_get_embeddings_ith",
+                last_layer
+            );
+            for i in 0..n_tokens {
+                let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
+                if embd_ptr.is_null() {
+                    bail!("Failed to get intermediate embeddings at index {} from llama_context", i);
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        embd_ptr,
+                        out.as_mut_ptr().add((i as usize) * self.hidden_dim),
+                        self.hidden_dim,
+                    );
+                }
             }
         }
 
@@ -972,6 +1144,7 @@ impl LlamaPipelineInstance {
             total_layers: 1,
             n_ctx: 512,
             decode_buf: vec![0.0; 128],
+            capture_state: Box::new(ActivationCaptureState::default()),
         }
     }
 }

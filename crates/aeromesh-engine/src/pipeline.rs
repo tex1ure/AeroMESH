@@ -986,7 +986,12 @@ async fn handle_coordinator_connection(
         self.get_instance()?;
 
         // Step 1: Tokenize prompt
-        let prompt_tokens = self.get_instance()?.tokenize(prompt, true)?;
+        // Bug 2 Fix: If the prompt already begins with a special token sequence (such as
+        // <|begin_of_text|> from Llama 3 template or <|im_start|> from ChatML), do NOT pass
+        // add_special = true. Otherwise llama.cpp injects a duplicate BOS token, causing the
+        // prompt to start with [BOS, BOS], which corrupts attention from token 0.
+        let add_special = !prompt.trim_start().starts_with("<|");
+        let prompt_tokens = self.get_instance()?.tokenize(prompt, add_special)?;
         if prompt_tokens.is_empty() {
             bail!("Prompt tokenization produced 0 tokens");
         }
