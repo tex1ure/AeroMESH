@@ -1000,6 +1000,17 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                     break;
                 }
 
+                // Phrase-level degeneration guard: token penalties cannot stop whole
+                // sentences/paragraphs from looping, so halt once the tail repeats.
+                if seq_id % 4 == 0 && is_degenerate_loop(&generated_text) {
+                    tracing::warn!("🔁 Repetition loop detected after {} tokens. Halting generation.", total_tokens);
+                    if let Some(ref tx) = token_tx {
+                        let _ = tx.send(token_text.as_bytes().to_vec()).await;
+                    }
+                    total_tokens += 1;
+                    break;
+                }
+
                 if let Some(ref tx) = token_tx {
                     if tx.send(token_text.as_bytes().to_vec()).await.is_err() {
                         info!("🛑 Client disconnected / aborted during decode. Halting generation loop.");
@@ -1029,6 +1040,59 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         ));
 
         Ok((generated_text, perf_metrics))
+    }
+}
+
+/// Returns true when the tail of `text` has been repeated verbatim several times
+/// within the recent window (sentence/paragraph loops or short-period gibberish).
+fn is_degenerate_loop(text: &str) -> bool {
+    const WINDOW: usize = 2000;
+    const PROBE: usize = 80;
+    const MIN_REPEATS: usize = 4;
+
+    let mut start = text.len().saturating_sub(WINDOW);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let recent = &text[start..];
+    if recent.len() < PROBE * MIN_REPEATS {
+        return false;
+    }
+    let mut p = recent.len() - PROBE;
+    while p > 0 && !recent.is_char_boundary(p) {
+        p -= 1;
+    }
+    let probe = &recent[p..];
+    if probe.trim().chars().count() < 20 {
+        return false;
+    }
+    recent.matches(probe).count() >= MIN_REPEATS
+}
+
+#[cfg(test)]
+mod tests_degenerate_loop {
+    use super::is_degenerate_loop;
+
+    #[test]
+    fn detects_paragraph_loop() {
+        let para = "The user is asking for an explanation of photosynthesis. I should explain it clearly. ";
+        let text = para.repeat(6);
+        assert!(is_degenerate_loop(&text));
+    }
+
+    #[test]
+    fn detects_short_gibberish_loop() {
+        let text = "olai ".repeat(200);
+        assert!(is_degenerate_loop(&text));
+    }
+
+    #[test]
+    fn ignores_normal_text() {
+        let text = "Photosynthesis is the process by which green plants convert light energy into chemical energy. \
+            It occurs in chloroplasts, using chlorophyll to absorb sunlight. Water is split, releasing oxygen, \
+            while carbon dioxide is fixed into glucose through the Calvin cycle in the stroma. The light reactions \
+            take place in the thylakoid membranes and produce ATP and NADPH for the dark reactions.";
+        assert!(!is_degenerate_loop(text));
     }
 }
 

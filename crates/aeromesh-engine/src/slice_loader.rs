@@ -522,16 +522,17 @@ impl LlamaPipelineInstance {
                 || model_path_str.contains("r1");
 
             if is_reasoning_model {
-                // Gentle repetition penalty (1.10) to break degenerative loops (e.g. AI AI AI...)
-                // while preserving math formulas, code tokens, and reasoning chain structure.
-                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, 1.10, 0.0, 0.0));
+                // Repetition penalty over a 256-token window (64 was too short to see
+                // paragraph-length loops) plus light frequency/presence penalties.
+                // Kept moderate to preserve math formulas, code tokens, and reasoning structure.
+                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(256, 1.12, 0.05, 0.05));
                 llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
                 llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95, 1));
                 llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
                 llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.6));
                 llama_sampler_chain_add(sampler, llama_sampler_init_dist(u32::MAX));
             } else {
-                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, 1.10, 0.0, 0.0));
+                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(256, 1.15, 0.05, 0.05));
                 llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
                 llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1));
                 llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
