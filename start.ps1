@@ -24,6 +24,10 @@ param (
     [string]$Peers = "",
 
     [Parameter(Mandatory = $false)]
+    [ValidateSet("pipeline", "rpc", "")]
+    [string]$Mode = "pipeline",
+
+    [Parameter(Mandatory = $false)]
     [int]$Port = 0,
 
     [Parameter(Mandatory = $false)]
@@ -348,15 +352,28 @@ if ($Role -eq "worker") {
     Write-Host "  Model:     $modelName" -ForegroundColor Gray
     Write-Host "  Port:      $workerPort" -ForegroundColor Gray
     Write-Host "  Binding:   $bindStr" -ForegroundColor Green
+    Write-Host "  Mode:      $($Mode.ToUpper())" -ForegroundColor Cyan
     Write-Host "  SSD Cache: ENABLED (0.0 MB weights transferred over network)" -ForegroundColor Yellow
     Write-Host ""
 
-    $rpcServerExe = Join-Path $PSScriptRoot "bin\ggml-rpc-server.exe"
-    if (Test-Path $rpcServerExe) {
-        & $rpcServerExe -H 0.0.0.0 -p $workerPort -c
+    if ($Mode -eq "rpc") {
+        $rpcServerExe = Join-Path $PSScriptRoot "bin\ggml-rpc-server.exe"
+        if (Test-Path $rpcServerExe) {
+            & $rpcServerExe -H 0.0.0.0 -p $workerPort -c
+        }
+        else {
+            cargo run --release --bin aeromesh -- worker --port $workerPort --cache
+        }
     }
     else {
-        cargo run --release --bin aeromesh -- worker --port $workerPort --cache
+        # Native Zero-Weight Activation Streaming Worker
+        $exe = Get-AeroMeshExe
+        if ($exe) {
+            & $exe worker --port $workerPort --model "$detectedModel"
+        }
+        else {
+            cargo run --release --bin aeromesh -- worker --port $workerPort --model "$detectedModel"
+        }
     }
     exit 0
 }
@@ -481,30 +498,44 @@ if ($Role -eq "coordinator") {
     Write-Host ""
     Write-Host "[+] Launching AeroMesh Coordinator (Laptop A)..." -ForegroundColor Cyan
     Write-Host "  Model:       $modelName" -ForegroundColor Gray
+    Write-Host "  Mode:        $($Mode.ToUpper())" -ForegroundColor Cyan
     Write-Host "  Worker Peer: $workerStatusStr" -ForegroundColor Yellow
     Write-Host "  API Server:  $coordUrl" -ForegroundColor Green
     Write-Host "  Web UI:      $uiUrl" -ForegroundColor Cyan
     Write-Host ""
 
-    $serverExe = Join-Path $PSScriptRoot "bin\llama-server.exe"
-    $serverArgs = @("-m", "$detectedModel", "-ngl", "99", "--port", "$apiPort", "--host", "127.0.0.1", "-fa", "on")
-    if ($env:AEROMESH_API_KEY) {
-        $serverArgs += @("--api-key", "$env:AEROMESH_API_KEY")
-    }
-    if ($onlinePeers.Count -gt 0) {
-        $peerArg = $onlinePeers -join ","
-        $serverArgs += @("--rpc", "$peerArg")
-    }
-    elseif ($peerList.Count -gt 0) {
-        Write-Host "  [-] WARNING: Could not connect to any specified worker peer ($($peerList -join ', '))." -ForegroundColor DarkYellow
-        Write-Host "      Starting in high-speed local GPU mode. Run '.\start.ps1 worker' on remote nodes to enable distributed cluster." -ForegroundColor Gray
-        Write-Host ""
-    }
+    $peerArg = if ($onlinePeers.Count -gt 0) { $onlinePeers -join "," } else { "" }
 
-    $rustProc = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -PassThru -NoNewWindow
-    
-    # Wait until engine is fully loaded in VRAM before launching UI
-    $isReady = Wait-ServerReady $coordUrl 45
+    if ($Mode -eq "rpc") {
+        $serverExe = Join-Path $PSScriptRoot "bin\llama-server.exe"
+        $serverArgs = @("-m", "$detectedModel", "-ngl", "99", "--port", "$apiPort", "--host", "127.0.0.1")
+        if ($env:AEROMESH_API_KEY) {
+            $serverArgs += @("--api-key", "$env:AEROMESH_API_KEY")
+        }
+        if ($onlinePeers.Count -gt 0) {
+            $numGpus = $onlinePeers.Count + 1
+            $tsArg = (1..$numGpus | ForEach-Object { "1" }) -join ","
+            $serverArgs += @("-ts", "$tsArg", "--rpc", "$peerArg")
+        }
+        $rustProc = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -PassThru -NoNewWindow
+        $isReady = Wait-ServerReady $coordUrl 120
+    }
+    else {
+        # Native Zero-Weight Activation Streaming Pipeline Coordinator (0.0 MB Weights on Wire)
+        $exe = Get-AeroMeshExe
+        $coordArgs = @("start", "--role", "coordinator", "--model", "$detectedModel", "--port", "$apiPort")
+        if ($peerArg) {
+            $coordArgs += @("--peers", "$peerArg")
+        }
+        if ($exe) {
+            $rustProc = Start-Process -FilePath $exe -ArgumentList $coordArgs -PassThru -NoNewWindow
+        }
+        else {
+            $cargoArgs = @("run", "--release", "--bin", "aeromesh", "--") + $coordArgs
+            $rustProc = Start-Process -FilePath "cargo" -ArgumentList $cargoArgs -PassThru -NoNewWindow
+        }
+        $isReady = Wait-ServerReady $coordUrl 60
+    }
 
     if (-not $NoBrowser -and $isReady) {
         Start-Process $uiUrl

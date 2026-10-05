@@ -480,9 +480,9 @@ async fn main() -> Result<()> {
                 "coordinator" => {
                     let api_port = port.unwrap_or(8080);
                     let slice_config = if let Some(l_str) = layers {
-                        parse_layer_range(&l_str, total_layers)?
+                        Some(parse_layer_range(&l_str, total_layers)?)
                     } else {
-                        LayerSliceConfig::new(0, mid.saturating_sub(1), total_layers)?
+                        None
                     };
 
                     let peer_list: Vec<String> = peers
@@ -502,7 +502,7 @@ async fn main() -> Result<()> {
 
                     info!("🚀 Starting AeroMesh Zero-Weight Coordinator & API Server on port {}...", api_port);
                     let ngl = 999;
-                    let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, Some(slice_config), ngl)?;
+                    let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, slice_config, ngl)?;
                     let server = PipelineHttpServer::new(client, model_name);
                     server.run("0.0.0.0", api_port).await?;
                 }
