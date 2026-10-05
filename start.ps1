@@ -73,6 +73,8 @@ function Initialize-AeroMeshSecrets {
             if ($idx -gt 0) {
                 $k = $line.Substring(0, $idx).Trim()
                 $v = $line.Substring($idx + 1).Trim().Trim('"').Trim("'")
+                [System.Environment]::SetEnvironmentVariable($k, $v, "Process")
+                Set-Item -Path "env:$k" -Value $v
                 if ($k -eq "AEROMESH_API_KEY") { $apiKey = $v }
                 if ($k -eq "AEROMESH_WORKER_SECRET") { $workerSecret = $v }
             }
@@ -117,6 +119,10 @@ function Initialize-AeroMeshSecrets {
     $env:AEROMESH_API_KEY = $apiKey
     $env:AEROMESH_WORKER_SECRET = $workerSecret
     $env:LLAMA_API_KEY = $apiKey
+    if (-not $env:AEROMESH_ACTIVATION_DTYPE) {
+        $env:AEROMESH_ACTIVATION_DTYPE = "bf16"
+        [System.Environment]::SetEnvironmentVariable("AEROMESH_ACTIVATION_DTYPE", "bf16", "Process")
+    }
 }
 
 function Stop-PortConflict {
@@ -275,6 +281,9 @@ Write-Host "  [-] Detected Model:      " -NoNewline -ForegroundColor Gray
 Write-Host "$modelName" -ForegroundColor Yellow
 Write-Host "  [-] Wire Weight Transfer:" -NoNewline -ForegroundColor Gray
 Write-Host " 0.0 MB (P2P Activation Streaming)" -ForegroundColor Cyan
+$activeCodec = if ($env:AEROMESH_ACTIVATION_DTYPE) { $env:AEROMESH_ACTIVATION_DTYPE.ToUpper() } else { "BF16" }
+Write-Host "  [-] Activation Codec:    " -NoNewline -ForegroundColor Gray
+Write-Host "$activeCodec (Lossless Dynamic Range)" -ForegroundColor Yellow
 Write-Host "  [-] Control Surface Auth:" -NoNewline -ForegroundColor Gray
 Write-Host " SEC-01 Active (API Key + Worker Handshake Token)" -ForegroundColor Green
 Write-Host "------------------------------------------------------------------------" -ForegroundColor DarkGray

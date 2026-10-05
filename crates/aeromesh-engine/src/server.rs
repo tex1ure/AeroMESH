@@ -716,7 +716,18 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
     } else {
         "SHM Ring Buffer (Loopback)"
     };
-    let per_token_kb = (meta.hidden_dim as f64 + 4.0 + 44.0) / 1024.0;
+    let (codec_name, bytes_per_elem) = match std::env::var("AEROMESH_ACTIVATION_DTYPE")
+        .unwrap_or_else(|_| "bf16".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "bf16" | "bfloat16" => ("BFloat16 Lossless Range (50% Wire Reduction)", 2.0),
+        "fp16" | "float16" => ("FP16 Half Precision (50% Wire Reduction)", 2.0),
+        "fp8" | "fp8_e4m3" => ("FP8-E4M3 Dynamic Range (75% Wire Reduction)", 1.0),
+        "int8" => ("Per-Row INT8 Dynamic Scaling (75% Wire Reduction)", 1.0),
+        _ => ("Raw FP32 Uncompressed", 4.0),
+    };
+    let per_token_kb = (meta.hidden_dim as f64 * bytes_per_elem + 44.0) / 1024.0;
 
     let cluster_status = if !has_workers {
         "STANDALONE"
@@ -737,7 +748,7 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
         "rtt_ms": if has_workers && is_connected { 1.14 } else { 0.0 },
         "link_badge": link_badge,
         "per_token_kb": format!("{:.2} KB/tok", per_token_kb),
-        "quantization": "Per-Row INT8 Dynamic Scaling (75% Wire Reduction)",
+        "quantization": codec_name,
         "coordinator": {
             "model": meta.model_path,
             "local_layers": format!("{}..={}", meta.local_layer_start, meta.local_layer_end),

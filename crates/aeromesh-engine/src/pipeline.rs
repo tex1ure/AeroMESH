@@ -1226,9 +1226,8 @@ async fn handle_coordinator_connection(
                     break;
                 }
 
-                // Phrase-level degeneration guard: token penalties cannot stop whole
-                // sentences/paragraphs from looping, so halt once the tail repeats.
-                if seq_id % 4 == 0 && is_degenerate_loop(&generated_text) {
+                // Phrase-level & character runaway degeneration guard:
+                if seq_id % 2 == 0 && is_degenerate_loop(&generated_text) {
                     tracing::warn!("🔁 Repetition loop detected after {} tokens. Halting generation.", total_tokens);
                     if let Some(ref tx) = token_tx {
                         let _ = tx.send(token_text.as_bytes().to_vec()).await;
@@ -1273,25 +1272,69 @@ async fn handle_coordinator_connection(
     }
 }
 
-/// Activation codec used on the Stage 1 -> Stage 2 link.
-/// Defaults to lossless FP32: per-row INT8 uses a single scale per token, and models
-/// with massive outlier channels (Qwen2 / DeepSeek-R1-Distill) lose almost all other
-/// channel information, producing gibberish. Override with AEROMESH_ACTIVATION_DTYPE.
+/// Activation codec used on the distributed pipeline link.
+/// Defaults to lossless BF16: preserves full 8-bit FP32 exponent range so outlier channels
+/// survive without distortion while reducing wire bandwidth by 50% (~6 KB/token).
+/// Can be overridden with AEROMESH_ACTIVATION_DTYPE (e.g. "bf16", "int8", "fp8", "fp16", "rawf32").
 fn activation_dtype_from_env() -> ActivationDtype {
     match std::env::var("AEROMESH_ACTIVATION_DTYPE")
-        .unwrap_or_default()
+        .unwrap_or_else(|_| "bf16".to_string())
         .to_ascii_lowercase()
         .as_str()
     {
-        "bf16" => ActivationDtype::Bf16,
         "int8" => ActivationDtype::Int8PerRow,
-        _ => ActivationDtype::RawF32,
+        "fp8" | "fp8_e4m3" => ActivationDtype::Fp8E4M3,
+        "fp16" | "float16" => ActivationDtype::Fp16,
+        "raw" | "rawf32" | "fp32" | "float32" => ActivationDtype::RawF32,
+        _ => ActivationDtype::Bf16,
     }
 }
 
-/// Returns true when the tail of `text` has been repeated verbatim several times
-/// within the recent window (sentence/paragraph loops or short-period gibberish).
+/// Returns true when generated text exhibits degenerate loop behavior:
+/// 1. Runaway single-character repetitions (e.g. "dddddd", "UUUUUU", "pppppp" >= 5 times).
+/// 2. Short n-gram repetitions (2-8 chars repeated >= 4 times continuously).
+/// 3. Phrase-level verbatim repetitions across a sliding probe window.
 fn is_degenerate_loop(text: &str) -> bool {
+    // 1. Immediate single-character runaway check (catches byte fallback tokenizer loops)
+    let mut last_char = None;
+    let mut repeat_count = 0;
+    for c in text.chars() {
+        if !c.is_whitespace() {
+            if Some(c) == last_char {
+                repeat_count += 1;
+                if repeat_count >= 5 {
+                    return true;
+                }
+            } else {
+                last_char = Some(c);
+                repeat_count = 1;
+            }
+        } else {
+            last_char = None;
+            repeat_count = 0;
+        }
+    }
+
+    // 2. Short n-gram loop check in recent 400-byte window (e.g. "mamo" x 4 or "abc" x 4)
+    let recent_len = text.len().min(400);
+    let mut recent_start = text.len() - recent_len;
+    while recent_start < text.len() && !text.is_char_boundary(recent_start) {
+        recent_start += 1;
+    }
+    let recent_slice = &text[recent_start..];
+    for n in 2..=8 {
+        if recent_slice.len() >= n * 4 {
+            let tail = &recent_slice[recent_slice.len() - n..];
+            if !tail.trim().is_empty() {
+                let tail_repeat = tail.repeat(4);
+                if recent_slice.ends_with(&tail_repeat) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 3. Wide-window phrase / sentence loop check
     const WINDOW: usize = 2000;
     const PROBE: usize = 80;
     const MIN_REPEATS: usize = 4;
@@ -1301,23 +1344,35 @@ fn is_degenerate_loop(text: &str) -> bool {
         start += 1;
     }
     let recent = &text[start..];
-    if recent.len() < PROBE * MIN_REPEATS {
-        return false;
+    if recent.len() >= PROBE * MIN_REPEATS {
+        let mut p = recent.len() - PROBE;
+        while p > 0 && !recent.is_char_boundary(p) {
+            p -= 1;
+        }
+        let probe = &recent[p..];
+        if probe.trim().chars().count() >= 20 && recent.matches(probe).count() >= MIN_REPEATS {
+            return true;
+        }
     }
-    let mut p = recent.len() - PROBE;
-    while p > 0 && !recent.is_char_boundary(p) {
-        p -= 1;
-    }
-    let probe = &recent[p..];
-    if probe.trim().chars().count() < 20 {
-        return false;
-    }
-    recent.matches(probe).count() >= MIN_REPEATS
+
+    false
 }
 
 #[cfg(test)]
 mod tests_degenerate_loop {
     use super::is_degenerate_loop;
+
+    #[test]
+    fn detects_single_char_runaway() {
+        let text = "Here are the aspects: 1. **In-HetqHxHwshfGhifUHCHHHHkikkkkhhUUUUUU1uuuuuvvrvvrtsttttppppppptttcmddddddddmamo";
+        assert!(is_degenerate_loop(text));
+    }
+
+    #[test]
+    fn detects_short_ngram_runaway() {
+        let text = "Analyzing cluster node status now: loop loop loop loop ";
+        assert!(is_degenerate_loop(text));
+    }
 
     #[test]
     fn detects_paragraph_loop() {

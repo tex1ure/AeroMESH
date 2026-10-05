@@ -920,11 +920,15 @@ impl LlamaPipelineInstance {
         let logits_ptr = unsafe { llama_get_logits_ith(self.ctx, -1) };
         if !logits_ptr.is_null() {
             let n_vocab = unsafe { llama_vocab_n_tokens(self.vocab) } as usize;
-            let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab.min(256)) };
+            let logits_slice = unsafe { std::slice::from_raw_parts_mut(logits_ptr, n_vocab) };
             let has_invalid = logits_slice.iter().any(|v| v.is_nan() || v.is_infinite());
             if has_invalid {
-                warn!("⚠️ Stage 2 output logits contain NaN/Inf! Resetting context memory.");
-                self.clear_kv_cache();
+                warn!("⚠️ Stage 2 output logits contain NaN/Inf! Sanitizing invalid logits to prevent cluster context desynchronization.");
+                for v in logits_slice.iter_mut() {
+                    if v.is_nan() || v.is_infinite() {
+                        *v = -1e9;
+                    }
+                }
             }
         }
 
