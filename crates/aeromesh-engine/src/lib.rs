@@ -9,7 +9,7 @@ pub mod server;
 pub mod gguf_slicer;
 
 pub use gguf::{inspect_gguf_file, resolve_model_path, GgufMetadata};
-pub use gguf_slicer::slice_gguf_for_pipeline;
+pub use gguf_slicer::{slice_gguf_for_pipeline, slice_gguf_stage, slice_gguf_for_multi_stage};
 pub use job_object::SafeProcessJob;
 pub use process::EngineSupervisor;
 pub use slice_loader::{ChatTemplateFormat, GgufSliceLoader, LayerSliceConfig, LayerSliceReport, LlamaPipelineInstance};

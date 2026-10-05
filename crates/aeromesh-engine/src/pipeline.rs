@@ -49,12 +49,16 @@ impl PipelineWorkerService {
         n_gpu_layers: i32,
     ) -> Result<Self> {
         let path_ref = model_path.as_ref();
-        let target_model_path = if path_ref.to_string_lossy().ends_with("_stage2.gguf") {
+        let target_model_path = if path_ref.to_string_lossy().contains("_stage") {
             path_ref.to_path_buf()
         } else {
             let out_dir = path_ref.parent().unwrap_or_else(|| Path::new("models"));
-            let (_, stage2) = crate::gguf_slicer::slice_gguf_for_pipeline(path_ref, out_dir, slice_config.layer_start)?;
-            stage2
+            let stage_idx = if slice_config.is_first_stage {
+                0
+            } else {
+                1
+            };
+            crate::gguf_slicer::slice_gguf_stage(path_ref, out_dir, &slice_config, stage_idx, 2)?
         };
 
         let instance = LlamaPipelineInstance::open(&target_model_path, slice_config.clone(), n_gpu_layers, 4096)?;
@@ -179,244 +183,431 @@ impl PipelineWorkerService {
     }
 }
 
-/// Dynamic Model Hot-Swapper: Scans models/ for a .gguf matching target hidden dimension and hot-swaps instance.
-fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u32, boundary_layer: u16) -> Result<LayerSliceConfig> {
+/// Dynamic Model Hot-Swapper: Scans models/ for a .gguf matching target hidden dimension and hot-swaps instance with stage-aware slicing.
+fn hot_swap_worker_model_stage(
+    inst: &mut LlamaPipelineInstance,
+    target_hidden_dim: u32,
+    worker_start: usize,
+    worker_end: usize,
+    stage_index: usize,
+    total_stages: usize,
+) -> Result<LayerSliceConfig> {
     info!(
-            current_dim = inst.hidden_dim,
-            target_dim = target_hidden_dim,
-            boundary_layer = boundary_layer,
-            "🔄 Hot-swapping worker model to match incoming activation dimension..."
-        );
+        current_dim = inst.hidden_dim,
+        target_dim = target_hidden_dim,
+        worker_start = worker_start,
+        worker_end = worker_end,
+        stage = stage_index + 1,
+        total_stages = total_stages,
+        "🔄 Hot-swapping worker model to match incoming activation dimension and layer slice..."
+    );
 
-        let models_dir = Path::new("models");
-        if let Ok(entries) = std::fs::read_dir(models_dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.extension().and_then(|e| e.to_str()) == Some("gguf") && !p.to_string_lossy().contains("_stage1") {
-                    if let Ok(loader) = GgufSliceLoader::open(&p) {
-                        if loader.hidden_dim == target_hidden_dim {
-                            let total_layers = loader.total_layers;
-                            let worker_start = (boundary_layer as usize).min(total_layers.saturating_sub(1));
-                            let worker_end = total_layers.saturating_sub(1);
-                            let new_slice = LayerSliceConfig::new(worker_start, worker_end, total_layers)?;
-                            let file_size_mb = std::fs::metadata(&p).map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
-                            let ngl = if file_size_mb <= 4500 { 999 } else { new_slice.layer_count() as i32 };
+    let models_dir = Path::new("models");
+    if let Ok(entries) = std::fs::read_dir(models_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("gguf") && !p.to_string_lossy().contains("_stage") {
+                if let Ok(loader) = GgufSliceLoader::open(&p) {
+                    if loader.hidden_dim == target_hidden_dim {
+                        let total_layers = loader.total_layers;
+                        let w_start = worker_start.min(total_layers.saturating_sub(1));
+                        let w_end = worker_end.min(total_layers.saturating_sub(1));
+                        let new_slice = LayerSliceConfig::new(w_start, w_end, total_layers)?;
+                        let file_size_mb = std::fs::metadata(&p).map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
+                        let ngl = if file_size_mb <= 4500 { 999 } else { new_slice.layer_count() as i32 };
 
-                            let out_dir = p.parent().unwrap_or_else(|| Path::new("models"));
-                            let target_path = if p.to_string_lossy().ends_with("_stage2.gguf") {
-                                p.clone()
-                            } else {
-                                let (_, stage2) = crate::gguf_slicer::slice_gguf_for_pipeline(&p, out_dir, worker_start)?;
-                                stage2
-                            };
+                        let out_dir = p.parent().unwrap_or_else(|| Path::new("models"));
+                        let target_path = crate::gguf_slicer::slice_gguf_stage(&p, out_dir, &new_slice, stage_index, total_stages)?;
 
-                            let new_inst = match LlamaPipelineInstance::open(&target_path, new_slice.clone(), ngl, 4096) {
-                                Ok(new_i) => {
-                                    inst.close();
-                                    new_i
-                                }
-                                Err(first_err) => {
-                                    warn!(error = %first_err, "Worker two-phase hot swap failed (VRAM pressure). Releasing active model to retry...");
-                                    inst.close();
-                                    LlamaPipelineInstance::open(&target_path, new_slice.clone(), ngl, 4096)?
-                                }
-                            };
-                            *inst = new_inst;
-                            info!(model = %target_path.display(), hidden_dim = loader.hidden_dim, "✅ Worker successfully hot-swapped model");
-                            return Ok(new_slice);
-                        }
+                        let new_inst = match LlamaPipelineInstance::open(&target_path, new_slice.clone(), ngl, 4096) {
+                            Ok(new_i) => {
+                                inst.close();
+                                new_i
+                            }
+                            Err(first_err) => {
+                                warn!(error = %first_err, "Worker two-phase hot swap failed (VRAM pressure). Releasing active model to retry...");
+                                inst.close();
+                                LlamaPipelineInstance::open(&target_path, new_slice.clone(), ngl, 4096)?
+                            }
+                        };
+                        *inst = new_inst;
+                        info!(model = %target_path.display(), hidden_dim = loader.hidden_dim, "✅ Worker successfully hot-swapped model");
+                        return Ok(new_slice);
                     }
                 }
             }
         }
-        bail!("Worker could not find a local GGUF model in 'models/' matching hidden_dim={}", target_hidden_dim)
     }
+    bail!("Worker could not find a local GGUF model in 'models/' matching hidden_dim={}", target_hidden_dim)
+}
 
-    async fn handle_coordinator_connection(
-        socket: &mut TcpStream,
-        peer_addr: SocketAddr,
-        instance: Arc<Mutex<LlamaPipelineInstance>>,
-        slice_config: LayerSliceConfig,
-    ) -> Result<()> {
-        // Step 1: Peek magic header to detect whether peer is sending Handshake (AHSK) or direct Activation (AERO)
-        let mut peek_buf = [0u8; 4];
-        let peek_fut = socket.peek(&mut peek_buf);
-        let _ = tokio::time::timeout(SOCKET_TIMEOUT, peek_fut)
-            .await
-            .context("Connection peek timeout")??;
+fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u32, boundary_layer: u16) -> Result<LayerSliceConfig> {
+    hot_swap_worker_model_stage(inst, target_hidden_dim, boundary_layer as usize, inst.total_layers.saturating_sub(1), 1, 2)
+}
 
-        let mut current_slice = slice_config.clone();
+async fn handle_coordinator_connection(
+    socket: &mut TcpStream,
+    peer_addr: SocketAddr,
+    instance: Arc<Mutex<LlamaPipelineInstance>>,
+    slice_config: LayerSliceConfig,
+) -> Result<()> {
+    // Step 1: Peek magic header to detect whether peer is sending Handshake (AHSK) or direct Activation (AERO)
+    let mut peek_buf = [0u8; 4];
+    let peek_fut = socket.peek(&mut peek_buf);
+    let _ = tokio::time::timeout(SOCKET_TIMEOUT, peek_fut)
+        .await
+        .context("Connection peek timeout")??;
 
-        if peek_buf == aeromesh_core::HANDSHAKE_REQ_MAGIC {
-            let handshake_fut = HandshakeRequest::decode_async(socket);
-            let req = match tokio::time::timeout(SOCKET_TIMEOUT, handshake_fut).await {
-                Ok(Ok(req)) => req,
-                Ok(Err(e)) => {
-                    warn!(peer = %peer_addr, error = %e, "🚨 Handshake decoding failed or legacy protocol version detected");
-                    let _ = socket.shutdown().await;
-                    return Ok(());
-                }
-                Err(_) => {
-                    warn!(peer = %peer_addr, "Handshake timeout");
-                    let _ = socket.shutdown().await;
-                    return Ok(());
-                }
-            };
+    let mut current_slice = slice_config.clone();
+    let mut downstream_socket: Option<TcpStream> = None;
+    let mut downstream_peer_str = String::new();
+    let mut current_stage_index: u8 = if slice_config.is_last_stage { 2 } else { 1 };
+    let mut current_total_stages: u8 = 2;
 
-            // Authenticate worker secret
-            let expected_secret = std::env::var("AEROMESH_WORKER_SECRET").unwrap_or_default();
-            let expected_token: [u8; 32] = Sha256::digest(expected_secret.as_bytes()).into();
-
-            // Constant-time comparison
-            let mut diff = 0u8;
-            for (a, b) in req.auth_token.iter().zip(expected_token.iter()) {
-                diff |= a ^ b;
-            }
-
-            if diff != 0 {
-                warn!(
-                    peer = %peer_addr,
-                    "🚨 Handshake rejected: invalid AEROMESH_WORKER_SECRET token from peer. Closing connection."
-                );
-                let resp = HandshakeResponse::reject("Authentication failed: invalid worker secret");
-                let _ = socket.write_all(&resp.encode()).await;
-                let _ = socket.flush().await;
+    if peek_buf == aeromesh_core::HANDSHAKE_REQ_MAGIC {
+        let handshake_fut = HandshakeRequest::decode_async(socket);
+        let req = match tokio::time::timeout(SOCKET_TIMEOUT, handshake_fut).await {
+            Ok(Ok(req)) => req,
+            Ok(Err(e)) => {
+                warn!(peer = %peer_addr, error = %e, "🚨 Handshake decoding failed or legacy protocol version detected");
                 let _ = socket.shutdown().await;
                 return Ok(());
             }
-
-            info!(
-                peer = %peer_addr,
-                arch = %req.model_architecture,
-                hidden_dim = req.hidden_dim,
-                total_layers = req.total_layers,
-                "✅ Received authenticated HandshakeRequest from Coordinator"
-            );
-
-            let mut inst = instance.lock().await;
-
-            if inst.hidden_dim != req.hidden_dim as usize || inst.total_layers != req.total_layers as usize {
-                current_slice = hot_swap_worker_model(&mut inst, req.hidden_dim, req.worker_layer_start as u16)?;
+            Err(_) => {
+                warn!(peer = %peer_addr, "Handshake timeout");
+                let _ = socket.shutdown().await;
+                return Ok(());
             }
-            drop(inst);
+        };
 
-            let resp = HandshakeResponse::ok(expected_token);
-            socket.write_all(&resp.encode()).await?;
-            socket.flush().await?;
-            info!(peer = %peer_addr, "✅ Handshake accepted. Ready for activation stream.");
+        // Authenticate worker secret
+        let expected_secret = std::env::var("AEROMESH_WORKER_SECRET").unwrap_or_default();
+        let expected_token: [u8; 32] = Sha256::digest(expected_secret.as_bytes()).into();
+
+        // Constant-time comparison
+        let mut diff = 0u8;
+        for (a, b) in req.auth_token.iter().zip(expected_token.iter()) {
+            diff |= a ^ b;
         }
 
-        // Step 2: Process incoming activation frames with dynamic in-place dequantization & hot-swapping
-        let mut active_session_id = 0u64;
-        let mut dequant_buf = Vec::new();
+        if diff != 0 {
+            warn!(
+                peer = %peer_addr,
+                "🚨 Handshake rejected: invalid AEROMESH_WORKER_SECRET token from peer. Closing connection."
+            );
+            let resp = HandshakeResponse::reject("Authentication failed: invalid worker secret");
+            let _ = socket.write_all(&resp.encode()).await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
+            return Ok(());
+        }
 
-        loop {
-            let frame_fut = ActivationFrame::decode_async(socket);
-            let frame = match tokio::time::timeout(Duration::from_secs(3600), frame_fut).await {
-                Ok(Ok(f)) => f,
-                Ok(Err(_)) => break,
-                Err(_) => break,
-            };
+        current_stage_index = req.stage_index;
+        current_total_stages = req.total_stages;
 
-            let start_time = Instant::now();
-            let mut inst = instance.lock().await;
+        info!(
+            peer = %peer_addr,
+            stage = req.stage_index,
+            total_stages = req.total_stages,
+            downstream = %req.downstream_peer,
+            arch = %req.model_architecture,
+            hidden_dim = req.hidden_dim,
+            total_layers = req.total_layers,
+            layers = %format!("{}..={}", req.worker_layer_start, req.worker_layer_end),
+            "✅ Received authenticated HandshakeRequest"
+        );
 
-            // Auto-sync worker model if incoming activation dimension differs from loaded model
-            if frame.header.hidden_dim as usize != inst.hidden_dim {
+        let mut inst = instance.lock().await;
+
+        if inst.hidden_dim != req.hidden_dim as usize
+            || inst.total_layers != req.total_layers as usize
+            || inst.slice_config.layer_start != req.worker_layer_start as usize
+            || inst.slice_config.layer_end != req.worker_layer_end as usize
+        {
+            current_slice = hot_swap_worker_model_stage(
+                &mut inst,
+                req.hidden_dim,
+                req.worker_layer_start as usize,
+                req.worker_layer_end as usize,
+                req.stage_index as usize,
+                req.total_stages as usize,
+            )?;
+        }
+        drop(inst);
+
+        // Connect downstream if downstream_peer is specified
+        if !req.downstream_peer.is_empty() {
+            let peer_parts: Vec<&str> = req.downstream_peer.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            if !peer_parts.is_empty() {
+                let next_peer_addr = peer_parts[0];
+                let remaining_peers = peer_parts[1..].join(",");
                 info!(
-                    worker_dim = inst.hidden_dim,
-                    incoming_dim = frame.header.hidden_dim,
-                    "🔄 Dynamic model dimension mismatch in activation stream. Hot-swapping worker model..."
+                    current_stage = req.stage_index,
+                    next_peer = next_peer_addr,
+                    remaining = %remaining_peers,
+                    "🔗 Intermediate Stage Worker: Connecting downstream to next pipeline peer..."
                 );
-                if let Ok(new_slice) = hot_swap_worker_model(&mut inst, frame.header.hidden_dim, frame.header.layer_index + 1) {
-                    current_slice = new_slice;
+
+                let mut ds_stream = match tokio::time::timeout(SOCKET_TIMEOUT, TcpStream::connect(next_peer_addr)).await {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        warn!(next_peer = next_peer_addr, error = %e, "Failed to connect to downstream pipeline peer");
+                        let resp = HandshakeResponse::reject(format!("Downstream connect failed: {}", e));
+                        let _ = socket.write_all(&resp.encode()).await;
+                        let _ = socket.flush().await;
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        warn!(next_peer = next_peer_addr, "Downstream connect timed out");
+                        let resp = HandshakeResponse::reject("Downstream connect timed out");
+                        let _ = socket.write_all(&resp.encode()).await;
+                        let _ = socket.flush().await;
+                        return Ok(());
+                    }
+                };
+                ds_stream.set_nodelay(true)?;
+
+                let next_stage = req.stage_index + 1;
+                let next_worker_start = req.worker_layer_end + 1;
+                let layers_per_stage = (req.total_layers as usize).div_ceil(req.total_stages as usize);
+                let next_worker_end = if remaining_peers.is_empty() {
+                    req.total_layers.saturating_sub(1)
+                } else {
+                    ((next_worker_start as usize + layers_per_stage - 1).min(req.total_layers as usize - 1)) as u32
+                };
+
+                let downstream_req = HandshakeRequest {
+                    version: aeromesh_core::PROTOCOL_VERSION,
+                    auth_token: req.auth_token,
+                    stage_index: next_stage,
+                    total_stages: req.total_stages,
+                    downstream_peer: remaining_peers,
+                    model_architecture: req.model_architecture.clone(),
+                    hidden_dim: req.hidden_dim,
+                    total_layers: req.total_layers,
+                    worker_layer_start: next_worker_start,
+                    worker_layer_end: next_worker_end,
+                    checksum_prefix: req.checksum_prefix.clone(),
+                };
+
+                let req_bytes = downstream_req.encode();
+                if let Err(e) = ds_stream.write_all(&req_bytes).await {
+                    warn!(error = %e, "Failed to send HandshakeRequest downstream");
+                    let resp = HandshakeResponse::reject("Failed to forward handshake downstream");
+                    let _ = socket.write_all(&resp.encode()).await;
+                    let _ = socket.flush().await;
+                    return Ok(());
+                }
+                let _ = ds_stream.flush().await;
+
+                let resp_fut = HandshakeResponse::decode_async(&mut ds_stream);
+                match tokio::time::timeout(SOCKET_TIMEOUT, resp_fut).await {
+                    Ok(Ok(resp)) if resp.accepted => {
+                        info!(next_peer = next_peer_addr, "✅ Downstream peer accepted handshake");
+                        downstream_socket = Some(ds_stream);
+                        downstream_peer_str = next_peer_addr.to_string();
+                    }
+                    Ok(Ok(resp)) => {
+                        warn!(next_peer = next_peer_addr, error = %resp.error_message, "Downstream peer rejected handshake");
+                        let r = HandshakeResponse::reject(format!("Downstream peer rejected handshake: {}", resp.error_message));
+                        let _ = socket.write_all(&r.encode()).await;
+                        let _ = socket.flush().await;
+                        return Ok(());
+                    }
+                    Ok(Err(e)) => {
+                        warn!(next_peer = next_peer_addr, error = %e, "Downstream handshake error");
+                        let r = HandshakeResponse::reject(format!("Downstream handshake error: {}", e));
+                        let _ = socket.write_all(&r.encode()).await;
+                        let _ = socket.flush().await;
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        warn!(next_peer = next_peer_addr, "Downstream handshake timed out");
+                        let r = HandshakeResponse::reject("Downstream handshake timed out");
+                        let _ = socket.write_all(&r.encode()).await;
+                        let _ = socket.flush().await;
+                        return Ok(());
+                    }
                 }
             }
+        }
 
-            // Reset KV-Cache on session change or explicit flag
-            if frame.header.session_id != active_session_id || frame.header.has_flag(FLAG_CLEAR_KV) {
-                info!(
-                    session_id = frame.header.session_id,
-                    prev_session = active_session_id,
-                    "🧹 Resetting Stage 2 KV-Cache for new session"
-                );
-                inst.clear_kv_cache();
-                active_session_id = frame.header.session_id;
+        let resp = HandshakeResponse::ok(expected_token);
+        socket.write_all(&resp.encode()).await?;
+        socket.flush().await?;
+        info!(peer = %peer_addr, "✅ Handshake accepted. Ready for activation stream.");
+    }
+
+    // Step 2: Process incoming activation frames with dynamic in-place dequantization & hot-swapping
+    let mut active_session_id = 0u64;
+    let mut dequant_buf = Vec::new();
+    let mut out_act_buf = Vec::new();
+
+    loop {
+        let frame_fut = ActivationFrame::decode_async(socket);
+        let frame = match tokio::time::timeout(Duration::from_secs(3600), frame_fut).await {
+            Ok(Ok(f)) => f,
+            Ok(Err(_)) => break,
+            Err(_) => break,
+        };
+
+        let start_time = Instant::now();
+        let mut inst = instance.lock().await;
+
+        // Auto-sync worker model if incoming activation dimension differs from loaded model
+        if frame.header.hidden_dim as usize != inst.hidden_dim {
+            info!(
+                worker_dim = inst.hidden_dim,
+                incoming_dim = frame.header.hidden_dim,
+                "🔄 Dynamic model dimension mismatch in activation stream. Hot-swapping worker model..."
+            );
+            if let Ok(new_slice) = hot_swap_worker_model_stage(
+                &mut inst,
+                frame.header.hidden_dim,
+                current_slice.layer_start,
+                current_slice.layer_end,
+                current_stage_index as usize,
+                current_total_stages as usize,
+            ) {
+                current_slice = new_slice;
             }
+        }
 
-            let seq_len = frame.header.sequence_length.max(1);
-            let start_pos = frame.header.token_position;
-            let seq_id = frame.header.sequence_id;
-            let total_elements = (seq_len as usize)
-                .checked_mul(frame.header.hidden_dim as usize)
-                .ok_or_else(|| anyhow::anyhow!("Integer overflow calculating total elements (seq_len={}, dim={})", seq_len, frame.header.hidden_dim))?;
-            ensure!(
-                total_elements <= (aeromesh_core::MAX_ACTIVATION_PAYLOAD_BYTES as usize),
-                "Total elements ({}) exceeds safety limit ({})",
-                total_elements,
-                aeromesh_core::MAX_ACTIVATION_PAYLOAD_BYTES
+        // Reset KV-Cache on session change or explicit flag
+        if frame.header.session_id != active_session_id || frame.header.has_flag(FLAG_CLEAR_KV) {
+            info!(
+                session_id = frame.header.session_id,
+                prev_session = active_session_id,
+                "🧹 Resetting Worker KV-Cache for new session"
+            );
+            inst.clear_kv_cache();
+            active_session_id = frame.header.session_id;
+        }
+
+        let seq_len = frame.header.sequence_length.max(1);
+        let start_pos = frame.header.token_position;
+        let seq_id = frame.header.sequence_id;
+        let total_elements = (seq_len as usize)
+            .checked_mul(frame.header.hidden_dim as usize)
+            .ok_or_else(|| anyhow::anyhow!("Integer overflow calculating total elements (seq_len={}, dim={})", seq_len, frame.header.hidden_dim))?;
+        ensure!(
+            total_elements <= (aeromesh_core::MAX_ACTIVATION_PAYLOAD_BYTES as usize),
+            "Total elements ({}) exceeds safety limit ({})",
+            total_elements,
+            aeromesh_core::MAX_ACTIVATION_PAYLOAD_BYTES
+        );
+
+        // In-place dequantize into reusable buffer
+        dequant_buf.resize(total_elements, 0.0f32);
+        frame.dequantize_into(&mut dequant_buf)?;
+
+        // Boundary Watchdog: Validate incoming activations
+        if let Err(e) = aeromesh_core::inspect_activations(
+            &format!("Worker_Stage{}_Ingress", current_stage_index),
+            &dequant_buf,
+            &[seq_len as usize, frame.header.hidden_dim as usize],
+        ) {
+            error!("🚨 Worker ingress watchdog assertion failed: {}", e);
+        }
+
+        if let Some(ref mut ds) = downstream_socket {
+            // Intermediate Node Execution: activations -> activations
+            inst.evaluate_activations_to_activations(&dequant_buf, seq_len, start_pos, &mut out_act_buf)?;
+            let eval_duration = start_time.elapsed();
+            let eval_time_ms = eval_duration.as_secs_f32() * 1000.0;
+            drop(inst);
+
+            // Package and send downstream
+            let next_frame = ActivationFrame::from_f32_matrix_quantized_stage(
+                frame.header.session_id,
+                frame.header.sequence_id,
+                seq_len,
+                start_pos,
+                current_stage_index,
+                current_total_stages,
+                current_slice.layer_end as u16,
+                frame.header.hidden_dim,
+                &out_act_buf,
+                ActivationDtype::from_u8(frame.header.dtype).unwrap_or(ActivationDtype::Int8PerRow),
+                frame.header.flags,
             );
 
-            // In-place dequantize into reusable buffer
-            dequant_buf.resize(total_elements, 0.0f32);
-            frame.dequantize_into(&mut dequant_buf)?;
+            let next_bytes = next_frame.encode();
+            ds.write_all(&next_bytes).await?;
+            ds.flush().await?;
 
-            // Phase 1 Boundary Watchdog: Validate incoming activations
-            if let Err(e) = aeromesh_core::inspect_activations(
-                "Worker_Ingress",
-                &dequant_buf,
-                &[seq_len as usize, frame.header.hidden_dim as usize],
-            ) {
-                error!("🚨 Worker ingress watchdog assertion failed: {}", e);
-            }
+            // Await TokenResponseFrame from downstream
+            let token_resp = TokenResponseFrame::decode_async(ds).await?;
 
-            // Execute Stage 2 GEMM forward pass from incoming activations
+            // Forward TokenResponseFrame back upstream
+            let resp_bytes = token_resp.encode();
+            socket.write_all(&resp_bytes).await?;
+            socket.flush().await?;
+
+            let dtype_tag = match ActivationDtype::from_u8(frame.header.dtype) {
+                Ok(ActivationDtype::Int8PerRow) => "INT8-Row",
+                Ok(ActivationDtype::Fp8E4M3) => "FP8-E4M3",
+                _ => "FP32",
+            };
+
+            println!(
+                "  ⚡ [Stage {} Intermediate] Step #{:<3} (pos: {}, S={}) | In: {:.2} KB [{}] -> Out: {:.2} KB | Forwarded to {} in {:.2}ms",
+                current_stage_index,
+                seq_id + 1,
+                start_pos,
+                seq_len,
+                (frame.payload.len() as f64) / 1024.0,
+                dtype_tag,
+                (next_frame.payload.len() as f64) / 1024.0,
+                downstream_peer_str,
+                eval_time_ms
+            );
+        } else {
+            // Terminal Node Execution: activations -> logits -> sample next token
             inst.evaluate_activations_to_logits(&dequant_buf, seq_len, start_pos)?;
-
             let eval_duration = start_time.elapsed();
             let eval_time_ms = eval_duration.as_secs_f32() * 1000.0;
 
-            if current_slice.is_last_stage {
-                // Sample actual token from Stage 2 LM Head logits
-                let next_token_id = inst.sample_next_token(0.7, 0.9, seq_id as u32)?;
-                let piece_bytes = inst.token_to_piece(next_token_id).unwrap_or_default();
-                let token_text = String::from_utf8_lossy(&piece_bytes).to_string();
-                let is_eos = inst.is_eog(next_token_id)
-                    || STOP_TOKENS.iter().any(|&tag| token_text.contains(tag));
+            let next_token_id = inst.sample_next_token(0.7, 0.9, seq_id as u32)?;
+            let piece_bytes = inst.token_to_piece(next_token_id).unwrap_or_default();
+            let token_text = String::from_utf8_lossy(&piece_bytes).to_string();
+            let is_eos = inst.is_eog(next_token_id)
+                || STOP_TOKENS.iter().any(|&tag| token_text.contains(tag));
 
-                let resp = TokenResponseFrame {
-                    session_id: active_session_id,
-                    sequence_id: seq_id,
-                    token_id: next_token_id,
-                    is_eos,
-                    token_text,
-                    eval_time_ms,
-                };
+            let resp = TokenResponseFrame {
+                session_id: active_session_id,
+                sequence_id: seq_id,
+                token_id: next_token_id,
+                is_eos,
+                token_text,
+                eval_time_ms,
+            };
 
-                let resp_bytes = resp.encode();
-                socket.write_all(&resp_bytes).await?;
-                socket.flush().await?;
+            let resp_bytes = resp.encode();
+            socket.write_all(&resp_bytes).await?;
+            socket.flush().await?;
 
-                let dtype_tag = match ActivationDtype::from_u8(frame.header.dtype) {
-                    Ok(ActivationDtype::Int8PerRow) => "INT8-Row",
-                    Ok(ActivationDtype::Fp8E4M3) => "FP8-E4M3",
-                    _ => "FP32",
-                };
+            let dtype_tag = match ActivationDtype::from_u8(frame.header.dtype) {
+                Ok(ActivationDtype::Int8PerRow) => "INT8-Row",
+                Ok(ActivationDtype::Fp8E4M3) => "FP8-E4M3",
+                _ => "FP32",
+            };
 
-                println!(
-                    "  ⚡ [Stage 2 Worker] Step #{:<3} (pos: {}, S={}) | Recv: {:.2} KB [{}] | Processed in {:.2}ms",
-                    seq_id + 1,
-                    start_pos,
-                    seq_len,
-                    (frame.payload.len() as f64) / 1024.0,
-                    dtype_tag,
-                    eval_time_ms
-                );
-            }
+            println!(
+                "  ⚡ [Stage {} Terminal Worker] Step #{:<3} (pos: {}, S={}) | Recv: {:.2} KB [{}] | Processed in {:.2}ms",
+                current_stage_index,
+                seq_id + 1,
+                start_pos,
+                seq_len,
+                (frame.payload.len() as f64) / 1024.0,
+                dtype_tag,
+                eval_time_ms
+            );
         }
-
-        Ok(())
     }
+
+    Ok(())
+}
 
     // ---------------------------------------------------------------------------
     // Coordinator Pipeline Client (Zero-Weight Pipeline Stage 1 Orchestrator)
@@ -463,12 +654,13 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 )
             };
 
-            let target_model_path = if path_ref.to_string_lossy().ends_with("_stage1.gguf") {
+            let num_stages = worker_addrs.len() + 1;
+            let target_model_path = if (num_stages == 2 && path_ref.to_string_lossy().ends_with("_stage1.gguf"))
+                || (num_stages > 2 && path_ref.to_string_lossy().ends_with(&format!("_stage1_of_{}.gguf", num_stages))) {
                 path_ref.to_path_buf()
             } else if !worker_addrs.is_empty() {
                 let out_dir = path_ref.parent().unwrap_or_else(|| Path::new("models"));
-                let (stage1, _) = crate::gguf_slicer::slice_gguf_for_pipeline(path_ref, out_dir, local_slice.layer_end + 1)?;
-                stage1
+                crate::gguf_slicer::slice_gguf_stage(path_ref, out_dir, &local_slice, 0, num_stages)?
             } else {
                 path_ref.to_path_buf()
             };
@@ -567,12 +759,13 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 .unwrap_or(0);
             let ngl = if file_size_mb <= 4500 { 999 } else { local_slice.layer_count() as i32 };
 
-            let target_model_path = if path_ref.to_string_lossy().ends_with("_stage1.gguf") {
+            let num_stages = self.worker_addrs.len() + 1;
+            let target_model_path = if (num_stages == 2 && path_ref.to_string_lossy().ends_with("_stage1.gguf"))
+                || (num_stages > 2 && path_ref.to_string_lossy().ends_with(&format!("_stage1_of_{}.gguf", num_stages))) {
                 path_ref.to_path_buf()
             } else if !self.worker_addrs.is_empty() {
                 let out_dir = path_ref.parent().unwrap_or_else(|| Path::new("models"));
-                let (stage1, _) = crate::gguf_slicer::slice_gguf_for_pipeline(path_ref, out_dir, local_slice.layer_end + 1)?;
-                stage1
+                crate::gguf_slicer::slice_gguf_stage(path_ref, out_dir, &local_slice, 0, num_stages)?
             } else {
                 path_ref.to_path_buf()
             };
@@ -662,8 +855,27 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         };
         stream.set_nodelay(true)?;
 
-        let worker_start = (self.local_slice.layer_end + 1) as u32;
-        let worker_end = (self.total_layers.saturating_sub(1)) as u32;
+        let total_stages = (self.worker_addrs.len() + 1) as u8;
+        let downstream_peer = if self.worker_addrs.len() > 1 {
+            self.worker_addrs[1..]
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        } else {
+            String::new()
+        };
+
+        let (worker_start, worker_end) = if total_stages == 2 {
+            let start = (self.local_slice.layer_end + 1) as u32;
+            let end = (self.total_layers.saturating_sub(1)) as u32;
+            (start, end)
+        } else {
+            let layers_per_stage = self.total_layers.div_ceil(total_stages as usize);
+            let start = self.local_slice.layer_end + 1;
+            let end = (start + layers_per_stage - 1).min(self.total_layers.saturating_sub(1));
+            (start as u32, end as u32)
+        };
 
         let worker_secret = std::env::var("AEROMESH_WORKER_SECRET").unwrap_or_default();
         let auth_token: [u8; 32] = Sha256::digest(worker_secret.as_bytes()).into();
@@ -671,6 +883,9 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         let req = HandshakeRequest {
             version: aeromesh_core::PROTOCOL_VERSION,
             auth_token,
+            stage_index: 1,
+            total_stages,
+            downstream_peer,
             model_architecture: "llama".to_string(),
             hidden_dim: self.hidden_dim as u32,
             total_layers: self.total_layers as u32,
@@ -725,6 +940,7 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
     ) -> Result<(String, Vec<String>)> {
         let _ = self.ensure_connected().await;
 
+        let total_stages = (self.worker_addrs.len() + 1) as u8;
         let transport_tag = match self.transport {
             Some(ref t) if t.is_shm() => "Intra-Host Zero-Copy SHM Ring Buffer",
             Some(_) => "Low-Latency Tuned TCP Socket",
@@ -734,8 +950,11 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         println!("\n========================================================");
         println!("   AEROMESH DISTRIBUTED PIPELINE GENERATION             ");
         println!("========================================================");
-        println!("  Stage 1 (Local):    Layers {}..={}", self.local_slice.layer_start, self.local_slice.layer_end);
-        println!("  Stage 2 (Remote):   Layers {}..={}", self.local_slice.layer_end + 1, self.total_layers.saturating_sub(1));
+        println!("  Pipeline Stages:    {} node(s)", total_stages);
+        println!("  Stage 0 (Coord):    Layers {}..={}", self.local_slice.layer_start, self.local_slice.layer_end);
+        for (i, w) in self.worker_addrs.iter().enumerate() {
+            println!("  Stage {} (Worker):   {}", i + 1, w);
+        }
         println!("  Hidden Dimension:   {}", self.hidden_dim);
         println!("  Activation Codec:   {:?} ({:.2} KB per decode step)", self.target_dtype,
             (self.hidden_dim * self.target_dtype.bytes_per_element()) as f64 / 1024.0);
@@ -815,11 +1034,13 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         // Stream Quantized Prefill Activation Frame [S * hidden_dim]
         let mut transport_ok = false;
         if let Some(ref mut transport) = self.transport {
-            let prefill_frame = ActivationFrame::from_f32_matrix_quantized(
+            let prefill_frame = ActivationFrame::from_f32_matrix_quantized_stage(
                 session_id,
                 0,
                 prompt_len,
                 0,
+                0,
+                total_stages,
                 self.local_slice.layer_end as u16,
                 self.hidden_dim as u32,
                 &prefill_activations,
@@ -841,11 +1062,13 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
             self.transport = None;
             if self.ensure_connected().await.is_ok() {
                 if let Some(ref mut transport) = self.transport {
-                    let prefill_frame = ActivationFrame::from_f32_matrix_quantized(
+                    let prefill_frame = ActivationFrame::from_f32_matrix_quantized_stage(
                         session_id,
                         0,
                         prompt_len,
                         0,
+                        0,
+                        total_stages,
                         self.local_slice.layer_end as u16,
                         self.hidden_dim as u32,
                         &prefill_activations,
@@ -929,11 +1152,13 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
 
                 // Stream single-token quantized activation frame [1 * hidden_dim: 1.50 KB or 5.12 KB]
                 if let Some(ref mut transport) = self.transport {
-                    let decode_frame = ActivationFrame::from_f32_matrix_quantized(
+                    let decode_frame = ActivationFrame::from_f32_matrix_quantized_stage(
                         session_id,
                         seq_id as u64,
                         1,
                         current_pos,
+                        0,
+                        total_stages,
                         self.local_slice.layer_end as u16,
                         self.hidden_dim as u32,
                         &decode_act_buf,

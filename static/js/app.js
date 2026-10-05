@@ -250,23 +250,25 @@
       const isDirectWg = data.connected && (data.is_direct_wireguard || (data.transport && data.transport.includes('WireGuard')));
       const workerDisconnected = workers.length > 0 && data.connected === false;
 
+      const totalNodes = data.nodes_count || (workers.length + 1);
+
       elements.clusterStatsDynamic.innerHTML = `
         <div class="cluster-stats-row">
           <span>Status:</span>
           <span style="color: ${workerDisconnected ? 'var(--accent-orange)' : 'var(--accent-mint)'}; font-weight: 600;">
-            ${workerDisconnected ? '⚠️ Worker Disconnected' : (state === 'online_generating' ? '⚡ Inferring (2 Nodes)' : 'Active (Idle)')}
+            ${workerDisconnected ? '⚠️ Worker Disconnected' : (state === 'online_generating' ? `⚡ Inferring (${totalNodes} Nodes)` : 'Active (Idle)')}
           </span>
         </div>
         <div class="cluster-stats-row">
           <span>Topology:</span>
-          <span class="stat-highlight" style="${isDirectWg ? 'background: rgba(16, 185, 129, 0.15); color: var(--accent-mint);' : ''}">${isDirectWg ? '2 Nodes (Direct P2P)' : (workerDisconnected ? 'Worker Offline' : '1 Node (Local)')}</span>
+          <span class="stat-highlight" style="${isDirectWg ? 'background: rgba(16, 185, 129, 0.15); color: var(--accent-mint);' : ''}">${isDirectWg ? `${totalNodes} Nodes (Direct P2P)` : (workerDisconnected ? 'Worker Offline' : '1 Node (Local)')}</span>
         </div>
         <div class="cluster-stats-row">
           <span>Coordinator:</span>
           <span class="stat-highlight">Layers ${localStage.layer_start ?? 0}..${localStage.layer_end ?? 23}</span>
         </div>
         <div class="cluster-stats-row">
-          <span>Worker:</span>
+          <span>Worker${workers.length > 1 ? 's' : ''}:</span>
           <span class="stat-highlight" style="${workerDisconnected ? 'color: var(--accent-orange);' : ''}">${workers.length > 0 ? workers.join(', ') : (isDirectWg ? '100.66.49.50:50052' : 'Direct Pipeline')}</span>
         </div>
         <div class="cluster-stats-row">
@@ -285,10 +287,10 @@
         elements.topStatusDot.classList.remove('offline');
         if (state === 'online_generating') {
           elements.topStatusDot.classList.add('generating');
-          elements.topStatusText.textContent = isDirectWg ? 'Cluster Inferring (2 Nodes)' : 'Cluster Inferring';
+          elements.topStatusText.textContent = isDirectWg ? `Cluster Inferring (${totalNodes} Nodes)` : 'Cluster Inferring';
         } else {
           elements.topStatusDot.classList.remove('generating');
-          elements.topStatusText.textContent = isDirectWg ? '2 Nodes Connected (Direct WG)' : 'Pipeline Connected (Local)';
+          elements.topStatusText.textContent = isDirectWg ? `${totalNodes} Nodes Connected (Direct WG)` : 'Pipeline Connected (Local)';
         }
         elements.topStatusText.parentElement.style.color = 'var(--accent-mint)';
       }
@@ -300,7 +302,7 @@
         elements.modalClusterStatus.textContent = 'Coordinator active — Streaming activations via Direct WireGuard';
       } else {
         elements.modalStatusDot.classList.remove('generating');
-        elements.modalClusterStatus.textContent = `Coordinator active on ${data.coordinator_endpoint || 'http://127.0.0.1:8080'} (${isDirectWg ? '2-Node Mesh' : 'Idle'})`;
+        elements.modalClusterStatus.textContent = `Coordinator active on ${data.coordinator_endpoint || 'http://127.0.0.1:8080'} (${isDirectWg ? `${totalNodes}-Node Mesh` : 'Idle'})`;
       }
       elements.modalClusterStatus.style.color = 'var(--accent-mint)';
 

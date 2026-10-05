@@ -716,7 +716,7 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
     } else {
         "SHM Ring Buffer (Loopback)"
     };
-    let per_token_kb = (meta.hidden_dim as f64 + 4.0 + 42.0) / 1024.0;
+    let per_token_kb = (meta.hidden_dim as f64 + 4.0 + 44.0) / 1024.0;
 
     let cluster_status = if !has_workers {
         "STANDALONE"

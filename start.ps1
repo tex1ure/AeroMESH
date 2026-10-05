@@ -440,31 +440,40 @@ if ($Role -eq "coordinator") {
     # Check for Peer IP if not supplied
     if (-not $Peers) {
         Write-Host ""
-        Write-Host "Enter the Worker Address (ZeroTier / LAN / Tailscale IP:Port, example: 10.78.133.107:50052):" -ForegroundColor Yellow
+        Write-Host "Enter Worker Address(es) (ZeroTier / LAN / Tailscale IP:Port, comma-separated for 3+ nodes, example: 10.78.133.107:50052, 10.78.133.108:50052):" -ForegroundColor Yellow
         $enteredPeer = Read-Host "Worker Peer IP:Port"
         if ($enteredPeer) {
             $Peers = $enteredPeer.Trim()
         }
     }
 
-    if ($Peers -and -not $Peers.Contains(":")) {
-        $Peers = "$($Peers.Trim()):50052"
+    $peerList = @()
+    if ($Peers) {
+        $rawPeers = $Peers -split ','
+        foreach ($rp in $rawPeers) {
+            $p = $rp.Trim()
+            if ($p) {
+                if (-not $p.Contains(":")) { $p = "$p:50052" }
+                $peerList += $p
+            }
+        }
     }
 
     $coordUrl = "http://127.0.0.1:" + $apiPort
     $uiUrl = "http://127.0.0.1:7860"
 
-    $workerStatusStr = "Local Standalone"
-    $isPeerReachable = $false
-    if ($Peers) {
-        $isPeerReachable = Test-PeerReachable $Peers
-        if ($isPeerReachable) {
-            $workerStatusStr = "$Peers (✅ ONLINE)"
+    $workerStatusArr = @()
+    $onlinePeers = @()
+    foreach ($p in $peerList) {
+        if (Test-PeerReachable $p) {
+            $workerStatusArr += "$p (✅ ONLINE)"
+            $onlinePeers += $p
         }
         else {
-            $workerStatusStr = "$Peers (⚠️ UNREACHABLE - Check Laptop B / start.ps1 worker)"
+            $workerStatusArr += "$p (⚠️ UNREACHABLE)"
         }
     }
+    $workerStatusStr = if ($workerStatusArr.Count -gt 0) { $workerStatusArr -join ", " } else { "Local Standalone" }
 
     # Free stale ports before launching
     Stop-PortConflict @($apiPort, 7860)
@@ -482,12 +491,13 @@ if ($Role -eq "coordinator") {
     if ($env:AEROMESH_API_KEY) {
         $serverArgs += @("--api-key", "$env:AEROMESH_API_KEY")
     }
-    if ($Peers -and $isPeerReachable) {
-        $serverArgs += @("--rpc", "$Peers")
+    if ($onlinePeers.Count -gt 0) {
+        $peerArg = $onlinePeers -join ","
+        $serverArgs += @("--rpc", "$peerArg")
     }
-    elseif ($Peers -and -not $isPeerReachable) {
-        Write-Host "  [-] WARNING: Could not connect to $Peers." -ForegroundColor DarkYellow
-        Write-Host "      Starting in high-speed local GPU mode. Run '.\start.ps1 worker' on Laptop B to enable distributed cluster." -ForegroundColor Gray
+    elseif ($peerList.Count -gt 0) {
+        Write-Host "  [-] WARNING: Could not connect to any specified worker peer ($($peerList -join ', '))." -ForegroundColor DarkYellow
+        Write-Host "      Starting in high-speed local GPU mode. Run '.\start.ps1 worker' on remote nodes to enable distributed cluster." -ForegroundColor Gray
         Write-Host ""
     }
 

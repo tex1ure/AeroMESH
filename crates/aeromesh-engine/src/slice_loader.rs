@@ -832,6 +832,83 @@ impl LlamaPipelineInstance {
         Ok(())
     }
 
+    /// Intermediate Stage (1 <= stage < N - 1):
+    /// Evaluates input activation matrix through intermediate transformer layer blocks,
+    /// extracting output activation matrix [seq_len * hidden_dim] for downstream forwarding.
+    pub fn evaluate_activations_to_activations(
+        &mut self,
+        activations: &[f32],
+        seq_len: u32,
+        start_pos: u32,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        self.ensure_ready()?;
+        ensure!(
+            activations.len() == (seq_len as usize) * self.hidden_dim,
+            "Activation size mismatch: expected {} floats, got {}",
+            (seq_len as usize) * self.hidden_dim,
+            activations.len()
+        );
+
+        if seq_len == 0 {
+            out.clear();
+            return Ok(());
+        }
+
+        let n_tokens = seq_len as i32;
+        let mut batch = unsafe { llama_batch_init(n_tokens, self.hidden_dim as i32, 1) };
+        batch.n_tokens = n_tokens;
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                activations.as_ptr(),
+                batch.embd,
+                activations.len(),
+            );
+        }
+
+        for i in 0..n_tokens {
+            unsafe {
+                *batch.pos.add(i as usize) = (start_pos as i32) + i;
+                *batch.n_seq_id.add(i as usize) = 1;
+                *(*batch.seq_id.add(i as usize)) = 0;
+                // CRITICAL: Request output embeddings for all tokens in intermediate stage
+                *batch.logits.add(i as usize) = 1;
+            }
+        }
+
+        let res = unsafe { llama_decode(self.ctx, batch) };
+        unsafe { llama_batch_free(batch) };
+
+        if res != 0 {
+            bail!("llama_decode failed in intermediate activation forward pass (code {})", res);
+        }
+
+        // Explicit CUDA Stream Synchronization
+        unsafe { llama_synchronize(self.ctx) };
+
+        let total_floats = (n_tokens as usize) * self.hidden_dim;
+        if out.len() != total_floats {
+            out.resize(total_floats, 0.0);
+        }
+
+        for i in 0..n_tokens {
+            let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
+            if embd_ptr.is_null() {
+                bail!("Failed to get intermediate embeddings at index {} from llama_context", i);
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    embd_ptr,
+                    out.as_mut_ptr().add((i as usize) * self.hidden_dim),
+                    self.hidden_dim,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Samples next token from the latest logits computed by Stage 2, applying repetition penalties and accepting the token.
     pub fn sample_next_token(
         &mut self,
@@ -936,6 +1013,9 @@ mod tests_instance_safety {
         // evaluate_activations_to_logits must return error
         let acts = vec![0.0f32; 128];
         assert!(inst.evaluate_activations_to_logits(&acts, 1, 0).is_err(), "evaluate_activations must return error");
+
+        // evaluate_activations_to_activations must return error
+        assert!(inst.evaluate_activations_to_activations(&acts, 1, 0, &mut out).is_err(), "evaluate_activations_to_activations must return error");
 
         // sample_next_token must return error
         assert!(inst.sample_next_token(0.7, 0.9, 42).is_err(), "sample_next_token must return error");
