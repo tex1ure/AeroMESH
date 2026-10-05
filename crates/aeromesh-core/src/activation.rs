@@ -349,6 +349,39 @@ impl ActivationFrame {
 
                 Self { header, payload }
             }
+            ActivationDtype::Bf16 => {
+                // BF16 keeps the full FP32 exponent range, so outlier channels
+                // (thousands in magnitude) survive alongside small values.
+                let mut payload = BytesMut::with_capacity(seq_len * d * 2);
+                for &val in matrix {
+                    let bits = val.to_bits();
+                    let bf = if val.is_nan() {
+                        0x7FC0u16
+                    } else {
+                        // Round-to-nearest-even on the truncated 16 mantissa bits
+                        let rounding = 0x7FFFu32 + ((bits >> 16) & 1);
+                        (bits.wrapping_add(rounding) >> 16) as u16
+                    };
+                    payload.extend_from_slice(&bf.to_le_bytes());
+                }
+
+                let payload = payload.freeze();
+                let header = ActivationHeader {
+                    magic: ACTIVATION_MAGIC,
+                    version: PROTOCOL_VERSION,
+                    session_id,
+                    sequence_id,
+                    sequence_length,
+                    token_position,
+                    layer_index,
+                    hidden_dim,
+                    dtype: ActivationDtype::Bf16 as u8,
+                    flags,
+                    payload_bytes: payload.len() as u32,
+                };
+
+                Self { header, payload }
+            }
             _ => {
                 // Raw uncompressed FP32 (endian-safe LittleEndian serialization)
                 let mut payload = BytesMut::with_capacity(matrix.len() * 4);
@@ -1064,6 +1097,27 @@ mod tests {
             let rec = fp8_e4m3_to_f32(fp8);
             let diff = (v - rec).abs();
             assert!(diff <= 0.5 * v.abs().max(0.1), "FP8 roundtrip error too large for {}", v);
+        }
+    }
+
+    #[test]
+    fn test_bf16_preserves_outlier_activations() {
+        // Qwen2-style residual: one massive outlier channel + many small values
+        let d = 64usize;
+        let mut data: Vec<f32> = (0..d).map(|i| ((i as f32) * 0.37).sin() * 2.0).collect();
+        data[7] = 4000.0;
+
+        let int8 = ActivationFrame::from_f32_matrix_quantized(1, 0, 1, 0, 23, d as u32, &data, ActivationDtype::Int8PerRow, 0);
+        let int8_rec = int8.to_f32_vec().unwrap();
+        let int8_zeroed = (0..d).filter(|&i| i != 7 && int8_rec[i] == 0.0).count();
+        assert!(int8_zeroed > d / 2, "INT8 per-row is expected to destroy small channels next to outliers");
+
+        let bf16 = ActivationFrame::from_f32_matrix_quantized(1, 0, 1, 0, 23, d as u32, &data, ActivationDtype::Bf16, 0);
+        assert_eq!(bf16.header.dtype, ActivationDtype::Bf16 as u8);
+        let bf16_rec = bf16.to_f32_vec().unwrap();
+        for i in 0..d {
+            let tol = data[i].abs() * 0.01 + 1e-3;
+            assert!((data[i] - bf16_rec[i]).abs() <= tol, "BF16 error too large at {}: {} vs {}", i, data[i], bf16_rec[i]);
         }
     }
 

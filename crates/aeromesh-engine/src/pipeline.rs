@@ -493,7 +493,7 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
                 hidden_dim,
                 total_layers,
                 transport: None,
-                target_dtype: ActivationDtype::Int8PerRow,
+                target_dtype: activation_dtype_from_env(),
             })
         }
 
@@ -737,7 +737,8 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
         println!("  Stage 1 (Local):    Layers {}..={}", self.local_slice.layer_start, self.local_slice.layer_end);
         println!("  Stage 2 (Remote):   Layers {}..={}", self.local_slice.layer_end + 1, self.total_layers.saturating_sub(1));
         println!("  Hidden Dimension:   {}", self.hidden_dim);
-        println!("  Quantization:       Per-Row INT8 Dynamic Scaling (75% payload reduction)");
+        println!("  Activation Codec:   {:?} ({:.2} KB per decode step)", self.target_dtype,
+            (self.hidden_dim * self.target_dtype.bytes_per_element()) as f64 / 1024.0);
         println!("  Transport:          {}", transport_tag);
         println!("  Session ID:         {}", session_id);
         println!("  Prompt:             {:?}", prompt);
@@ -1028,18 +1029,38 @@ fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u3
 
         let total_time = total_start.elapsed();
         let tok_per_sec = (total_tokens as f64) / total_time.as_secs_f64();
-        let quantized_bytes_per_step = (self.hidden_dim + 4) as f64;
+        let bytes_per_step = match self.target_dtype {
+            ActivationDtype::Int8PerRow => (self.hidden_dim + 4) as f64,
+            dt => (self.hidden_dim * dt.bytes_per_element()) as f64,
+        };
 
         perf_metrics.push(format!("Prefill Latency: {:.2} ms ({} tokens)", prefill_time.as_secs_f32() * 1000.0, prompt_len));
         perf_metrics.push(format!("Total Generation Time: {:.2} s", total_time.as_secs_f64()));
         perf_metrics.push(format!("Tokens Generated: {}", total_tokens));
         perf_metrics.push(format!("Inference Speed: {:.2} tok/s", tok_per_sec));
         perf_metrics.push(format!(
-            "Network Payload per Step: {:.2} KB (INT8 Per-Row Quantized, 75% Reduction)",
-            quantized_bytes_per_step / 1024.0
+            "Network Payload per Step: {:.2} KB ({:?} activations)",
+            bytes_per_step / 1024.0,
+            self.target_dtype
         ));
 
         Ok((generated_text, perf_metrics))
+    }
+}
+
+/// Activation codec used on the Stage 1 -> Stage 2 link.
+/// Defaults to lossless FP32: per-row INT8 uses a single scale per token, and models
+/// with massive outlier channels (Qwen2 / DeepSeek-R1-Distill) lose almost all other
+/// channel information, producing gibberish. Override with AEROMESH_ACTIVATION_DTYPE.
+fn activation_dtype_from_env() -> ActivationDtype {
+    match std::env::var("AEROMESH_ACTIVATION_DTYPE")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "bf16" => ActivationDtype::Bf16,
+        "int8" => ActivationDtype::Int8PerRow,
+        _ => ActivationDtype::RawF32,
     }
 }
 
