@@ -324,14 +324,26 @@ async fn handle_coordinator_connection(
             || inst.slice_config.layer_start != req.worker_layer_start as usize
             || inst.slice_config.layer_end != req.worker_layer_end as usize
         {
-            current_slice = hot_swap_worker_model_stage(
+            match hot_swap_worker_model_stage(
                 &mut inst,
                 req.hidden_dim,
                 req.worker_layer_start as usize,
                 req.worker_layer_end as usize,
                 req.stage_index as usize,
                 req.total_stages as usize,
-            )?;
+            ) {
+                Ok(new_slice) => {
+                    current_slice = new_slice;
+                }
+                Err(e) => {
+                    warn!(peer = %peer_addr, error = %e, "🚨 Worker failed to hot-swap model");
+                    let resp = HandshakeResponse::reject(format!("Worker failed to hot-swap model: {}", e));
+                    let _ = socket.write_all(&resp.encode()).await;
+                    let _ = socket.flush().await;
+                    let _ = socket.shutdown().await;
+                    return Ok(());
+                }
+            }
         }
         drop(inst);
 
