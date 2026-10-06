@@ -12,12 +12,9 @@ Windows/Linux compatibility, networking improvements, testing, and UI work.
 ## License
 
 By contributing to AeroMESH, you agree that your contributions will be
-licensed under the same dual license as the project:
+licensed under the Apache License, Version 2.0.
 
-- MIT License
-- Apache License, Version 2.0
-
-See `LICENSE`, `LICENSE-MIT`, and `LICENSE-APACHE` for details.
+See `LICENSE` for details.
 
 ## Development Environment
 

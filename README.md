@@ -300,10 +300,7 @@ AeroMESH/
 ├── Cargo.toml                    # Cargo workspace definition (2021 edition)
 ├── BENCHMARKS.md                 # Latency, memory compression, and wire throughput benchmarks
 ├── CONTRIBUTING.md               # Development setup, testing, and contribution guidelines
-├── DEMO_SCRIPT.md                # Presenter battlecard and live demonstration playbook
-├── LICENSE                       # Dual-license root terms (MIT OR Apache-2.0)
-├── LICENSE-MIT                   # MIT license text
-├── LICENSE-APACHE                # Apache 2.0 license text
+├── LICENSE                       # Apache License (Version 2.0)
 ├── LIMITATIONS.md                # Architectural boundaries, hardware scope, and operational trade-offs
 ├── README.md                     # Technical architecture and user guide
 ├── setup.ps1                     # 1-Click environment bootstrap script for Windows
@@ -686,11 +683,6 @@ If `aeromesh` fails to locate `ggml-cuda.dll` or llama dependencies:
 
 ## License
 
-AeroMESH is licensed under either of:
+AeroMESH is distributed under the terms of the Apache License (Version 2.0).
 
-- MIT License, see [LICENSE-MIT](LICENSE-MIT)
-- Apache License, Version 2.0, see [LICENSE-APACHE](LICENSE-APACHE)
-
-at your option.
-
-See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE) for the full license text.
