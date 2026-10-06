@@ -31,6 +31,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
 
 use crate::pipeline::{CoordinatorStatus, PipelineCoordinatorClient};
+use crate::slice_loader::ChatTemplateFormat;
 
 // ---------------------------------------------------------------------------
 // Standard OpenAI Error Envelope (FIX-06 & FIX-07)
@@ -241,6 +242,8 @@ pub struct ChatCompletionRequest {
     pub stream: Option<bool>,
     #[serde(default)]
     pub session_id: Option<u64>,
+    #[serde(default)]
+    pub reasoning: Option<bool>,
 }
 
 fn default_max_tokens() -> Option<usize> {
@@ -583,7 +586,7 @@ pub struct SwitchModelRequest {
 async fn handle_switch_model(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SwitchModelRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let model_req = req.model.trim().to_string();
     let model_path = if std::path::Path::new(&model_req).exists() {
         std::path::PathBuf::from(&model_req)
@@ -592,7 +595,10 @@ async fn handle_switch_model(
     } else {
         return Err((
             StatusCode::NOT_FOUND,
-            format!("Model '{}' not found in models/ directory", model_req),
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Model '{}' not found in models/ directory", model_req)
+            })),
         ));
     };
 
@@ -602,7 +608,10 @@ async fn handle_switch_model(
         error!(error = %e, "Failed to switch model");
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to switch model: {}", e),
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Failed to switch model: {}", e)
+            })),
         ));
     }
 
@@ -641,6 +650,9 @@ async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_json::V
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
                 let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if name.ends_with("_stage1.gguf") || name.ends_with("_stage2.gguf") {
+                    continue;
+                }
                 model_list.push(serde_json::json!({
                     "id": name,
                     "object": "model",
@@ -676,30 +688,67 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
     let meta = state.cluster_meta.read().unwrap().clone();
 
     let has_workers = !meta.workers.is_empty();
+    let is_connected = if has_workers {
+        if let Ok(coord) = state.coordinator.try_lock() {
+            coord.transport.is_some()
+        } else {
+            true
+        }
+    } else {
+        true
+    };
+
     let transport = if has_workers {
-        "Tailscale Direct WireGuard"
+        if is_connected {
+            "Tailscale Direct WireGuard"
+        } else {
+            "Tailscale WireGuard (Worker Disconnected)"
+        }
     } else {
         "Intra-Host Shared Memory (SHM)"
     };
     let link_badge = if has_workers {
-        "Direct WireGuard (P2P Mesh)"
+        if is_connected {
+            "Direct WireGuard (P2P Mesh)"
+        } else {
+            "Worker Offline"
+        }
     } else {
         "SHM Ring Buffer (Loopback)"
     };
-    let per_token_kb = (meta.hidden_dim as f64 + 4.0 + 42.0) / 1024.0;
+    let (codec_name, bytes_per_elem) = match std::env::var("AEROMESH_ACTIVATION_DTYPE")
+        .unwrap_or_else(|_| "bf16".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "bf16" | "bfloat16" => ("BFloat16 Lossless Range (50% Wire Reduction)", 2.0),
+        "fp16" | "float16" => ("FP16 Half Precision (50% Wire Reduction)", 2.0),
+        "fp8" | "fp8_e4m3" => ("FP8-E4M3 Dynamic Range (75% Wire Reduction)", 1.0),
+        "int8" => ("Per-Row INT8 Dynamic Scaling (75% Wire Reduction)", 1.0),
+        _ => ("Raw FP32 Uncompressed", 4.0),
+    };
+    let per_token_kb = (meta.hidden_dim as f64 * bytes_per_elem + 44.0) / 1024.0;
+
+    let cluster_status = if !has_workers {
+        "STANDALONE"
+    } else if is_connected {
+        "ONLINE"
+    } else {
+        "WORKER_DISCONNECTED"
+    };
 
     Json(serde_json::json!({
-        "state": state_str,
+        "state": if !is_connected && has_workers { "worker_unreachable" } else { state_str },
         "status": "ok",
-        "connected": true,
-        "cluster_status": "ONLINE",
+        "connected": is_connected,
+        "cluster_status": cluster_status,
         "active_model": current_model,
         "transport": transport,
-        "is_direct_wireguard": has_workers,
-        "rtt_ms": if has_workers { 1.14 } else { 0.1 },
+        "is_direct_wireguard": has_workers && is_connected,
+        "rtt_ms": if has_workers && is_connected { 1.14 } else { 0.0 },
         "link_badge": link_badge,
         "per_token_kb": format!("{:.2} KB/tok", per_token_kb),
-        "quantization": "Per-Row INT8 Dynamic Scaling (75% Wire Reduction)",
+        "quantization": codec_name,
         "coordinator": {
             "model": meta.model_path,
             "local_layers": format!("{}..={}", meta.local_layer_start, meta.local_layer_end),
@@ -727,29 +776,126 @@ async fn handle_chat_abort() -> Json<serde_json::Value> {
     }))
 }
 
-fn format_chat_prompt(messages: &[ChatMessage]) -> String {
+fn sanitize_chat_content(content: &str) -> String {
+    let mut clean = content.trim().to_string();
+    for tag in &[
+        "<|im_start|>",
+        "<|im_end|>",
+        "<｜User｜>",
+        "<｜Assistant｜>",
+        "<｜begin of sentence｜>",
+        "<｜end of sentence｜>",
+        "<|endoftext|>",
+        "<|eot_id|>",
+        "</s>",
+    ] {
+        clean = clean.replace(tag, "");
+    }
+    clean.trim().to_string()
+}
+
+fn format_chat_prompt(messages: &[ChatMessage], format: ChatTemplateFormat, is_reasoning: bool) -> String {
     if messages.is_empty() {
         return String::new();
     }
 
-    // If message is already pre-formatted with ChatML or instruct tokens, pass directly
-    if messages.len() == 1 && (messages[0].content.contains("<|im_start|>") || messages[0].content.contains("<|user|>") || messages[0].content.contains("[INST]")) {
-        return messages[0].content.clone();
-    }
+    match format {
+        ChatTemplateFormat::DeepSeek => {
+            let mut prompt = String::new();
+            let mut system_text = String::new();
 
-    let mut prompt = String::new();
-    let has_system = messages.iter().any(|m| m.role.eq_ignore_ascii_case("system"));
-    if !has_system {
-        prompt.push_str("<|im_start|>system\nYou are a helpful, intelligent AI assistant.<|im_end|>\n");
-    }
+            for msg in messages {
+                let role = msg.role.trim().to_lowercase();
+                let clean = sanitize_chat_content(&msg.content);
+                if clean.is_empty() {
+                    continue;
+                }
+                if role == "system" {
+                    if !system_text.is_empty() {
+                        system_text.push('\n');
+                    }
+                    system_text.push_str(&clean);
+                }
+            }
 
-    for msg in messages {
-        let role = msg.role.trim().to_lowercase();
-        let content = msg.content.trim();
-        prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, content));
+            let mut is_first_user = true;
+            for msg in messages {
+                let role = msg.role.trim().to_lowercase();
+                let clean = sanitize_chat_content(&msg.content);
+                if clean.is_empty() || role == "system" {
+                    continue;
+                }
+
+                if role == "user" {
+                    prompt.push_str("<｜User｜>");
+                    if is_first_user && !system_text.is_empty() {
+                        prompt.push_str(&system_text);
+                        prompt.push_str("\n\n");
+                    }
+                    prompt.push_str(&clean);
+                    is_first_user = false;
+                } else if role == "assistant" {
+                    prompt.push_str("<｜Assistant｜>");
+                    prompt.push_str(&clean);
+                    prompt.push_str("<｜end of sentence｜>");
+                }
+            }
+
+            prompt.push_str("<｜Assistant｜>");
+            if is_reasoning {
+                prompt.push_str("<think>\n");
+            }
+            prompt
+        }
+        ChatTemplateFormat::ChatML => {
+            let mut prompt = String::new();
+            let has_system = messages.iter().any(|m| m.role.eq_ignore_ascii_case("system"));
+            if !has_system && !is_reasoning {
+                prompt.push_str("<|im_start|>system\nYou are a helpful, intelligent AI assistant.<|im_end|>\n");
+            }
+
+            for msg in messages {
+                let role = msg.role.trim().to_lowercase();
+                let clean = sanitize_chat_content(&msg.content);
+                if clean.is_empty() {
+                    continue;
+                }
+                prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, clean));
+            }
+
+            prompt.push_str("<|im_start|>assistant\n");
+            if is_reasoning {
+                prompt.push_str("<think>\n");
+            }
+            prompt
+        }
+        ChatTemplateFormat::Llama3 => {
+            let mut prompt = String::new();
+            prompt.push_str("<|begin_of_text|>");
+            for msg in messages {
+                let role = msg.role.trim().to_lowercase();
+                let clean = sanitize_chat_content(&msg.content);
+                if clean.is_empty() {
+                    continue;
+                }
+                prompt.push_str(&format!("<|start_header_id|>{role}<|end_header_id|>\n\n{clean}<|eot_id|>"));
+            }
+            prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+            prompt
+        }
+        ChatTemplateFormat::Raw => {
+            let mut prompt = String::new();
+            for msg in messages {
+                let role = msg.role.trim().to_lowercase();
+                let clean = sanitize_chat_content(&msg.content);
+                if !clean.is_empty() {
+                    prompt.push_str(&format!("{}: {}\n", role, clean));
+                }
+            }
+            prompt.push_str("assistant: ");
+            prompt
+        }
     }
-    prompt.push_str("<|im_start|>assistant\n");
-    prompt
 }
 
 async fn handle_chat_completions(
@@ -772,19 +918,6 @@ async fn handle_chat_completions(
     if let Err(err_resp) = req.validate() {
         return err_resp.into_response();
     }
-
-    let is_streaming = req.stream.unwrap_or(true);
-    let prompt = format_chat_prompt(&req.messages);
-
-    let max_tokens = req.max_tokens.unwrap_or(256);
-    let temp = req.temperature.unwrap_or(0.7);
-    let top_p = req.top_p.unwrap_or(0.9);
-    let session_id = req.session_id.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    });
 
     // Auto-switch model if request specifies a different model
     if let Some(ref target_model) = req.model {
@@ -817,8 +950,8 @@ async fn handle_chat_completions(
         }
     }
 
-    // Readiness check: ensure model is fully loaded and ready before generation
-    {
+    // Readiness check: ensure model is fully loaded and query format & context window
+    let (chat_format, n_ctx) = {
         let coord = state.coordinator.lock().await;
         if !coord.is_ready() {
             let err_msg = match coord.status() {
@@ -834,20 +967,40 @@ async fn handle_chat_completions(
 
             return ApiErrorResponse::service_unavailable(err_msg, Some("model_not_ready")).into_response();
         }
+        (coord.detect_chat_format(), coord.n_ctx())
+    };
 
-        // FIX-24: Validate max_tokens against active model context window
-        let n_ctx = coord.n_ctx();
-        if max_tokens > n_ctx {
-            return ApiErrorResponse::unprocessable(
-                format!(
-                    "'max_tokens' ({}) exceeds active model context window ({} tokens)",
-                    max_tokens, n_ctx
-                ),
-                Some("max_tokens"),
-                Some("context_window_exceeded"),
-            )
-            .into_response();
-        }
+    let active_model = state.model_name.lock().await.clone();
+    let is_reasoning_default = active_model.to_lowercase().contains("ds")
+        || active_model.to_lowercase().contains("deepseek")
+        || active_model.to_lowercase().contains("r1")
+        || chat_format == ChatTemplateFormat::DeepSeek;
+
+    let is_reasoning = req.reasoning.unwrap_or(is_reasoning_default);
+    let is_streaming = req.stream.unwrap_or(true);
+    let prompt = format_chat_prompt(&req.messages, chat_format, is_reasoning);
+
+    let max_tokens = req.max_tokens.unwrap_or(if is_reasoning { 2048 } else { 512 });
+    let temp = req.temperature.unwrap_or(if is_reasoning { 0.6 } else { 0.7 });
+    let top_p = req.top_p.unwrap_or(if is_reasoning { 0.95 } else { 0.9 });
+    let session_id = req.session_id.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    });
+
+    // FIX-24: Validate max_tokens against active model context window
+    if max_tokens > n_ctx {
+        return ApiErrorResponse::unprocessable(
+            format!(
+                "'max_tokens' ({}) exceeds active model context window ({} tokens)",
+                max_tokens, n_ctx
+            ),
+            Some("max_tokens"),
+            Some("context_window_exceeded"),
+        )
+        .into_response();
     }
 
     if is_streaming {
@@ -855,6 +1008,9 @@ async fn handle_chat_completions(
         let state_clone = state.clone();
 
         tokio::spawn(async move {
+            if is_reasoning {
+                let _ = token_tx.send(b"<think>\n".to_vec()).await;
+            }
             let mut client = state_clone.coordinator.lock().await;
             if let Err(e) = client
                 .generate_pipeline(&prompt, max_tokens, temp, top_p, session_id, Some(token_tx))
@@ -864,7 +1020,7 @@ async fn handle_chat_completions(
             }
         });
 
-        let model_name = state.model_name.lock().await.clone();
+        let model_name = active_model.clone();
         let stream = ReceiverStream::new(token_rx);
 
         let mut accumulator = Utf8StreamAccumulator::new();
@@ -893,13 +1049,16 @@ async fn handle_chat_completions(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
-        let current_model = state.model_name.lock().await.clone();
+        let current_model = active_model.clone();
         let mut client = state.coordinator.lock().await;
         match client
             .generate_pipeline(&prompt, max_tokens, temp, top_p, session_id, None)
             .await
         {
-            Ok((generated_text, _metrics)) => {
+            Ok((mut generated_text, _metrics)) => {
+                if is_reasoning && !generated_text.starts_with("<think>") {
+                    generated_text = format!("<think>\n{}", generated_text);
+                }
                 let resp = ChatCompletionResponse {
                     id: format!("chatcmpl-{}", session_id),
                     object: "chat.completion".to_string(),
@@ -972,6 +1131,7 @@ mod tests {
             top_p: Some(0.9),
             stream: Some(true),
             session_id: Some(12345),
+            reasoning: None,
         }
     }
 

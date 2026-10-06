@@ -5,45 +5,66 @@ use anyhow::{bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use memmap2::Mmap;
 use tracing::info;
+use crate::slice_loader::LayerSliceConfig;
 
 pub const GGUF_MAGIC: [u8; 4] = *b"GGUF";
 pub const DEFAULT_ALIGNMENT: u64 = 32;
 
-/// Slices a monolithic GGUF model file into two standalone partitioned GGUF models:
-/// - Stage 1: Layers 0..split_at with Identity RMSNorm (output_norm = 1.0)
-/// - Stage 2: Layers split_at..total_layers re-indexed to blk.0..blk.(total-split-1) with true LM Head
-pub fn slice_gguf_for_pipeline<P: AsRef<Path>, Q: AsRef<Path>>(
+pub fn get_stage_slice_path(out_dir: &Path, stem: &str, stage_index: usize, total_stages: usize) -> PathBuf {
+    if total_stages == 2 {
+        if stage_index == 0 {
+            out_dir.join(format!("{}_stage1.gguf", stem))
+        } else {
+            out_dir.join(format!("{}_stage2.gguf", stem))
+        }
+    } else {
+        out_dir.join(format!("{}_stage{}_of_{}.gguf", stem, stage_index + 1, total_stages))
+    }
+}
+
+/// Slices a single stage GGUF model file for a given node's assigned layer slice:
+/// - Stages 0..total_stages-2: Layers slice.layer_start..=slice.layer_end with Identity RMSNorm (output_norm = 1.0)
+/// - Stage total_stages-1 (Final stage): Layers slice.layer_start..=slice.layer_end with authentic output_norm and true LM Head
+pub fn slice_gguf_stage<P: AsRef<Path>, Q: AsRef<Path>>(
     source_model: P,
     output_dir: Q,
-    split_at: usize,
-) -> Result<(PathBuf, PathBuf)> {
+    slice: &LayerSliceConfig,
+    stage_index: usize,
+    total_stages: usize,
+) -> Result<PathBuf> {
     let src_path = source_model.as_ref();
     let out_dir = output_dir.as_ref();
     std::fs::create_dir_all(out_dir)?;
 
-    let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
-    let stage1_path = out_dir.join(format!("{}_stage1.gguf", stem));
-    let stage2_path = out_dir.join(format!("{}_stage2.gguf", stem));
+    ensure!(total_stages >= 2, "total_stages must be >= 2 (got {})", total_stages);
+    ensure!(stage_index < total_stages, "stage_index ({}) must be < total_stages ({})", stage_index, total_stages);
 
-    // If both slice files exist and are newer than source, reuse them
-    if stage1_path.exists() && stage2_path.exists() {
-        if let (Ok(src_meta), Ok(s1_meta), Ok(s2_meta)) = (
-            std::fs::metadata(src_path),
-            std::fs::metadata(&stage1_path),
-            std::fs::metadata(&stage2_path),
-        ) {
-            if let (Ok(src_time), Ok(s1_time), Ok(s2_time)) = (
-                src_meta.modified(),
-                s1_meta.modified(),
-                s2_meta.modified(),
-            ) {
-                if s1_time >= src_time && s2_time >= src_time && s1_meta.len() > 1000 && s2_meta.len() > 1000 {
-                    info!(
-                        stage1 = %stage1_path.display(),
-                        stage2 = %stage2_path.display(),
-                        "⚡ Reusing existing partitioned sliced GGUF files"
-                    );
-                    return Ok((stage1_path, stage2_path));
+    let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+    let stage_path = get_stage_slice_path(out_dir, stem, stage_index, total_stages);
+
+    // If slice file exists, matches requested layer count, and is newer than source, reuse it
+    if stage_path.exists() {
+        if let Ok(loader) = crate::GgufSliceLoader::open(&stage_path) {
+            if loader.total_layers == slice.layer_count() {
+                if let (Ok(src_meta), Ok(s_meta)) = (
+                    std::fs::metadata(src_path),
+                    std::fs::metadata(&stage_path),
+                ) {
+                    if let (Ok(src_time), Ok(s_time)) = (
+                        src_meta.modified(),
+                        s_meta.modified(),
+                    ) {
+                        if s_time >= src_time && s_meta.len() > 1000 {
+                            info!(
+                                stage = %stage_path.display(),
+                                stage_index = stage_index,
+                                total_stages = total_stages,
+                                layers = ?slice.layer_range(),
+                                "⚡ Reusing existing partitioned sliced GGUF file"
+                            );
+                            return Ok(stage_path);
+                        }
+                    }
                 }
             }
         }
@@ -51,16 +72,19 @@ pub fn slice_gguf_for_pipeline<P: AsRef<Path>, Q: AsRef<Path>>(
 
     info!(
         source = %src_path.display(),
-        split_at = split_at,
-        "🔪 Slicing monolithic GGUF into Stage 1 (0..{}) and Stage 2 ({}..end)...",
-        split_at,
-        split_at
+        stage_index = stage_index,
+        total_stages = total_stages,
+        layers = ?slice.layer_range(),
+        "🔪 Slicing GGUF for Stage {}/{} (layers {}..={})...",
+        stage_index + 1,
+        total_stages,
+        slice.layer_start,
+        slice.layer_end
     );
 
     let file = File::open(src_path)
         .with_context(|| format!("Failed to open source GGUF at {:?}", src_path))?;
     let mmap = unsafe { Mmap::map(&file)? };
-
     let mut cursor = Cursor::new(&mmap[..]);
 
     let mut magic = [0u8; 4];
@@ -73,8 +97,7 @@ pub fn slice_gguf_for_pipeline<P: AsRef<Path>, Q: AsRef<Path>>(
     let tensor_count = cursor.read_u64::<LittleEndian>()? as usize;
     let kv_count = cursor.read_u64::<LittleEndian>()? as usize;
 
-    let mut architecture = "llama".to_string();
-    let mut total_layers = 28usize;
+    let mut total_layers = 0usize;
     let mut alignment = DEFAULT_ALIGNMENT;
 
     // Parse all raw KV metadata
@@ -87,11 +110,7 @@ pub fn slice_gguf_for_pipeline<P: AsRef<Path>, Q: AsRef<Path>>(
         let end_pos = cursor.position();
         let val_bytes = mmap[start_pos as usize..end_pos as usize].to_vec();
 
-        if key == "general.architecture" {
-            if let Ok(arch) = std::str::from_utf8(&val_bytes[8..]) {
-                architecture = arch.to_string();
-            }
-        } else if key == "general.alignment" {
+        if key == "general.alignment" {
             if val_type == 4 && val_bytes.len() >= 4 {
                 alignment = (&val_bytes[..4]).read_u32::<LittleEndian>()? as u64;
             } else if val_type == 10 && val_bytes.len() >= 8 {
@@ -112,9 +131,12 @@ pub fn slice_gguf_for_pipeline<P: AsRef<Path>, Q: AsRef<Path>>(
         });
     }
 
-    ensure!(split_at < total_layers, "split_at ({}) must be < total_layers ({})", split_at, total_layers);
-    let stage1_layers = split_at;
-    let stage2_layers = total_layers - split_at;
+    ensure!(
+        slice.layer_end < total_layers,
+        "slice layer_end ({}) must be < model total_layers ({})",
+        slice.layer_end,
+        total_layers
+    );
 
     // Parse Tensor Info Table
     let mut tensors = Vec::with_capacity(tensor_count);
@@ -148,43 +170,141 @@ pub fn slice_gguf_for_pipeline<P: AsRef<Path>, Q: AsRef<Path>>(
     let pad = (alignment - (header_end % alignment)) % alignment;
     let data_section_offset = header_end + pad;
 
-    // Write Stage 1 GGUF
-    write_sliced_gguf(
-        &stage1_path,
+    write_stage_gguf(
+        &stage_path,
         version,
         alignment,
         data_section_offset,
         &raw_kvs,
         &tensors,
         &mmap,
-        &architecture,
-        stage1_layers,
-        true,   // is_stage1
-        split_at,
+        slice.layer_start,
+        slice.layer_end,
+        stage_index,
+        total_stages,
     )?;
 
-    // Write Stage 2 GGUF
-    write_sliced_gguf(
-        &stage2_path,
-        version,
-        alignment,
-        data_section_offset,
-        &raw_kvs,
-        &tensors,
-        &mmap,
-        &architecture,
-        stage2_layers,
-        false,  // is_stage1
-        split_at,
-    )?;
+    info!(stage = %stage_path.display(), "✅ Stage GGUF slicing complete");
+    Ok(stage_path)
+}
 
-    info!(
-        stage1 = %stage1_path.display(),
-        stage2 = %stage2_path.display(),
-        "✅ Partitioned GGUF slicing complete"
-    );
+/// Slices a monolithic GGUF model file into N standalone partitioned GGUF models according to stage_slices.
+pub fn slice_gguf_for_multi_stage<P: AsRef<Path>, Q: AsRef<Path>>(
+    source_model: P,
+    output_dir: Q,
+    stage_slices: &[LayerSliceConfig],
+) -> Result<Vec<PathBuf>> {
+    ensure!(!stage_slices.is_empty(), "stage_slices must not be empty");
+    let total_stages = stage_slices.len();
+    ensure!(total_stages >= 2, "Multi-stage pipeline requires at least 2 stages");
 
-    Ok((stage1_path, stage2_path))
+    let src_path = source_model.as_ref();
+    let out_dir = output_dir.as_ref();
+    std::fs::create_dir_all(out_dir)?;
+
+    let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+    let mut stage_paths = Vec::with_capacity(total_stages);
+
+    let mut all_cached = true;
+    for (i, slice) in stage_slices.iter().enumerate() {
+        let p = get_stage_slice_path(out_dir, stem, i, total_stages);
+        if !p.exists() {
+            all_cached = false;
+        } else if let Ok(loader) = crate::GgufSliceLoader::open(&p) {
+            if loader.total_layers != slice.layer_count() {
+                all_cached = false;
+            }
+        } else {
+            all_cached = false;
+        }
+        stage_paths.push(p);
+    }
+
+    if all_cached {
+        if let Ok(src_meta) = std::fs::metadata(src_path) {
+            if let Ok(src_time) = src_meta.modified() {
+                let mut valid_timestamps = true;
+                for p in &stage_paths {
+                    if let Ok(meta) = std::fs::metadata(p) {
+                        if let Ok(mtime) = meta.modified() {
+                            if mtime < src_time || meta.len() <= 1000 {
+                                valid_timestamps = false;
+                                break;
+                            }
+                        } else {
+                            valid_timestamps = false;
+                            break;
+                        }
+                    } else {
+                        valid_timestamps = false;
+                        break;
+                    }
+                }
+                if valid_timestamps {
+                    info!("⚡ Reusing all existing partitioned sliced GGUF files for {}-stage pipeline", total_stages);
+                    return Ok(stage_paths);
+                }
+            }
+        }
+    }
+
+    for (i, slice) in stage_slices.iter().enumerate() {
+        slice_gguf_stage(src_path, out_dir, slice, i, total_stages)?;
+    }
+
+    Ok(stage_paths)
+}
+
+/// Slices a monolithic GGUF model file into two standalone partitioned GGUF models:
+/// - Stage 1: Layers 0..split_at with Identity RMSNorm (output_norm = 1.0)
+/// - Stage 2: Layers split_at..total_layers re-indexed to blk.0..blk.(total-split-1) with true LM Head
+pub fn slice_gguf_for_pipeline<P: AsRef<Path>, Q: AsRef<Path>>(
+    source_model: P,
+    output_dir: Q,
+    split_at: usize,
+) -> Result<(PathBuf, PathBuf)> {
+    let src_path = source_model.as_ref();
+    let file = File::open(src_path)
+        .with_context(|| format!("Failed to open source GGUF at {:?}", src_path))?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let mut cursor = Cursor::new(&mmap[..]);
+
+    let mut magic = [0u8; 4];
+    cursor.read_exact(&mut magic)?;
+    ensure!(&magic == &GGUF_MAGIC, "Invalid GGUF magic bytes");
+
+    let version = cursor.read_u32::<LittleEndian>()?;
+    ensure!(version == 2 || version == 3, "Unsupported GGUF version: {}", version);
+
+    let _tensor_count = cursor.read_u64::<LittleEndian>()?;
+    let kv_count = cursor.read_u64::<LittleEndian>()? as usize;
+
+    let mut total_layers = 0usize;
+    for _ in 0..kv_count {
+        let key = read_gguf_string(&mut cursor)?;
+        let val_type = cursor.read_u32::<LittleEndian>()?;
+        let start_pos = cursor.position();
+        skip_gguf_val(&mut cursor, val_type)?;
+        let end_pos = cursor.position();
+        let val_bytes = &mmap[start_pos as usize..end_pos as usize];
+
+        if key.ends_with(".block_count") {
+            if val_type == 4 && val_bytes.len() >= 4 {
+                total_layers = (&val_bytes[..4]).read_u32::<LittleEndian>()? as usize;
+            } else if val_type == 10 && val_bytes.len() >= 8 {
+                total_layers = (&val_bytes[..8]).read_u64::<LittleEndian>()? as usize;
+            }
+        }
+    }
+
+    ensure!(total_layers > 0, "Could not determine model block_count from GGUF metadata");
+    ensure!(split_at > 0 && split_at < total_layers, "split_at ({}) must be > 0 and < total_layers ({})", split_at, total_layers);
+
+    let s1 = LayerSliceConfig::new(0, split_at - 1, total_layers)?;
+    let s2 = LayerSliceConfig::new(split_at, total_layers - 1, total_layers)?;
+
+    let paths = slice_gguf_for_multi_stage(source_model, output_dir, &[s1, s2])?;
+    Ok((paths[0].clone(), paths[1].clone()))
 }
 
 #[derive(Clone)]
@@ -212,7 +332,7 @@ struct SlicedTensor {
     is_identity_norm: bool,
 }
 
-fn write_sliced_gguf(
+fn write_stage_gguf(
     dest_path: &Path,
     version: u32,
     alignment: u64,
@@ -220,50 +340,26 @@ fn write_sliced_gguf(
     raw_kvs: &[RawKvEntry],
     tensors: &[SourceTensor],
     src_mmap: &Mmap,
-    _architecture: &str,
-    block_count: usize,
-    is_stage1: bool,
-    split_at: usize,
+    layer_start: usize,
+    layer_end: usize,
+    stage_index: usize,
+    total_stages: usize,
 ) -> Result<()> {
+    let block_count = layer_end - layer_start + 1;
+    let is_final_stage = stage_index == total_stages - 1;
     let mut selected_tensors: Vec<SlicedTensor> = Vec::new();
 
-    if is_stage1 {
-        // Stage 1: layers 0..split_at
-        for t in tensors {
-            if let Some(idx) = t.layer_index {
-                if idx < split_at {
-                    selected_tensors.push(SlicedTensor {
-                        name: t.name.clone(),
-                        dimensions: t.dimensions.clone(),
-                        ggml_type: t.ggml_type,
-                        src_offset: t.offset,
-                        size_bytes: t.size_bytes,
-                        is_identity_norm: false,
-                    });
-                }
-            } else if t.name.contains("token_embd") || t.name.contains("embed") {
+    for t in tensors {
+        if let Some(idx) = t.layer_index {
+            if idx >= layer_start && idx <= layer_end {
+                let new_idx = idx - layer_start;
+                let new_name = if layer_start > 0 {
+                    reindex_tensor_name(&t.name, idx, new_idx)
+                } else {
+                    t.name.clone()
+                };
                 selected_tensors.push(SlicedTensor {
-                    name: t.name.clone(),
-                    dimensions: t.dimensions.clone(),
-                    ggml_type: t.ggml_type,
-                    src_offset: t.offset,
-                    size_bytes: t.size_bytes,
-                    is_identity_norm: false,
-                });
-            } else if t.name.contains("output_norm") || t.name.contains("norm.weight") {
-                // Identity RMSNorm: weights filled with 1.0
-                selected_tensors.push(SlicedTensor {
-                    name: t.name.clone(),
-                    dimensions: t.dimensions.clone(),
-                    ggml_type: t.ggml_type,
-                    src_offset: t.offset,
-                    size_bytes: t.size_bytes,
-                    is_identity_norm: true,
-                });
-            } else if t.name.contains("output") {
-                // Keep output.weight so llama.cpp initializes graph without complaining
-                selected_tensors.push(SlicedTensor {
-                    name: t.name.clone(),
+                    name: new_name,
                     dimensions: t.dimensions.clone(),
                     ggml_type: t.ggml_type,
                     src_offset: t.offset,
@@ -271,34 +367,26 @@ fn write_sliced_gguf(
                     is_identity_norm: false,
                 });
             }
-        }
-    } else {
-        // Stage 2: layers split_at..total_layers (re-indexed to 0..stage2_layers-1)
-        for t in tensors {
-            if let Some(idx) = t.layer_index {
-                if idx >= split_at {
-                    let new_idx = idx - split_at;
-                    let new_name = reindex_tensor_name(&t.name, idx, new_idx);
-                    selected_tensors.push(SlicedTensor {
-                        name: new_name,
-                        dimensions: t.dimensions.clone(),
-                        ggml_type: t.ggml_type,
-                        src_offset: t.offset,
-                        size_bytes: t.size_bytes,
-                        is_identity_norm: false,
-                    });
-                }
-            } else {
-                // Non-layer global tensors (token_embd, output_norm, output)
-                selected_tensors.push(SlicedTensor {
-                    name: t.name.clone(),
-                    dimensions: t.dimensions.clone(),
-                    ggml_type: t.ggml_type,
-                    src_offset: t.offset,
-                    size_bytes: t.size_bytes,
-                    is_identity_norm: false,
-                });
-            }
+        } else if t.name.contains("output_norm") || t.name.contains("norm.weight") {
+            // Identity RMSNorm: weights filled with 1.0 for all stages EXCEPT the final stage!
+            selected_tensors.push(SlicedTensor {
+                name: t.name.clone(),
+                dimensions: t.dimensions.clone(),
+                ggml_type: t.ggml_type,
+                src_offset: t.offset,
+                size_bytes: t.size_bytes,
+                is_identity_norm: !is_final_stage,
+            });
+        } else {
+            // Global tensors (token_embd, output, etc.)
+            selected_tensors.push(SlicedTensor {
+                name: t.name.clone(),
+                dimensions: t.dimensions.clone(),
+                ggml_type: t.ggml_type,
+                src_offset: t.offset,
+                size_bytes: t.size_bytes,
+                is_identity_norm: false,
+            });
         }
     }
 
@@ -650,6 +738,116 @@ mod tests {
         assert_eq!(&s2_mmap[0..4], &GGUF_MAGIC);
 
         // Clean up
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    fn create_synthetic_3layer_gguf(path: &Path) -> Result<()> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+
+        // Header: Magic, version 3, tensor_count 4, kv_count 3
+        writer.write_all(&GGUF_MAGIC)?;
+        writer.write_u32::<LittleEndian>(3)?;
+        writer.write_u64::<LittleEndian>(4)?; // 4 tensors: blk.0, blk.1, blk.2, output_norm
+        writer.write_u64::<LittleEndian>(3)?; // 3 KVs: arch, alignment, block_count
+
+        write_gguf_string(&mut writer, "general.architecture")?;
+        writer.write_u32::<LittleEndian>(8)?;
+        write_gguf_string(&mut writer, "llama")?;
+
+        write_gguf_string(&mut writer, "general.alignment")?;
+        writer.write_u32::<LittleEndian>(4)?;
+        writer.write_u32::<LittleEndian>(32)?;
+
+        write_gguf_string(&mut writer, "llama.block_count")?;
+        writer.write_u32::<LittleEndian>(4)?;
+        writer.write_u32::<LittleEndian>(3)?;
+
+        // Tensor 0: blk.0.attn_q.weight
+        write_gguf_string(&mut writer, "blk.0.attn_q.weight")?;
+        writer.write_u32::<LittleEndian>(2)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u32::<LittleEndian>(0)?;
+        writer.write_u64::<LittleEndian>(0)?;
+
+        // Tensor 1: blk.1.attn_q.weight
+        write_gguf_string(&mut writer, "blk.1.attn_q.weight")?;
+        writer.write_u32::<LittleEndian>(2)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u32::<LittleEndian>(0)?;
+        writer.write_u64::<LittleEndian>(64)?;
+
+        // Tensor 2: blk.2.attn_q.weight
+        write_gguf_string(&mut writer, "blk.2.attn_q.weight")?;
+        writer.write_u32::<LittleEndian>(2)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u32::<LittleEndian>(0)?;
+        writer.write_u64::<LittleEndian>(128)?;
+
+        // Tensor 3: output_norm.weight
+        write_gguf_string(&mut writer, "output_norm.weight")?;
+        writer.write_u32::<LittleEndian>(1)?;
+        writer.write_u64::<LittleEndian>(4)?;
+        writer.write_u32::<LittleEndian>(0)?;
+        writer.write_u64::<LittleEndian>(192)?;
+
+        let pos = writer.stream_position()?;
+        let pad = ((32 - (pos % 32)) % 32) as usize;
+        for _ in 0..pad {
+            writer.write_u8(0)?;
+        }
+
+        // 16 floats for blk.0
+        for _ in 0..16 { writer.write_all(&0.5f32.to_le_bytes())?; }
+        // 16 floats for blk.1
+        for _ in 0..16 { writer.write_all(&1.5f32.to_le_bytes())?; }
+        // 16 floats for blk.2
+        for _ in 0..16 { writer.write_all(&2.5f32.to_le_bytes())?; }
+        // 4 floats for output_norm (original weight = 3.14)
+        for _ in 0..4 { writer.write_all(&3.14f32.to_le_bytes())?; }
+
+        writer.flush()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_multi_stage_slicing_3_nodes() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "aeromesh_test_slicer_3stage_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let src_model = temp_dir.join("test_model_3l.gguf");
+        create_synthetic_3layer_gguf(&src_model).expect("Failed to create synthetic 3-layer GGUF");
+
+        let out_dir = temp_dir.join("slices_3stage");
+        let s0 = LayerSliceConfig::new(0, 0, 3).unwrap();
+        let s1 = LayerSliceConfig::new(1, 1, 3).unwrap();
+        let s2 = LayerSliceConfig::new(2, 2, 3).unwrap();
+
+        let stages = slice_gguf_for_multi_stage(&src_model, &out_dir, &[s0, s1, s2]).expect("Multi-stage slicing failed");
+        assert_eq!(stages.len(), 3);
+
+        for p in &stages {
+            assert!(p.exists());
+            let meta = std::fs::metadata(p).unwrap();
+            assert!(meta.len() > 0);
+            let f = File::open(p).unwrap();
+            let m = unsafe { memmap2::Mmap::map(&f).unwrap() };
+            assert_eq!(&m[0..4], &GGUF_MAGIC);
+        }
+
+        assert!(stages[0].to_str().unwrap().contains("stage1_of_3.gguf"));
+        assert!(stages[1].to_str().unwrap().contains("stage2_of_3.gguf"));
+        assert!(stages[2].to_str().unwrap().contains("stage3_of_3.gguf"));
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

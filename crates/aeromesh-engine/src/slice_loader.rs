@@ -431,7 +431,138 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 use crate::llama_ffi::*;
-use std::ffi::{c_char, CString};
+use std::ffi::{c_char, c_void, CString};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ChatTemplateFormat {
+    DeepSeek,
+    ChatML,
+    Llama3,
+    Raw,
+}
+
+#[repr(C)]
+pub struct ActivationCaptureState {
+    pub target_layer_idx: i32,
+    pub target_tensor_name: [u8; 64],
+    pub captured: bool,
+    pub buffer: *mut f32,
+    pub capacity_floats: usize,
+    pub captured_floats: usize,
+}
+
+impl Default for ActivationCaptureState {
+    fn default() -> Self {
+        Self {
+            target_layer_idx: -1,
+            target_tensor_name: [0u8; 64],
+            captured: false,
+            buffer: std::ptr::null_mut(),
+            capacity_floats: 0,
+            captured_floats: 0,
+        }
+    }
+}
+
+unsafe fn tensor_name_matches(
+    tensor_name: *const c_char,
+    target_name: &[u8; 64],
+    target_layer: i32,
+) -> bool {
+    if tensor_name.is_null() {
+        return false;
+    }
+    // 1. Direct name match with target_name
+    let mut i = 0;
+    let mut exact = true;
+    while i < 64 && target_name[i] != 0 {
+        if *tensor_name.add(i) != target_name[i] as c_char {
+            exact = false;
+            break;
+        }
+        i += 1;
+    }
+    if exact && *tensor_name.add(i) == 0 {
+        return true;
+    }
+
+    // 2. Prefix match for "l_out-" with target_layer
+    let prefix = b"l_out-";
+    let mut is_prefix = true;
+    for j in 0..prefix.len() {
+        if *tensor_name.add(j) != prefix[j] as c_char {
+            is_prefix = false;
+            break;
+        }
+    }
+    if is_prefix && target_layer >= 0 {
+        let mut idx: i32 = 0;
+        let mut k = prefix.len();
+        let mut has_digits = false;
+        while k < 64 && *tensor_name.add(k) != 0 {
+            let ch = *tensor_name.add(k) as u8;
+            if ch >= b'0' && ch <= b'9' {
+                idx = idx * 10 + (ch - b'0') as i32;
+                has_digits = true;
+            } else {
+                break;
+            }
+            k += 1;
+        }
+        if has_digits && idx == target_layer && *tensor_name.add(k) == 0 {
+            return true;
+        }
+    }
+
+    false
+}
+
+extern "C" fn llama_cb_eval_capture(
+    tensor: *mut GgmlTensor,
+    ask: bool,
+    user_data: *mut c_void,
+) -> bool {
+    if tensor.is_null() || user_data.is_null() {
+        return false;
+    }
+    let state = unsafe { &mut *(user_data as *mut ActivationCaptureState) };
+    if state.target_layer_idx < 0 {
+        return false;
+    }
+
+    let tensor_name_ptr = unsafe { (*tensor).name.as_ptr() };
+    let matches = unsafe {
+        tensor_name_matches(tensor_name_ptr, &state.target_tensor_name, state.target_layer_idx)
+    };
+
+    if !matches {
+        return false;
+    }
+
+    if ask {
+        return true;
+    }
+
+    // ask == false: The target tensor just finished computing on its backend!
+    let ne0 = unsafe { (*tensor).ne[0] } as usize;
+    let ne1 = unsafe { (*tensor).ne[1] } as usize;
+    let total_floats = ne0 * ne1;
+    let n_bytes = total_floats * std::mem::size_of::<f32>();
+
+    // llama_decode may split a large batch into several ubatches (n_ubatch, default 512);
+    // the callback fires once per ubatch, so append at the running offset instead of overwriting.
+    let offset_floats = state.captured_floats;
+    if !state.buffer.is_null() && offset_floats + total_floats <= state.capacity_floats {
+        let dst = unsafe { state.buffer.add(offset_floats) };
+        let ok = safe_ggml_backend_tensor_get(tensor, dst as *mut c_void, 0, n_bytes);
+        if ok {
+            state.captured_floats = offset_floats + total_floats;
+            state.captured = state.captured_floats == state.capacity_floats;
+        }
+    }
+
+    true
+}
 
 pub struct LlamaPipelineInstance {
     model: *mut LlamaModel,
@@ -443,6 +574,7 @@ pub struct LlamaPipelineInstance {
     pub total_layers: usize,
     pub n_ctx: usize,
     pub decode_buf: Vec<f32>,
+    pub capture_state: Box<ActivationCaptureState>,
 }
 
 unsafe impl Send for LlamaPipelineInstance {}
@@ -495,9 +627,13 @@ impl LlamaPipelineInstance {
             .map(|n| (n.get() / 2).max(1))
             .unwrap_or(4) as i32;
 
+        let mut capture_state = Box::new(ActivationCaptureState::default());
+
         let mut cparams = unsafe { llama_context_default_params() };
         cparams.n_ctx = if n_ctx > 0 { n_ctx } else { 4096 };
         cparams.embeddings = true;
+        cparams.cb_eval = Some(llama_cb_eval_capture);
+        cparams.cb_eval_user_data = capture_state.as_mut() as *mut _ as *mut c_void;
 
         let ctx = unsafe { llama_init_from_model(model, cparams) };
         if ctx.is_null() {
@@ -508,12 +644,29 @@ impl LlamaPipelineInstance {
         let sparams = unsafe { llama_sampler_chain_default_params() };
         let sampler = unsafe { llama_sampler_chain_init(sparams) };
         unsafe {
-            llama_sampler_chain_add(sampler, llama_sampler_init_penalties(512, 1.15, 0.20, 0.15));
-            llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
-            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1));
-            llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
-            llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7));
-            llama_sampler_chain_add(sampler, llama_sampler_init_dist(42));
+            let model_path_str = model_path.to_string_lossy().to_lowercase();
+            let is_reasoning_model = model_path_str.contains("ds")
+                || model_path_str.contains("deepseek")
+                || model_path_str.contains("r1");
+
+            if is_reasoning_model {
+                // Repetition penalty over a 256-token window (64 was too short to see
+                // paragraph-length loops) plus light frequency/presence penalties.
+                // Kept moderate to preserve math formulas, code tokens, and reasoning structure.
+                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(256, 1.12, 0.05, 0.05));
+                llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
+                llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95, 1));
+                llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
+                llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.6));
+                llama_sampler_chain_add(sampler, llama_sampler_init_dist(u32::MAX));
+            } else {
+                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(256, 1.15, 0.05, 0.05));
+                llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
+                llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1));
+                llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
+                llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7));
+                llama_sampler_chain_add(sampler, llama_sampler_init_dist(u32::MAX));
+            }
         }
 
         info!(
@@ -537,12 +690,79 @@ impl LlamaPipelineInstance {
             total_layers,
             n_ctx: cparams.n_ctx as usize,
             decode_buf: vec![0.0f32; hidden_dim],
+            capture_state,
         })
+    }
+
+    /// Sets up activation capture callback to intercept raw pre-norm residual stream (unnormalized x_K)
+    /// for the specified layer before output_norm is applied.
+    pub fn prepare_activation_capture(&mut self, target_layer: i32, buffer: *mut f32, capacity: usize) {
+        self.capture_state.target_layer_idx = target_layer;
+        self.capture_state.captured = false;
+        self.capture_state.buffer = buffer;
+        self.capture_state.capacity_floats = capacity;
+        self.capture_state.captured_floats = 0;
+
+        let name = format!("l_out-{}", target_layer);
+        let mut name_bytes = [0u8; 64];
+        for (i, b) in name.bytes().enumerate().take(63) {
+            name_bytes[i] = b;
+        }
+        self.capture_state.target_tensor_name = name_bytes;
+    }
+
+    /// Returns true if the activation capture callback successfully intercepted the target layer tensor.
+    pub fn is_activation_captured(&self) -> bool {
+        self.capture_state.captured
+    }
+
+    /// Logs once per process whether raw pre-norm capture is active, plus the RMS of the first
+    /// captured row (raw residual RMS is typically >> 1.0; post-norm identity output is ~1.0).
+    fn log_capture_once(&self, out: &[f32], tag: &str) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if LOGGED.swap(true, Ordering::Relaxed) || self.hidden_dim == 0 || out.len() < self.hidden_dim {
+            return;
+        }
+        let row = &out[..self.hidden_dim];
+        let rms = (row.iter().map(|v| v * v).sum::<f32>() / row.len() as f32).sqrt();
+        info!(
+            stage = tag,
+            captured = self.capture_state.captured,
+            row0_rms = rms,
+            "🔬 Activation capture check (raw pre-norm residual expected RMS >> 1.0)"
+        );
     }
 
     /// Returns true if all native C++ pointers are valid and non-null.
     pub fn is_ready(&self) -> bool {
         !self.model.is_null() && !self.ctx.is_null() && !self.vocab.is_null() && !self.sampler.is_null()
+    }
+
+    /// Automatically detects the chat template format supported by the model's vocabulary.
+    pub fn detect_chat_format(&self) -> ChatTemplateFormat {
+        if !self.is_ready() {
+            return ChatTemplateFormat::ChatML;
+        }
+        // DeepSeek models use `<｜User｜>` as a single special control token (token 151644)
+        if let Ok(toks) = self.tokenize("<｜User｜>", false) {
+            if toks.len() == 1 {
+                return ChatTemplateFormat::DeepSeek;
+            }
+        }
+        // ChatML / Qwen models use `<|im_start|>` as a single special control token
+        if let Ok(toks) = self.tokenize("<|im_start|>", false) {
+            if toks.len() == 1 {
+                return ChatTemplateFormat::ChatML;
+            }
+        }
+        // Llama 3 models use `<|start_header_id|>` as a single special control token
+        if let Ok(toks) = self.tokenize("<|start_header_id|>", false) {
+            if toks.len() == 1 {
+                return ChatTemplateFormat::Llama3;
+            }
+        }
+        ChatTemplateFormat::ChatML
     }
 
     /// Validates that the native instance is initialized and ready, returning a typed error otherwise.
@@ -687,6 +907,17 @@ impl LlamaPipelineInstance {
         }
 
         let n_tokens = tokens.len() as i32;
+        let total_floats = (n_tokens as usize) * self.hidden_dim;
+        if out.len() != total_floats {
+            out.resize(total_floats, 0.0);
+        }
+
+        // Bug 1 Fix: Arm cb_eval to intercept raw pre-norm hidden states (unnormalized x_K)
+        // at the final transformer layer of this slice ("l_out-<last_layer>").
+        // This completely avoids identity RMSNorm residual attenuation.
+        let last_layer = (self.total_layers.saturating_sub(1)) as i32;
+        self.prepare_activation_capture(last_layer, out.as_mut_ptr(), total_floats);
+
         let mut batch = unsafe { llama_batch_init(n_tokens, 0, 1) };
         batch.n_tokens = n_tokens;
 
@@ -710,25 +941,28 @@ impl LlamaPipelineInstance {
         // Explicit CUDA Stream Synchronization to ensure clean host memory reads
         unsafe { llama_synchronize(self.ctx) };
 
-        let total_floats = (n_tokens as usize) * self.hidden_dim;
-        if out.len() != total_floats {
-            out.resize(total_floats, 0.0);
+        if !self.is_activation_captured() {
+            tracing::warn!(
+                layer = last_layer,
+                "⚠️ cb_eval did not capture l_out-{} activations; falling back to llama_get_embeddings_ith",
+                last_layer
+            );
+            for i in 0..n_tokens {
+                let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
+                if embd_ptr.is_null() {
+                    bail!("Failed to get embeddings at index {} from llama_context", i);
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        embd_ptr,
+                        out.as_mut_ptr().add((i as usize) * self.hidden_dim),
+                        self.hidden_dim,
+                    );
+                }
+            }
         }
 
-        for i in 0..n_tokens {
-            let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
-            if embd_ptr.is_null() {
-                bail!("Failed to get embeddings at index {} from llama_context", i);
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    embd_ptr,
-                    out.as_mut_ptr().add((i as usize) * self.hidden_dim),
-                    self.hidden_dim,
-                );
-            }
-        }
-
+        self.log_capture_once(out, "stage0");
         Ok(())
     }
 
@@ -781,6 +1015,96 @@ impl LlamaPipelineInstance {
         Ok(())
     }
 
+    /// Intermediate Stage (1 <= stage < N - 1):
+    /// Evaluates input activation matrix through intermediate transformer layer blocks,
+    /// extracting output activation matrix [seq_len * hidden_dim] for downstream forwarding.
+    pub fn evaluate_activations_to_activations(
+        &mut self,
+        activations: &[f32],
+        seq_len: u32,
+        start_pos: u32,
+        out: &mut Vec<f32>,
+    ) -> Result<()> {
+        self.ensure_ready()?;
+        ensure!(
+            activations.len() == (seq_len as usize) * self.hidden_dim,
+            "Activation size mismatch: expected {} floats, got {}",
+            (seq_len as usize) * self.hidden_dim,
+            activations.len()
+        );
+
+        if seq_len == 0 {
+            out.clear();
+            return Ok(());
+        }
+
+        let n_tokens = seq_len as i32;
+        let total_floats = (n_tokens as usize) * self.hidden_dim;
+        if out.len() != total_floats {
+            out.resize(total_floats, 0.0);
+        }
+
+        // Bug 1 Fix: Arm cb_eval to intercept raw pre-norm hidden states (unnormalized x_K)
+        // at the final transformer layer of this intermediate slice ("l_out-<last_layer>").
+        let last_layer = (self.total_layers.saturating_sub(1)) as i32;
+        self.prepare_activation_capture(last_layer, out.as_mut_ptr(), total_floats);
+
+        let mut batch = unsafe { llama_batch_init(n_tokens, self.hidden_dim as i32, 1) };
+        batch.n_tokens = n_tokens;
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                activations.as_ptr(),
+                batch.embd,
+                activations.len(),
+            );
+        }
+
+        for i in 0..n_tokens {
+            unsafe {
+                *batch.pos.add(i as usize) = (start_pos as i32) + i;
+                *batch.n_seq_id.add(i as usize) = 1;
+                *(*batch.seq_id.add(i as usize)) = 0;
+                // Request output for all tokens in intermediate stage
+                *batch.logits.add(i as usize) = 1;
+            }
+        }
+
+        let res = unsafe { llama_decode(self.ctx, batch) };
+        unsafe { llama_batch_free(batch) };
+
+        if res != 0 {
+            bail!("llama_decode failed in intermediate activation forward pass (code {})", res);
+        }
+
+        // Explicit CUDA Stream Synchronization
+        unsafe { llama_synchronize(self.ctx) };
+
+        if !self.is_activation_captured() {
+            tracing::warn!(
+                layer = last_layer,
+                "⚠️ cb_eval did not capture intermediate l_out-{} activations; falling back to llama_get_embeddings_ith",
+                last_layer
+            );
+            for i in 0..n_tokens {
+                let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
+                if embd_ptr.is_null() {
+                    bail!("Failed to get intermediate embeddings at index {} from llama_context", i);
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        embd_ptr,
+                        out.as_mut_ptr().add((i as usize) * self.hidden_dim),
+                        self.hidden_dim,
+                    );
+                }
+            }
+        }
+
+        self.log_capture_once(out, "intermediate");
+        Ok(())
+    }
+
     /// Samples next token from the latest logits computed by Stage 2, applying repetition penalties and accepting the token.
     pub fn sample_next_token(
         &mut self,
@@ -792,11 +1116,15 @@ impl LlamaPipelineInstance {
         let logits_ptr = unsafe { llama_get_logits_ith(self.ctx, -1) };
         if !logits_ptr.is_null() {
             let n_vocab = unsafe { llama_vocab_n_tokens(self.vocab) } as usize;
-            let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab.min(256)) };
+            let logits_slice = unsafe { std::slice::from_raw_parts_mut(logits_ptr, n_vocab) };
             let has_invalid = logits_slice.iter().any(|v| v.is_nan() || v.is_infinite());
             if has_invalid {
-                warn!("⚠️ Stage 2 output logits contain NaN/Inf! Resetting context memory.");
-                self.clear_kv_cache();
+                warn!("⚠️ Stage 2 output logits contain NaN/Inf! Sanitizing invalid logits to prevent cluster context desynchronization.");
+                for v in logits_slice.iter_mut() {
+                    if v.is_nan() || v.is_infinite() {
+                        *v = -1e9;
+                    }
+                }
             }
         }
 
@@ -840,6 +1168,7 @@ impl LlamaPipelineInstance {
             total_layers: 1,
             n_ctx: 512,
             decode_buf: vec![0.0; 128],
+            capture_state: Box::new(ActivationCaptureState::default()),
         }
     }
 }
@@ -886,6 +1215,9 @@ mod tests_instance_safety {
         let acts = vec![0.0f32; 128];
         assert!(inst.evaluate_activations_to_logits(&acts, 1, 0).is_err(), "evaluate_activations must return error");
 
+        // evaluate_activations_to_activations must return error
+        assert!(inst.evaluate_activations_to_activations(&acts, 1, 0, &mut out).is_err(), "evaluate_activations_to_activations must return error");
+
         // sample_next_token must return error
         assert!(inst.sample_next_token(0.7, 0.9, 42).is_err(), "sample_next_token must return error");
 
@@ -893,4 +1225,42 @@ mod tests_instance_safety {
         inst.close();
         assert!(!inst.is_ready());
     }
+
+    #[test]
+    fn test_chat_format_detection() {
+        crate::ensure_llama_initialized();
+        let ds_path = if std::path::Path::new("models/DS.gguf").exists() {
+            Some(std::path::PathBuf::from("models/DS.gguf"))
+        } else if std::path::Path::new("../../models/DS.gguf").exists() {
+            Some(std::path::PathBuf::from("../../models/DS.gguf"))
+        } else {
+            None
+        };
+        if let Some(ref path) = ds_path {
+            let slice = LayerSliceConfig::new(0, 0, 48).unwrap();
+            if let Ok(inst) = LlamaPipelineInstance::open(path, slice, 0, 512) {
+                assert_eq!(inst.detect_chat_format(), ChatTemplateFormat::DeepSeek);
+            }
+        }
+
+        let test_path = if std::path::Path::new("models/test.gguf").exists() {
+            Some(std::path::PathBuf::from("models/test.gguf"))
+        } else if std::path::Path::new("../../models/test.gguf").exists() {
+            Some(std::path::PathBuf::from("../../models/test.gguf"))
+        } else {
+            None
+        };
+        if let Some(ref path) = test_path {
+            let slice = LayerSliceConfig::new(0, 0, 28).unwrap();
+            if let Ok(inst) = LlamaPipelineInstance::open(path, slice, 0, 512) {
+                let fmt = inst.detect_chat_format();
+                assert!(
+                    matches!(fmt, ChatTemplateFormat::Llama3 | ChatTemplateFormat::ChatML | ChatTemplateFormat::DeepSeek),
+                    "Detected format should be a recognized format, got {:?}",
+                    fmt
+                );
+            }
+        }
+    }
 }
+

@@ -1,5 +1,5 @@
 use std::ffi::{c_char, c_void};
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Once;
 use tracing::info;
 
@@ -60,6 +60,33 @@ pub struct LlamaModelParams {
     pub load_mtp: bool,
 }
 
+pub const GGML_MAX_DIMS: usize = 4;
+pub const GGML_MAX_NAME: usize = 64;
+
+#[repr(C)]
+pub struct GgmlTensor {
+    pub type_: i32,
+    pub buffer: *mut c_void,
+    pub ne: [i64; GGML_MAX_DIMS],
+    pub nb: [usize; GGML_MAX_DIMS],
+    pub op: i32,
+    pub op_params: [i32; 16],
+    pub flags: i32,
+    pub src: [*mut GgmlTensor; 10],
+    pub view_src: *mut GgmlTensor,
+    pub view_offs: usize,
+    pub data: *mut c_void,
+    pub name: [c_char; GGML_MAX_NAME],
+    pub extra: *mut c_void,
+    pub padding: [u8; 8],
+}
+
+pub type GgmlBackendSchedEvalCallback = extern "C" fn(
+    tensor: *mut GgmlTensor,
+    ask: bool,
+    user_data: *mut c_void,
+) -> bool;
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct LlamaContextParams {
@@ -85,7 +112,7 @@ pub struct LlamaContextParams {
     pub yarn_beta_slow: f32,
     pub yarn_orig_ctx: u32,
     pub defrag_thold: f32,
-    pub cb_eval: Option<extern "C" fn(*mut c_void, *mut c_void) -> bool>,
+    pub cb_eval: Option<GgmlBackendSchedEvalCallback>,
     pub cb_eval_user_data: *mut c_void,
     pub type_k: i32,
     pub type_v: i32,
@@ -206,6 +233,76 @@ extern "C" {
     );
 }
 
+type GgmlBackendTensorGetFn = extern "C" fn(
+    tensor: *const GgmlTensor,
+    data: *mut c_void,
+    offset: usize,
+    size: usize,
+);
+
+static GGML_BACKEND_TENSOR_GET: std::sync::OnceLock<Option<GgmlBackendTensorGetFn>> =
+    std::sync::OnceLock::new();
+
+/// Dynamically resolves and invokes `ggml_backend_tensor_get` from loaded GGML DLLs.
+/// Copies tensor data from any device backend (CUDA, Vulkan, host CPU) into host destination buffer.
+pub fn safe_ggml_backend_tensor_get(
+    tensor: *const GgmlTensor,
+    data: *mut c_void,
+    offset: usize,
+    size: usize,
+) -> bool {
+    let func = GGML_BACKEND_TENSOR_GET.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            use windows_sys::Win32::System::LibraryLoader::{
+                GetModuleHandleA, GetProcAddress, LoadLibraryA,
+            };
+            let proc_name = b"ggml_backend_tensor_get\0".as_ptr();
+
+            for mod_name in [
+                b"ggml-base.dll\0".as_ptr(),
+                b"llama.dll\0".as_ptr(),
+                b"ggml.dll\0".as_ptr(),
+                b"mtmd.dll\0".as_ptr(),
+            ] {
+                let h_mod = GetModuleHandleA(mod_name);
+                if !h_mod.is_null() {
+                    let addr = GetProcAddress(h_mod, proc_name);
+                    if let Some(f) = addr {
+                        return Some(std::mem::transmute::<_, GgmlBackendTensorGetFn>(f));
+                    }
+                }
+            }
+
+            for mod_name in [b"ggml-base.dll\0".as_ptr(), b"llama.dll\0".as_ptr()] {
+                let h_mod = LoadLibraryA(mod_name);
+                if !h_mod.is_null() {
+                    let addr = GetProcAddress(h_mod, proc_name);
+                    if let Some(f) = addr {
+                        return Some(std::mem::transmute::<_, GgmlBackendTensorGetFn>(f));
+                    }
+                }
+            }
+        }
+        None
+    });
+
+    if let Some(f) = func {
+        f(tensor, data, offset, size);
+        true
+    } else {
+        // Never memcpy from tensor.data here: on CUDA it is a device pointer.
+        false
+    }
+}
+
+#[link(name = "ggml")]
+extern "C" {
+    pub fn ggml_backend_load_all();
+    pub fn ggml_backend_load_all_from_path(dir_path: *const c_char);
+    pub fn ggml_backend_reg_count() -> usize;
+}
+
 extern "C" fn quiet_llama_log_callback(level: i32, text: *const c_char, _user_data: *mut c_void) {
     if level >= 3 && !text.is_null() {
         let msg = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy();
@@ -220,14 +317,34 @@ static INIT_BACKEND_ONCE: Once = Once::new();
 /// Automatically injects `bin/` directory into Windows DLL search path and initializes llama backend.
 pub fn ensure_llama_initialized() {
     INIT_BACKEND_ONCE.call_once(|| {
+        let mut loaded_bin_dirs: Vec<PathBuf> = Vec::new();
+
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::ffi::OsStrExt;
-            let candidate_dirs = ["bin", "../bin", "../../bin", "llama.cpp/build/bin/Release"];
+            let mut candidate_dirs: Vec<PathBuf> = vec![
+                PathBuf::from("bin"),
+                PathBuf::from("../bin"),
+                PathBuf::from("../../bin"),
+                PathBuf::from("llama.cpp/build/bin/Release"),
+            ];
+
+            if let Ok(exe_path) = std::env::current_exe() {
+                if let Some(exe_dir) = exe_path.parent() {
+                    candidate_dirs.insert(0, exe_dir.to_path_buf());
+                    candidate_dirs.push(exe_dir.join("bin"));
+                    if let Some(parent) = exe_dir.parent() {
+                        candidate_dirs.push(parent.join("bin"));
+                        if let Some(grand) = parent.parent() {
+                            candidate_dirs.push(grand.join("bin"));
+                        }
+                    }
+                }
+            }
+
             for dir in &candidate_dirs {
-                let p = Path::new(dir);
-                if p.exists() && p.join("llama.dll").exists() {
-                    if let Ok(abs) = std::fs::canonicalize(p) {
+                if dir.exists() && dir.join("llama.dll").exists() {
+                    if let Ok(abs) = std::fs::canonicalize(dir) {
                         let mut wide: Vec<u16> = abs.as_os_str().encode_wide().collect();
                         wide.push(0);
                         unsafe {
@@ -238,6 +355,7 @@ pub fn ensure_llama_initialized() {
                             std::env::set_var("PATH", new_path);
                         }
                         info!(dll_dir = %abs.display(), "Injected llama.dll runtime directory into Windows search path");
+                        loaded_bin_dirs.push(abs);
                         break;
                     }
                 }
@@ -246,8 +364,23 @@ pub fn ensure_llama_initialized() {
 
         unsafe {
             llama_log_set(Some(quiet_llama_log_callback), std::ptr::null_mut());
+
+            // Explicitly load dynamic backends (ggml-cuda.dll, ggml-cpu.dll, etc.)
+            for bin_dir in &loaded_bin_dirs {
+                let clean_str = bin_dir.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+                if let Ok(c_dir) = std::ffi::CString::new(clean_str) {
+                    ggml_backend_load_all_from_path(c_dir.as_ptr());
+                }
+            }
+            if let Ok(c_bin) = std::ffi::CString::new("bin") {
+                ggml_backend_load_all_from_path(c_bin.as_ptr());
+            }
+            ggml_backend_load_all();
+
             llama_backend_init();
-            info!("✅ Native llama.cpp / GGML CUDA Backend Initialized");
+
+            let count = ggml_backend_reg_count();
+            info!(backend_count = count, "✅ Native llama.cpp / GGML Backend Initialized");
         }
     });
 }

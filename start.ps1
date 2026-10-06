@@ -24,6 +24,10 @@ param (
     [string]$Peers = "",
 
     [Parameter(Mandatory = $false)]
+    [ValidateSet("pipeline", "rpc", "")]
+    [string]$Mode = "pipeline",
+
+    [Parameter(Mandatory = $false)]
     [int]$Port = 0,
 
     [Parameter(Mandatory = $false)]
@@ -36,13 +40,24 @@ param (
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-# 1. Ensure Compiler & Toolchain PATH and DLL directories
+# 1. Ensure Compiler & Toolchain PATH, Python, and DLL directories
 $binDir = Join-Path $PSScriptRoot "bin"
-$env:PATH = "C:\w64devkit\bin;C:\Users\" + $env:USERNAME + "\.cargo\bin;$binDir;" + $env:PATH
+$userPythonDir = "C:\Users\" + $env:USERNAME + "\AppData\Local\Programs\Python"
+$pyPathAdditions = ""
+if (Test-Path $userPythonDir) {
+    $latestPy = Get-ChildItem -Path $userPythonDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+    if ($latestPy) {
+        $pyPathAdditions = "$($latestPy.FullName);$($latestPy.FullName)\Scripts;"
+    }
+}
+$env:PATH = "C:\w64devkit\bin;C:\Users\" + $env:USERNAME + "\.cargo\bin;$binDir;$pyPathAdditions" + $env:PATH
 
 # Ensure release DLLs are present
 if (Test-Path "target\release") {
-    Get-ChildItem -Path "bin\*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "target\release" -Force -ErrorAction SilentlyContinue
+    try {
+        Get-ChildItem -Path "bin\*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "target\release" -Force -ErrorAction SilentlyContinue
+    }
+    catch {}
 }
 
 function Initialize-AeroMeshSecrets {
@@ -58,6 +73,8 @@ function Initialize-AeroMeshSecrets {
             if ($idx -gt 0) {
                 $k = $line.Substring(0, $idx).Trim()
                 $v = $line.Substring($idx + 1).Trim().Trim('"').Trim("'")
+                [System.Environment]::SetEnvironmentVariable($k, $v, "Process")
+                Set-Item -Path "env:$k" -Value $v
                 if ($k -eq "AEROMESH_API_KEY") { $apiKey = $v }
                 if ($k -eq "AEROMESH_WORKER_SECRET") { $workerSecret = $v }
             }
@@ -93,7 +110,8 @@ function Initialize-AeroMeshSecrets {
             if ($existing -notmatch "AEROMESH_WORKER_SECRET=") {
                 Add-Content -Path $envPath -Value "AEROMESH_WORKER_SECRET=$workerSecret"
             }
-        } else {
+        }
+        else {
             Set-Content -Path $envPath -Value $lines -Encoding UTF8
         }
     }
@@ -101,6 +119,10 @@ function Initialize-AeroMeshSecrets {
     $env:AEROMESH_API_KEY = $apiKey
     $env:AEROMESH_WORKER_SECRET = $workerSecret
     $env:LLAMA_API_KEY = $apiKey
+    if (-not $env:AEROMESH_ACTIVATION_DTYPE) {
+        $env:AEROMESH_ACTIVATION_DTYPE = "bf16"
+        [System.Environment]::SetEnvironmentVariable("AEROMESH_ACTIVATION_DTYPE", "bf16", "Process")
+    }
 }
 
 function Stop-PortConflict {
@@ -131,7 +153,8 @@ function Test-PeerReachable {
         $ok = $iar.AsyncWaitHandle.WaitOne(2000, $false)
         $client.Close()
         return $ok
-    } catch {
+    }
+    catch {
         return $false
     }
 }
@@ -147,7 +170,8 @@ function Wait-ServerReady {
                 Write-Host "  [+] Engine Ready! Model loaded in GPU memory." -ForegroundColor Green
                 return $true
             }
-        } catch {}
+        }
+        catch {}
         Start-Sleep -Milliseconds 600
     }
     return $false
@@ -196,8 +220,31 @@ function Get-PythonCommand {
     if (Test-Path ".\.venv\Scripts\python.exe") {
         return (Resolve-Path ".\.venv\Scripts\python.exe").Path
     }
-    if (Get-Command python -ErrorAction SilentlyContinue) {
-        return "python"
+    # Test if python in PATH actually executes (to avoid Microsoft Store dummy shim)
+    try {
+        $null = & python --version 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            return "python"
+        }
+    }
+    catch {}
+
+    # Test py launcher
+    try {
+        $null = & py -3 --version 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            return "py"
+        }
+    }
+    catch {}
+
+    # Check common user install paths
+    $userPy = "C:\Users\" + $env:USERNAME + "\AppData\Local\Programs\Python"
+    if (Test-Path $userPy) {
+        $found = Get-ChildItem -Path $userPy -Filter "python.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($found) {
+            return $found.FullName
+        }
     }
     return ""
 }
@@ -207,7 +254,8 @@ function Get-TailscaleIPv4 {
         try {
             $ip = (tailscale ip -4 2>$null).Trim()
             if ($ip) { return $ip }
-        } catch {}
+        }
+        catch {}
     }
     return "127.0.0.1"
 }
@@ -233,6 +281,9 @@ Write-Host "  [-] Detected Model:      " -NoNewline -ForegroundColor Gray
 Write-Host "$modelName" -ForegroundColor Yellow
 Write-Host "  [-] Wire Weight Transfer:" -NoNewline -ForegroundColor Gray
 Write-Host " 0.0 MB (P2P Activation Streaming)" -ForegroundColor Cyan
+$activeCodec = if ($env:AEROMESH_ACTIVATION_DTYPE) { $env:AEROMESH_ACTIVATION_DTYPE.ToUpper() } else { "BF16" }
+Write-Host "  [-] Activation Codec:    " -NoNewline -ForegroundColor Gray
+Write-Host "$activeCodec (Lossless Dynamic Range)" -ForegroundColor Yellow
 Write-Host "  [-] Control Surface Auth:" -NoNewline -ForegroundColor Gray
 Write-Host " SEC-01 Active (API Key + Worker Handshake Token)" -ForegroundColor Green
 Write-Host "------------------------------------------------------------------------" -ForegroundColor DarkGray
@@ -310,14 +361,28 @@ if ($Role -eq "worker") {
     Write-Host "  Model:     $modelName" -ForegroundColor Gray
     Write-Host "  Port:      $workerPort" -ForegroundColor Gray
     Write-Host "  Binding:   $bindStr" -ForegroundColor Green
+    Write-Host "  Mode:      $($Mode.ToUpper())" -ForegroundColor Cyan
     Write-Host "  SSD Cache: ENABLED (0.0 MB weights transferred over network)" -ForegroundColor Yellow
     Write-Host ""
 
-    $rpcServerExe = Join-Path $PSScriptRoot "bin\ggml-rpc-server.exe"
-    if (Test-Path $rpcServerExe) {
-        & $rpcServerExe -H 0.0.0.0 -p $workerPort -c
-    } else {
-        cargo run --release --bin aeromesh -- worker --port $workerPort --cache
+    if ($Mode -eq "rpc") {
+        $rpcServerExe = Join-Path $PSScriptRoot "bin\ggml-rpc-server.exe"
+        if (Test-Path $rpcServerExe) {
+            & $rpcServerExe -H 0.0.0.0 -p $workerPort -c
+        }
+        else {
+            cargo run --release --bin aeromesh -- worker --port $workerPort --cache
+        }
+    }
+    else {
+        # Native Zero-Weight Activation Streaming Worker
+        $exe = Get-AeroMeshExe
+        if ($exe) {
+            & $exe worker --port $workerPort --model "$detectedModel"
+        }
+        else {
+            cargo run --release --bin aeromesh -- worker --port $workerPort --model "$detectedModel"
+        }
     }
     exit 0
 }
@@ -373,10 +438,12 @@ if ($Role -eq "all") {
         $env:PORT = "7860"
         if ($pythonExe -eq "python") {
             python app.py
-        } else {
+        }
+        else {
             & $pythonExe app.py
         }
-    } finally {
+    }
+    finally {
         Write-Host ""
         Write-Host "Shutting down local cluster mesh..." -ForegroundColor Yellow
         if ($rustProc -and -not $rustProc.HasExited) {
@@ -399,30 +466,40 @@ if ($Role -eq "coordinator") {
     # Check for Peer IP if not supplied
     if (-not $Peers) {
         Write-Host ""
-        Write-Host "Enter the Worker Address (ZeroTier / LAN / Tailscale IP:Port, example: 10.78.133.107:50052):" -ForegroundColor Yellow
+        Write-Host "Enter Worker Address(es) (ZeroTier / LAN / Tailscale IP:Port, comma-separated for 3+ nodes, example: 10.78.133.107:50052, 10.78.133.108:50052):" -ForegroundColor Yellow
         $enteredPeer = Read-Host "Worker Peer IP:Port"
         if ($enteredPeer) {
             $Peers = $enteredPeer.Trim()
         }
     }
 
-    if ($Peers -and -not $Peers.Contains(":")) {
-        $Peers = "$($Peers.Trim()):50052"
+    $peerList = @()
+    if ($Peers) {
+        $rawPeers = $Peers -split ','
+        foreach ($rp in $rawPeers) {
+            $p = $rp.Trim()
+            if ($p) {
+                if (-not $p.Contains(":")) { $p = "$p:50052" }
+                $peerList += $p
+            }
+        }
     }
 
     $coordUrl = "http://127.0.0.1:" + $apiPort
     $uiUrl = "http://127.0.0.1:7860"
 
-    $workerStatusStr = "Local Standalone"
-    $isPeerReachable = $false
-    if ($Peers) {
-        $isPeerReachable = Test-PeerReachable $Peers
-        if ($isPeerReachable) {
-            $workerStatusStr = "$Peers (✅ ONLINE)"
-        } else {
-            $workerStatusStr = "$Peers (⚠️ UNREACHABLE - Check Laptop B / start.ps1 worker)"
+    $workerStatusArr = @()
+    $onlinePeers = @()
+    foreach ($p in $peerList) {
+        if (Test-PeerReachable $p) {
+            $workerStatusArr += "$p (✅ ONLINE)"
+            $onlinePeers += $p
+        }
+        else {
+            $workerStatusArr += "$p (⚠️ UNREACHABLE)"
         }
     }
+    $workerStatusStr = if ($workerStatusArr.Count -gt 0) { $workerStatusArr -join ", " } else { "Local Standalone" }
 
     # Free stale ports before launching
     Stop-PortConflict @($apiPort, 7860)
@@ -430,28 +507,44 @@ if ($Role -eq "coordinator") {
     Write-Host ""
     Write-Host "[+] Launching AeroMesh Coordinator (Laptop A)..." -ForegroundColor Cyan
     Write-Host "  Model:       $modelName" -ForegroundColor Gray
+    Write-Host "  Mode:        $($Mode.ToUpper())" -ForegroundColor Cyan
     Write-Host "  Worker Peer: $workerStatusStr" -ForegroundColor Yellow
     Write-Host "  API Server:  $coordUrl" -ForegroundColor Green
     Write-Host "  Web UI:      $uiUrl" -ForegroundColor Cyan
     Write-Host ""
 
-    $serverExe = Join-Path $PSScriptRoot "bin\llama-server.exe"
-    $serverArgs = @("-m", "$detectedModel", "-ngl", "99", "--port", "$apiPort", "--host", "127.0.0.1", "-fa", "on")
-    if ($env:AEROMESH_API_KEY) {
-        $serverArgs += @("--api-key", "$env:AEROMESH_API_KEY")
-    }
-    if ($Peers -and $isPeerReachable) {
-        $serverArgs += @("--rpc", "$Peers")
-    } elseif ($Peers -and -not $isPeerReachable) {
-        Write-Host "  [-] WARNING: Could not connect to $Peers." -ForegroundColor DarkYellow
-        Write-Host "      Starting in high-speed local GPU mode. Run '.\start.ps1 worker' on Laptop B to enable distributed cluster." -ForegroundColor Gray
-        Write-Host ""
-    }
+    $peerArg = if ($onlinePeers.Count -gt 0) { $onlinePeers -join "," } else { "" }
 
-    $rustProc = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -PassThru -NoNewWindow
-    
-    # Wait until engine is fully loaded in VRAM before launching UI
-    $isReady = Wait-ServerReady $coordUrl 45
+    if ($Mode -eq "rpc") {
+        $serverExe = Join-Path $PSScriptRoot "bin\llama-server.exe"
+        $serverArgs = @("-m", "$detectedModel", "-ngl", "99", "--port", "$apiPort", "--host", "127.0.0.1")
+        if ($env:AEROMESH_API_KEY) {
+            $serverArgs += @("--api-key", "$env:AEROMESH_API_KEY")
+        }
+        if ($onlinePeers.Count -gt 0) {
+            $numGpus = $onlinePeers.Count + 1
+            $tsArg = (1..$numGpus | ForEach-Object { "1" }) -join ","
+            $serverArgs += @("-ts", "$tsArg", "--rpc", "$peerArg")
+        }
+        $rustProc = Start-Process -FilePath $serverExe -ArgumentList $serverArgs -PassThru -NoNewWindow
+        $isReady = Wait-ServerReady $coordUrl 120
+    }
+    else {
+        # Native Zero-Weight Activation Streaming Pipeline Coordinator (0.0 MB Weights on Wire)
+        $exe = Get-AeroMeshExe
+        $coordArgs = @("start", "--role", "coordinator", "--model", "$detectedModel", "--port", "$apiPort")
+        if ($peerArg) {
+            $coordArgs += @("--peers", "$peerArg")
+        }
+        if ($exe) {
+            $rustProc = Start-Process -FilePath $exe -ArgumentList $coordArgs -PassThru -NoNewWindow
+        }
+        else {
+            $cargoArgs = @("run", "--release", "--bin", "aeromesh", "--") + $coordArgs
+            $rustProc = Start-Process -FilePath "cargo" -ArgumentList $cargoArgs -PassThru -NoNewWindow
+        }
+        $isReady = Wait-ServerReady $coordUrl 60
+    }
 
     if (-not $NoBrowser -and $isReady) {
         Start-Process $uiUrl
@@ -463,10 +556,12 @@ if ($Role -eq "coordinator") {
         $env:PORT = "7860"
         if ($pythonExe -eq "python") {
             python app.py
-        } else {
+        }
+        else {
             & $pythonExe app.py
         }
-    } finally {
+    }
+    finally {
         Write-Host ""
         Write-Host "Shutting down coordinator API server..." -ForegroundColor Yellow
         if ($rustProc -and -not $rustProc.HasExited) {

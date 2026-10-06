@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Reviewer briefing for AeroMESH: a zero-weight pipeline-parallel LLM engine, with architecture, codebase tour and everything added after 11 Sep 2026.">
+<title>AeroMESH — Reviewer Briefing &amp; Post-11-Sep-2026 Changes</title>
+<style>
+:root{
+  --bg:#06090e;--surface:#0c121d;--card:rgba(255,255,255,.03);--line:rgba(255,255,255,.08);
+  --text:#f1f5f9;--muted:#94a3b8;--dim:#64748b;
+  --cyan:#00e5ff;--amber:#ff9900;--green:#10b981;--rose:#f43f5e;--indigo:#818cf8;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;scroll-padding-top:80px}
+body{background:var(--bg);background-image:radial-gradient(circle at 15% 10%,rgba(0,229,255,.07),transparent 40%),radial-gradient(circle at 85% 60%,rgba(255,153,0,.05),transparent 45%);background-attachment:fixed;color:var(--text);font-family:var(--sans);line-height:1.6;padding-bottom:80px}
+code{font-family:var(--mono);font-size:.88em;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:4px;color:#e2e8f0}
+header.top{position:sticky;top:0;z-index:50;background:rgba(6,9,14,.9);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);padding:10px 28px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.brand{font-weight:800;font-size:17px;white-space:nowrap}.brand small{display:block;font-size:10.5px;font-weight:500;color:var(--dim);letter-spacing:.8px;text-transform:uppercase}
+nav{display:flex;gap:4px;overflow-x:auto}
+nav a{color:var(--muted);text-decoration:none;font-size:12.5px;padding:6px 10px;border-radius:7px;white-space:nowrap;transition:.2s}
+nav a:hover{color:#fff;background:rgba(255,255,255,.07)}
+nav a.hl{color:#000;background:linear-gradient(135deg,#ffb300,#ff8c00);font-weight:700}
+button.btn{background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--text);padding:7px 14px;border-radius:8px;font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap;transition:.2s}
+button.btn:hover,button.btn.on{border-color:var(--cyan);color:var(--cyan);background:rgba(0,229,255,.1)}
+main{max-width:1200px;margin:0 auto;padding:32px 20px;display:flex;flex-direction:column;gap:36px}
+.hero,section.sec{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:34px 38px;box-shadow:0 10px 30px -10px rgba(0,0,0,.6)}
+.hero{background:linear-gradient(145deg,#0e1523,#070b12)}
+section.new{border-color:rgba(255,153,0,.4);box-shadow:0 0 36px rgba(255,140,0,.08)}
+h1{font-size:36px;line-height:1.2;letter-spacing:-1px;margin:12px 0;background:linear-gradient(135deg,#fff 40%,var(--cyan));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+h2{font-size:23px;letter-spacing:-.4px;margin-bottom:4px}
+h3{font-size:16px;margin-bottom:8px}
+.lead{color:var(--muted);font-size:16.5px;max-width:900px;margin-bottom:24px}
+.sub{color:var(--muted);font-size:14px;margin-bottom:22px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;margin:0 6px 6px 0}
+.b-c{background:rgba(0,229,255,.12);color:var(--cyan);border:1px solid rgba(0,229,255,.3)}
+.b-a{background:rgba(255,153,0,.12);color:var(--amber);border:1px solid rgba(255,153,0,.3)}
+.b-g{background:rgba(16,185,129,.12);color:var(--green);border:1px solid rgba(16,185,129,.3)}
+.b-r{background:rgba(244,63,94,.12);color:var(--rose);border:1px solid rgba(244,63,94,.3)}
+.b-i{background:rgba(129,140,248,.12);color:var(--indigo);border:1px solid rgba(129,140,248,.3)}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}
+.metric{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 18px;transition:.2s}
+.metric:hover{transform:translateY(-2px);border-color:rgba(0,229,255,.4)}
+.metric b{font-family:var(--mono);font-size:26px;display:block}.metric b i{font-style:normal;font-size:13px;color:var(--cyan);font-weight:500}
+.metric span{font-size:12.5px;color:var(--muted)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:900px){.grid2{grid-template-columns:1fr}.hero,section.sec{padding:24px 18px}header.top{flex-wrap:wrap}}
+.box{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 22px}
+.box p,.box li{font-size:14px;color:var(--muted)}.box ul{padding-left:18px}.box li{margin-bottom:6px}
+.note{display:none;background:rgba(255,153,0,.07);border-left:4px solid var(--amber);border-radius:0 8px 8px 0;padding:12px 16px;margin-bottom:20px;font-size:13.5px;color:#cbd5e1}
+.note b{display:block;color:var(--amber);font-size:12px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px}
+body.present .note{display:block}
+.say{margin-top:8px;font-style:italic;color:#ffedd5}
+pre.code{background:#05080d;border:1px solid var(--line);border-radius:8px;padding:12px 16px;font-family:var(--mono);font-size:12.5px;color:#e2e8f0;overflow-x:auto;margin:12px 0;line-height:1.5}
+pre .c{color:#64748b}
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:10px;margin:14px 0}
+table{width:100%;border-collapse:collapse;font-size:13.5px;text-align:left}
+th{background:rgba(255,255,255,.04);padding:11px 14px;white-space:nowrap}
+td{padding:11px 14px;border-top:1px solid rgba(255,255,255,.05);color:var(--muted);vertical-align:top}
+tr:hover td{background:rgba(255,255,255,.02);color:#fff}
+.diagram{background:#080d15;border:1px solid var(--line);border-radius:12px;padding:20px;overflow-x:auto;margin:16px 0}
+.diagram svg{width:100%;min-width:820px;height:auto;display:block}
+.bytes{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:14px 0}
+.bytes div{background:rgba(0,229,255,.05);border:1px solid rgba(0,229,255,.2);border-radius:6px;padding:8px 10px;font-family:var(--mono);text-align:center}
+.bytes small{display:block;font-size:10px;color:#38bdf8}.bytes b{font-size:12px}.bytes em{display:block;font-style:normal;font-size:10px;color:var(--dim)}
+.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
+.filters input{flex:1;min-width:240px;background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:8px;padding:9px 14px;color:#fff;font-size:13.5px;outline:none}
+.filters input:focus{border-color:var(--cyan)}
+.pill{background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:999px;padding:6px 14px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer}
+.pill.on,.pill:hover{color:#fff;border-color:var(--cyan);background:rgba(0,229,255,.15)}
+.chg{background:rgba(18,25,39,.85);border:1px solid var(--line);border-left:4px solid var(--cyan);border-radius:12px;padding:20px 24px;margin-bottom:16px}
+.chg.crash{border-left-color:var(--rose)}.chg.security{border-left-color:var(--amber)}.chg.devops{border-left-color:var(--green)}.chg.validation{border-left-color:var(--indigo)}
+.chg h3{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.chg .meta{font-family:var(--mono);font-size:11px;color:var(--dim);margin-bottom:8px}
+.chg p{font-size:14px;color:var(--muted)}
+.ba{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+@media(max-width:700px){.ba{grid-template-columns:1fr}}
+.ba div{background:rgba(0,0,0,.4);border-radius:8px;padding:10px 14px;font-size:13px;color:var(--muted)}
+.ba .bad{border-left:3px solid var(--rose)}.ba .good{border-left:3px solid var(--green)}
+.ba b{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.bad b{color:var(--rose)}.good b{color:var(--green)}
+.timeline{border-left:2px solid rgba(255,153,0,.4);margin:10px 0 24px 8px;padding-left:20px}
+.timeline div{position:relative;margin-bottom:12px;font-size:13.5px;color:var(--muted)}
+.timeline div::before{content:"";position:absolute;left:-27px;top:7px;width:10px;height:10px;border-radius:50%;background:var(--amber)}
+.timeline b{color:#fff;font-family:var(--mono);font-size:12.5px}
+.bars{display:flex;flex-direction:column;gap:8px;margin:10px 0 24px}
+.bar{display:grid;grid-template-columns:190px 1fr 70px;gap:10px;align-items:center;font-size:12.5px;color:var(--muted)}
+.bar i{display:block;height:12px;border-radius:6px;background:linear-gradient(90deg,var(--cyan),var(--amber))}
+.qa{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:10px}
+.qa h4{padding:14px 18px;font-size:15px;cursor:pointer;display:flex;justify-content:space-between;gap:12px;user-select:none}
+.qa h4::after{content:"+";color:var(--cyan);font-size:18px}.qa.open h4::after{content:"−"}
+.qa div{display:none;padding:0 18px 16px;font-size:14px;color:#cbd5e1;border-top:1px solid rgba(255,255,255,.05);padding-top:12px}
+.qa.open div{display:block}
+.warn{background:rgba(244,63,94,.07);border:1px solid rgba(244,63,94,.3);border-radius:10px;padding:14px 18px;font-size:13.5px;color:#fecdd3;margin-top:16px}
+@media print{body{background:#fff;color:#000}header.top,.filters{display:none}.note,.qa div{display:block!important}}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">⚡ AeroMESH<small>Reviewer briefing</small></div>
+  <nav>
+    <a href="#summary">Summary</a><a href="#problem">Problem</a><a href="#architecture">Architecture</a><a href="#lifecycle">Lifecycle</a><a href="#protocol">Protocol</a>
+    <a href="#new" class="hl">★ Since 11 Sep</a><a href="#code">Codebase</a><a href="#security">Security</a><a href="#bench">Benchmarks</a><a href="#limits">Limits</a><a href="#qa">Q&amp;A</a>
+  </nav>
+  <button class="btn" id="pm" onclick="togglePresent()">🎙️ Presenter notes</button>
+</header>
+
+<main>
+<!-- HERO -->
+<div class="hero" id="summary">
+  <span class="badge b-c">Distributed LLM inference</span><span class="badge b-g">43/43 Rust tests (per status doc)</span><span class="badge b-i">9 gateway tests</span><span class="badge b-a">52 files · +8,133 / −408 since 11 Sep</span>
+  <h1>AeroMESH: a zero-weight pipeline-parallel LLM cluster for consumer laptops</h1>
+  <p class="lead">Two ordinary laptops split a 14B model's layers between them. Each keeps its own copy of the GGUF file on disk, so <strong>no model weights cross the network</strong>. Per token, only one INT8-quantised hidden-state vector (~5 KB) travels between the machines.</p>
+  <div class="metrics">
+    <div class="metric"><b>0.0 <i>MB</i></b><span>model weights sent over the wire</span></div>
+    <div class="metric"><b>5.04 <i>KB/tok</i></b><span>activation payload (INT8 per-row)</span></div>
+    <div class="metric"><b>74.8 <i>%</i></b><span>less traffic than raw FP32</span></div>
+    <div class="metric"><b>1.4 <i>tok/s</i></b><span>measured, 14B over 2 laptops</span></div>
+    <div class="metric"><b>+8,133</b><span>lines changed since 11 Sep</span></div>
+  </div>
+</div>
+
+<!-- PROBLEM -->
+<section class="sec" id="problem">
+  <h2>1. The problem and the answer</h2>
+  <p class="sub">A 14B model at 4-bit needs roughly 9 GB of VRAM; typical gaming laptops have 6–8 GB.</p>
+  <div class="note"><b>Speaker note</b>Open with the VRAM ceiling, then explain why the usual fix (tensor parallelism) cannot work over Wi-Fi.<div class="say">"Two bottlenecks: the memory on each device, and the bandwidth between them."</div></div>
+  <div class="grid2">
+    <div class="box"><h3>❌ Why existing approaches fail</h3><ul>
+      <li><b>Tensor parallelism</b> (Megatron, vLLM) synchronises inside every layer and needs NVLink/InfiniBand-class links.</li>
+      <li><b>Stock llama.cpp RPC</b> ships weights over the network at start-up and sends uncompressed activations.</li>
+      <li><b>Consumer networks</b> drop packets and change IPs; naive RPC stalls or crashes.</li></ul></div>
+    <div class="box"><h3>✅ What AeroMESH does</h3><ul>
+      <li><b>Local slices:</b> each node memory-maps only its own layers from a local GGUF slice.</li>
+      <li><b>Pipeline parallelism:</b> Node A runs layers 0..22, Node B runs 23..47 plus the LM head.</li>
+      <li><b>INT8 per-row activations:</b> 5,124 bytes instead of 20,480 for d=5120.</li>
+      <li><b>Tailscale/WireGuard</b> mesh with bounded frames, handshake auth and reconnect logic.</li></ul></div>
+  </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section class="sec" id="architecture">
+  <h2>2. System architecture</h2>
+  <p class="sub">Three tiers: browser + Python gateway, Rust coordinator (Axum), Rust worker over the mesh.</p>
+  <div class="note"><b>Speaker note</b>Walk left to right: browser → FastAPI :7860 → Axum :8080 → Stage 1 on GPU A → AERO frame over the mesh → Worker :50052 → ATOK reply → loop.</div>
+  <div class="diagram">
+  <svg viewBox="0 0 960 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,sans-serif">
+    <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#00e5ff"/></marker>
+    <marker id="ao" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#ff9900"/></marker></defs>
+    <rect x="20" y="20" width="230" height="360" rx="12" fill="#0f172a" stroke="#ffffff22"/>
+    <text x="135" y="48" text-anchor="middle" fill="#fff" font-weight="700" font-size="13">CLIENT &amp; GATEWAY</text>
+    <rect x="38" y="66" width="194" height="70" rx="8" fill="#ffffff0a" stroke="#ffffff22"/>
+    <text x="135" y="92" text-anchor="middle" fill="#38bdf8" font-size="12" font-weight="600">Browser SPA</text>
+    <text x="135" y="110" text-anchor="middle" fill="#94a3b8" font-size="11">SSE streaming · Stop button</text>
+    <text x="135" y="126" text-anchor="middle" fill="#94a3b8" font-size="11">Liquid Glass UI</text>
+    <rect x="38" y="160" width="194" height="100" rx="8" fill="#ffffff0a" stroke="#ffffff22"/>
+    <text x="135" y="186" text-anchor="middle" fill="#4ade80" font-size="12" font-weight="600">FastAPI gateway :7860</text>
+    <text x="135" y="206" text-anchor="middle" fill="#94a3b8" font-size="11">hop-by-hop header filter</text>
+    <text x="135" y="223" text-anchor="middle" fill="#94a3b8" font-size="11">Bearer key forwarding</text>
+    <text x="135" y="240" text-anchor="middle" fill="#94a3b8" font-size="11">/health · /ready</text>
+    <rect x="38" y="284" width="194" height="76" rx="8" fill="#ffffff0a" stroke="#ffffff22"/>
+    <text x="135" y="308" text-anchor="middle" fill="#f43f5e" font-size="12" font-weight="600">Backend guards</text>
+    <text x="135" y="326" text-anchor="middle" fill="#94a3b8" font-size="11">local-origin CORS · Bearer auth</text>
+    <text x="135" y="343" text-anchor="middle" fill="#94a3b8" font-size="11">15 chat/min · 60 health/min</text>
+    <path d="M250 210 L330 210" stroke="#00e5ff" stroke-width="2" marker-end="url(#ar)"/>
+    <text x="290" y="200" text-anchor="middle" fill="#38bdf8" font-size="10">HTTP/SSE</text>
+    <rect x="330" y="20" width="270" height="360" rx="12" fill="#00e5ff14" stroke="#00e5ff66" stroke-width="2"/>
+    <text x="465" y="48" text-anchor="middle" fill="#00e5ff" font-weight="700" font-size="13">COORDINATOR · Laptop A</text>
+    <rect x="348" y="66" width="234" height="80" rx="8" fill="#0b1322" stroke="#00e5ff44"/>
+    <text x="465" y="90" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">Axum API :8080</text>
+    <text x="465" y="108" text-anchor="middle" fill="#94a3b8" font-size="11">request validation → 422 envelopes</text>
+    <text x="465" y="125" text-anchor="middle" fill="#94a3b8" font-size="11">context-window guard</text>
+    <rect x="348" y="160" width="234" height="80" rx="8" fill="#0b1322" stroke="#00e5ff44"/>
+    <text x="465" y="184" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">Stage 1 · layers 0..22</text>
+    <text x="465" y="202" text-anchor="middle" fill="#94a3b8" font-size="11">mmap'd GGUF slice · CUDA</text>
+    <text x="465" y="219" text-anchor="middle" fill="#94a3b8" font-size="11">4.12 GB footprint (BENCHMARKS.md)</text>
+    <rect x="348" y="254" width="234" height="56" rx="8" fill="#0b1322" stroke="#00e5ff44"/>
+    <text x="465" y="278" text-anchor="middle" fill="#38bdf8" font-size="12" font-weight="600">INT8 per-row quantiser</text>
+    <text x="465" y="295" text-anchor="middle" fill="#94a3b8" font-size="11">42-byte AERO header</text>
+    <rect x="348" y="322" width="234" height="44" rx="8" fill="#0b1322" stroke="#00e5ff44"/>
+    <text x="465" y="349" text-anchor="middle" fill="#a78bfa" font-size="11">autoregressive loop · session/KV flags</text>
+    <path d="M600 282 L690 282" stroke="#00e5ff" stroke-width="2.5" marker-end="url(#ar)"/>
+    <text x="645" y="270" text-anchor="middle" fill="#00e5ff" font-size="10" font-weight="700">AERO ~5 KB</text>
+    <path d="M690 336 L600 336" stroke="#ff9900" stroke-width="2" marker-end="url(#ao)"/>
+    <text x="645" y="326" text-anchor="middle" fill="#ff9900" font-size="10" font-weight="700">ATOK token</text>
+    <rect x="690" y="20" width="250" height="360" rx="12" fill="#ff990014" stroke="#ff990066" stroke-width="2"/>
+    <text x="815" y="48" text-anchor="middle" fill="#ff9900" font-weight="700" font-size="13">WORKER · Laptop B</text>
+    <rect x="708" y="66" width="214" height="80" rx="8" fill="#18110b" stroke="#ff990044"/>
+    <text x="815" y="90" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">TCP listener :50052</text>
+    <text x="815" y="108" text-anchor="middle" fill="#94a3b8" font-size="11">protocol v3 handshake + secret</text>
+    <text x="815" y="125" text-anchor="middle" fill="#94a3b8" font-size="11">bounded frame decoding</text>
+    <rect x="708" y="160" width="214" height="60" rx="8" fill="#18110b" stroke="#ff990044"/>
+    <text x="815" y="186" text-anchor="middle" fill="#38bdf8" font-size="12" font-weight="600">Dequantise INT8 → FP32</text>
+    <text x="815" y="204" text-anchor="middle" fill="#94a3b8" font-size="11">dim/length invariants checked</text>
+    <rect x="708" y="234" width="214" height="76" rx="8" fill="#18110b" stroke="#ff990044"/>
+    <text x="815" y="260" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">Stage 2 · layers 23..47</text>
+    <text x="815" y="278" text-anchor="middle" fill="#94a3b8" font-size="11">+ output norm &amp; LM head</text>
+    <text x="815" y="295" text-anchor="middle" fill="#94a3b8" font-size="11">4.85 GB (BENCHMARKS.md)</text>
+    <rect x="708" y="322" width="214" height="44" rx="8" fill="#18110b" stroke="#ff990044"/>
+    <text x="815" y="349" text-anchor="middle" fill="#4ade80" font-size="12" font-weight="600">Top-p / temperature sampler</text>
+  </svg></div>
+  <div class="grid2">
+    <div class="box"><h3>🛡️ Process containment (Windows)</h3>
+      <p><code>SafeProcessJob</code> in <code>job_object.rs</code> puts child processes in a Win32 Job Object so they die with the coordinator, freeing VRAM:</p>
+<pre class="code"><span class="c">// job_object.rs · SafeProcessJob::new()</span>
+let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;</pre></div>
+    <div class="box"><h3>⚡ Shared-memory transport</h3>
+      <p>For single-machine runs there is a shared-memory path, <code>ShmPipelineTransport</code> (<code>aeromesh-core/src/transport.rs</code>) backed by a ring buffer in <code>shm.rs</code> (tests: <code>test_shm_ring_buffer_spsc</code>, <code>test_shm_ring_buffer_rejects_oversized_len</code>). It is the fallback when no second laptop is available (<code>.\start.ps1 all</code>).</p></div>
+  </div>
+</section>
+
+<!-- LIFECYCLE -->
+<section class="sec" id="lifecycle">
+  <h2>3. One request, end to end</h2>
+  <p class="sub">Source references are function/type names so they stay valid as files change.</p>
+  <div class="note"><b>Speaker note</b>Follow a single token. Stress step 3 (rejects bad input early), step 5 (20 KB → 5 KB) and step 10 (Stop button cancels).</div>
+  <div class="tw"><table>
+    <tr><th>#</th><th>Stage</th><th>What happens</th><th>Where</th></tr>
+    <tr><td>1</td><td>UI</td><td>Send posts to <code>/api/chat/stream</code> with an <code>AbortController</code>; button becomes Stop.</td><td><code>static/js/app.js</code> · <code>handleSendMessage</code></td></tr>
+    <tr><td>2</td><td>Gateway</td><td>Strips hop-by-hop headers, adds <code>Authorization: Bearer</code>, streams SSE through unbuffered.</td><td><code>app.py</code> · <code>proxy_request</code></td></tr>
+    <tr><td>3</td><td>Validation</td><td>Role/content/temperature/top_p/max_tokens checks; rejects with OpenAI-style 422. Context guard: prompt + max_tokens ≤ n_ctx.</td><td><code>server.rs</code> · <code>ChatCompletionRequest::validate</code>; <code>pipeline.rs</code> context check</td></tr>
+    <tr><td>4</td><td>Stage 1</td><td>Tokenise, run layers 0..22 on the local slice.</td><td><code>slice_loader.rs</code> · <code>LlamaPipelineInstance</code></td></tr>
+    <tr><td>5</td><td>Quantise</td><td>Per row: scale = max|x|/127; i8 values; 4-byte scale prefix.</td><td><code>activation.rs</code> · <code>from_f32_matrix_quantized</code></td></tr>
+    <tr><td>6</td><td>Frame</td><td>42-byte big-endian AERO header (version 3) + payload.</td><td><code>activation.rs</code> · <code>ActivationHeader</code></td></tr>
+    <tr><td>7</td><td>Mesh</td><td>Sent over TCP on the Tailscale/WireGuard link to port 50052.</td><td><code>pipeline.rs</code> · worker accept loop</td></tr>
+    <tr><td>8</td><td>Stage 2</td><td>Header validated (size ceiling, S×d match), dequantise, run layers 23..47 + LM head.</td><td><code>ActivationHeader::decode</code>; <code>evaluate_activations_to_logits</code></td></tr>
+    <tr><td>9</td><td>Sample</td><td>Top-p/temperature sample; token and text returned as an ATOK frame.</td><td><code>TokenResponseFrame</code></td></tr>
+    <tr><td>10</td><td>Loop / abort</td><td>Coordinator streams the token to the browser and feeds it back. Stop/Esc aborts the fetch and calls <code>/api/chat/abort</code>.</td><td><code>handle_chat_abort</code>; <code>app.js</code></td></tr>
+  </table></div>
+</section>
+
+<!-- PROTOCOL -->
+<section class="sec" id="protocol">
+  <h2>4. Wire protocol</h2>
+  <p class="sub">All multi-byte header fields are big-endian. The INT8 row scale is little-endian.</p>
+  <div class="note"><b>Speaker note</b>Reviewers like byte-level detail. Point out that the header's payload length must equal what S, d and dtype imply, or the frame is rejected before allocation.</div>
+  <div class="bytes">
+    <div><small>0..4</small><b>magic</b><em>"AERO"</em></div><div><small>4..6</small><b>version</b><em>u16 = 3</em></div>
+    <div><small>6..14</small><b>session_id</b><em>u64</em></div><div><small>14..22</small><b>sequence_id</b><em>u64</em></div>
+    <div><small>22..26</small><b>seq_len S</b><em>u32</em></div><div><small>26..30</small><b>token_pos</b><em>u32</em></div>
+    <div><small>30..32</small><b>layer_index</b><em>u16</em></div><div><small>32..36</small><b>hidden_dim</b><em>u32</em></div>
+    <div><small>36</small><b>dtype</b><em>0 F32 · 1 F16 · 2 BF16 · 3 INT8 · 4 FP8</em></div><div><small>37</small><b>flags</b><em>0x01 CLEAR_KV · 0x02 PROMPT · 0x04 EOS</em></div>
+    <div style="grid-column:span 2"><small>38..42</small><b>payload_bytes</b><em>u32</em></div>
+  </div>
+  <div class="grid2">
+    <div class="box"><h3>Quantisation (as implemented)</h3>
+<pre class="code">scale = max_abs / 127.0        <span class="c">// scale = 1.0 if max_abs ≤ 1e-12</span>
+q     = clamp(round(x / scale), -127, 127) as i8
+row   = [scale: f32 LE (4 B)] [q: i8 × d]</pre>
+      <p>Tests: <code>test_per_row_quantization_accuracy_and_outlier_resilience</code>, <code>test_fp8_e4m3_roundtrip</code>.</p></div>
+    <div class="box"><h3>Bytes per token, d = 5120</h3><div class="tw"><table>
+      <tr><th>Format</th><th>Payload</th><th>vs FP32</th></tr>
+      <tr><td>FP32</td><td>20,480 B</td><td>—</td></tr>
+      <tr><td>FP16/BF16</td><td>10,240 B</td><td>−50%</td></tr>
+      <tr><td style="color:#00e5ff"><b>INT8 per-row</b></td><td style="color:#00e5ff"><b>5,124 B (+42 B header)</b></td><td style="color:#00e5ff"><b>−75%</b></td></tr></table></div></div>
+  </div>
+</section>
+
+<!-- WHAT'S NEW -->
+<section class="sec new" id="new">
+  <span class="badge b-a">Main focus for the reviewer</span>
+  <h2>★ What was added or improved after 11 Sep 2026</h2>
+  <p class="sub">From <code>f0f7a14</code> (13 Sep) to <code>b07961f</code> (3 Oct): <b>about 40 commits including merges · 52 files changed · +8,133 / −408 lines</b>. Baseline = last commit before the cutoff, <code>be1f955</code> (25 Aug).</p>
+  <div class="note"><b>Speaker note</b>Frame it as a hardening sprint. Before: working prototype with crash paths, no auth, no limits. After: five pillars: crash immunity, authentication, input bounds, gateway/UX, delivery assets.<div class="say">"Each gap was closed with a bounded check and a test, not a one-line patch."</div></div>
+
+  <h3>Timeline</h3>
+  <div class="timeline">
+    <div><b>13 Sep</b> · DoS-bounded frame decoding (<code>521b3f0</code>); slicer/engine crash fixes (<code>df93496</code>)</div>
+    <div><b>14 Sep</b> · Telemetry desync fix (<code>44e2560</code>); distributed-mode proof (<code>fdd42e3</code>); auth on all control surfaces (<code>3c3f4ca</code>)</div>
+    <div><b>15 Sep</b> · Validation/422 (<code>3f9eb7d</code>); context guard (<code>6dfc3b7</code>); strict CORS (<code>432039c</code>); Stop button (<code>7c9d653</code>); rate limiting (<code>d7b8ce9</code>); API reference; demo battlecard</div>
+    <div><b>16 Sep</b> · LIMITATIONS, LICENSE, CONTRIBUTING, CI workflow (<code>28069a2</code>), screenshots (<code>77fff5a</code>), gateway hardening (<code>fd8d8d3</code>)</div>
+    <div><b>2–3 Oct</b> · SIH demo script &amp; video renderer (<code>1b33bc9</code>); CLI subcommands; model-switch timeout and Python env resolution (<code>c2f3aed</code>); Liquid Glass UI (<code>b07961f</code>)</div>
+  </div>
+
+  <h3>Where the +8,133 lines went (top files, lines added in the diff)</h3>
+  <div class="bars">
+    <div class="bar">static/css/liquid_glass.css<i style="width:100%"></i>1,551</div>
+    <div class="bar">crates/…/server.rs<i style="width:64%"></i>987</div>
+    <div class="bar">README.md<i style="width:47%"></i>730</div>
+    <div class="bar">app.py (gateway)<i style="width:29%"></i>451</div>
+    <div class="bar">crates/…/pipeline.rs<i style="width:29%"></i>450</div>
+    <div class="bar">crates/…/activation.rs<i style="width:24%"></i>368</div>
+  </div>
+
+  <div class="filters">
+    <input id="q" placeholder="Filter: CRASH-01, CORS, auth, abort, underflow…" oninput="applyFilter()" aria-label="Filter changes">
+    <button class="pill on" onclick="setCat('all',this)">All</button><button class="pill" onclick="setCat('crash',this)">Crash immunity</button><button class="pill" onclick="setCat('security',this)">Security</button><button class="pill" onclick="setCat('validation',this)">Validation</button><button class="pill" onclick="setCat('frontend',this)">Frontend</button><button class="pill" onclick="setCat('devops',this)">DevOps &amp; docs</button>
+  </div>
+
+  <div class="chg crash" data-c="crash"><h3><span class="badge b-r">CRASH-01</span>Dangling native pointers after a model switch</h3>
+    <div class="meta">fixed in df93496 · slice_loader.rs, pipeline.rs, server.rs · test: test_closed_instance_safety, test_switch_model_invalid_path_preserves_old_model</div>
+    <p>Switching models freed the C++ context but left <code>vocab</code> dangling; the next tokenise call could crash the process with an access violation.</p>
+    <div class="ba"><div class="bad"><b>Before</b>No readiness check before FFI calls; pointers not cleared on close.</div><div class="good"><b>After</b><code>close()</code> nulls every pointer; every FFI entry calls <code>ensure_ready()</code>; model switch keeps the old model if loading fails.</div></div>
+<pre class="code"><span class="c">// slice_loader.rs</span>
+pub fn ensure_ready(&amp;self) -&gt; Result&lt;()&gt; {
+    if !self.is_ready() { bail!("LlamaPipelineInstance is not ready or has been closed (native C++ pointers are null)"); }
+    Ok(())
+}</pre></div>
+
+  <div class="chg crash" data-c="crash"><h3><span class="badge b-r">CRASH-02</span>Arithmetic underflow in the GGUF slicer</h3>
+    <div class="meta">fixed in df93496 · gguf_slicer.rs · test: test_slice_gguf_no_underflow_panic</div>
+    <p>An unflushed writer reported length 0, then <code>len() - 24</code> underflowed and panicked on every slice. Replaced with explicit stream-position tracking and a static zero buffer for alignment padding.</p></div>
+
+  <div class="chg crash" data-c="crash"><h3><span class="badge b-r">FIX-05</span>Unbounded allocation from the wire (remote DoS)</h3>
+    <div class="meta">fixed in 521b3f0 · activation.rs · tests: …rejects_oversized_payload_ceiling, …mismatched_payload_bytes, …integer_overflow</div>
+    <p>Frames used the sender's length to allocate memory. Now: 128 MB payload ceiling, caps on sequence length (131,072) and hidden dim (65,536), and the header's payload length must equal the size implied by S, d and dtype (computed with checked multiplication). Handshake strings are length-capped too.</p>
+<pre class="code"><span class="c">// activation.rs · ActivationHeader::decode</span>
+let expected_bytes = Self::calculate_expected_payload_bytes(sequence_length, hidden_dim, dtype)?;
+ensure!(payload_bytes == expected_bytes, "Mismatched activation payload size in header: …");</pre></div>
+
+  <div class="chg security" data-c="security"><h3><span class="badge b-a">FIX-03</span>Authentication on HTTP and the worker socket</h3>
+    <div class="meta">3c3f4ca · server.rs, activation.rs, pipeline.rs, app.py · tests: test_constant_time_eq_str, test_handshake_v3_mutual_auth_and_v2_rejection</div>
+    <div class="ba"><div class="bad"><b>Before</b>Anyone on the LAN could call the API or connect to port 50052.</div><div class="good"><b>After</b>Axum <code>auth_middleware</code> checks the Bearer key via a SHA-256-based constant-time compare; protocol v3 handshake carries a 32-byte worker secret, and v2 peers are refused.</div></div></div>
+
+  <div class="chg security" data-c="security"><h3><span class="badge b-a">FIX-11</span>CORS restricted to the local UI</h3>
+    <div class="meta">432039c · server.rs · tests: test_cors_preflight_allowed_origin_returns_header, …unauthorized_origin_omits_header</div>
+    <p><code>CorsLayer::permissive()</code> replaced by <code>build_cors_layer()</code>: only <code>http://127.0.0.1:7860</code> and <code>http://localhost:7860</code>, plus an optional <code>AEROMESH_ALLOWED_ORIGIN</code> list.</p></div>
+
+  <div class="chg security" data-c="security"><h3><span class="badge b-a">FIX-08</span>Rate limiting with OpenAI-style 429s</h3>
+    <div class="meta">d7b8ce9 · server.rs · tests: test_rate_limit_error_mapping_produces_openai_envelope, test_rate_limiter_sub_router_integration</div>
+    <p>Two isolated pools: <code>/health</code> 60 requests/min; chat routes (<code>/v1/chat/completions</code>, <code>/api/chat</code>, <code>/api/chat/stream</code>) 15 requests/min. Overruns return a <code>rate_limit_error</code> JSON body.</p></div>
+
+  <div class="chg validation" data-c="validation"><h3><span class="badge b-i">FIX-06 / 07</span>Request validation and OpenAI-compatible errors</h3>
+    <div class="meta">3f9eb7d · server.rs · tests: test_chat_completion_validation_* (8 cases)</div>
+    <p>Non-empty messages; roles system/user/assistant/tool/function; non-blank content; temperature 0–2, top_p 0–1 (finite); max_tokens 1–32768. Failures return a standard envelope:</p>
+<pre class="code">{ "error": { "message": "…", "type": "invalid_request_error", "param": "temperature", "code": "invalid_value" } }</pre></div>
+
+  <div class="chg validation" data-c="validation"><h3><span class="badge b-i">FIX-24</span>Context-window guard</h3>
+    <div class="meta">6dfc3b7 · server.rs, pipeline.rs · test: test_coordinator_n_ctx_reporting</div>
+    <p>Rejects requests where prompt tokens + <code>max_tokens</code> exceed <code>n_ctx</code> (4096 by default) before any GPU work starts, instead of failing mid-decode.</p></div>
+
+  <div class="chg" data-c="frontend"><h3><span class="badge b-c">FIX-19</span>Stop-generating button</h3>
+    <div class="meta">7c9d653 · app.js, app.py, server.rs · test: test_handle_chat_abort_endpoint, test_chat_abort_endpoint</div>
+    <p>The Send button toggles to Stop. Clicking again calls <code>AbortController.abort()</code> and posts to <code>/api/chat/abort</code>; the stream shows "(Generation stopped by user)".</p></div>
+
+  <div class="chg" data-c="frontend"><h3><span class="badge b-c">TELEMETRY</span>"Coordinator Offline" shown mid-stream</h3>
+    <div class="meta">44e2560 · server.rs, app.js</div>
+    <p>Status polling waited on the generation lock. Cluster metadata now lives in an <code>RwLock&lt;ClusterMeta&gt;</code> so the HUD stays live while generating.</p></div>
+
+  <div class="chg devops" data-c="devops"><h3><span class="badge b-g">FIX-16</span>FastAPI gateway hardened and tested</h3>
+    <div class="meta">fd8d8d3 · app.py, docs/architecture/fastapi-proxy-gateway.md, tests/test_fastapi_gateway.py (9 tests)</div>
+    <p>Shared <code>httpx.AsyncClient</code>, <code>/health</code> liveness and <code>/ready</code> readiness probes, unbuffered SSE passthrough, 502 on unreachable backend, fallback model/cluster responses when the backend is offline.</p></div>
+
+  <div class="chg devops" data-c="devops"><h3><span class="badge b-g">DELIVERY</span>CI, docs and demo assets</h3>
+    <div class="meta">28069a2 · 77fff5a · 48e2ad9 · 41348ec · e7ed18e · 1b33bc9</div>
+    <p>GitHub Actions on <code>windows-latest</code> (test + release check); BENCHMARKS, SECURITY, LIMITATIONS, API_REFERENCE, CONTRIBUTING, dual MIT/Apache license; four UI screenshots; DEMO_SCRIPT and SIH_DEMO_SCRIPT; demo-video render scripts.</p></div>
+
+  <div class="chg" data-c="frontend"><h3><span class="badge b-c">OCT 2026</span>Liquid Glass UI, CLI and engine updates</h3>
+    <div class="meta">b07961f · cd9fb8c · d217e26 · c2f3aed</div>
+    <p>New design system (<code>liquid_glass.css</code> 1,370 lines, <code>liquid_mesh.js</code>, logos); extra <code>aeromesh-cli</code> subcommands; longer model-switch timeout; better Python environment resolution in <code>start.ps1</code>.</p></div>
+</section>
+
+<!-- CODEBASE -->
+<section class="sec" id="code">
+  <h2>5. Codebase tour</h2>
+  <p class="sub">Rust workspace (3 crates) + Python gateway + vanilla-JS front end. Line counts are from the working tree on 5 Oct 2026.</p>
+  <div class="note"><b>Speaker note</b>core = wire types; engine = slicing, pipeline, HTTP API; cli = operator tool; Python/JS = presentation tier.</div>
+  <div class="tw"><table>
+    <tr><th>File</th><th>Lines</th><th>Role</th><th>Since 11 Sep</th></tr>
+    <tr><td><code>aeromesh-core/src/activation.rs</code></td><td>1,125</td><td>AERO/ATOK frames, handshake, INT8/FP8 codecs</td><td><span class="badge b-a">hardened</span></td></tr>
+    <tr><td><code>aeromesh-core/src/{shm,transport,tailscale}.rs</code></td><td>165 / 160 / 190</td><td>Shared-memory ring, transports, Tailscale probing</td><td>shm.rs touched</td></tr>
+    <tr><td><code>aeromesh-engine/src/server.rs</code></td><td>1,155</td><td>Axum API, validation, CORS, auth, rate limits, SSE</td><td><span class="badge b-a">heavily changed</span></td></tr>
+    <tr><td><code>aeromesh-engine/src/pipeline.rs</code></td><td>981</td><td>Coordinator client, worker service, hot-swap, context guard</td><td><span class="badge b-a">changed</span></td></tr>
+    <tr><td><code>aeromesh-engine/src/slice_loader.rs</code></td><td>804</td><td>mmap GGUF loader, native llama.cpp wrapper</td><td><span class="badge b-r">CRASH-01</span></td></tr>
+    <tr><td><code>aeromesh-engine/src/gguf_slicer.rs</code></td><td>596</td><td>Offline split into Stage 1 / Stage 2 GGUF</td><td><span class="badge b-r">CRASH-02</span></td></tr>
+    <tr><td><code>aeromesh-engine/src/job_object.rs</code></td><td>59</td><td>Win32 Job Object containment</td><td>—</td></tr>
+    <tr><td><code>aeromesh-cli/src/main.rs</code></td><td>651</td><td>Operator CLI (inspect, slice, cluster, serve)</td><td><span class="badge b-g">extended</span></td></tr>
+    <tr><td><code>app.py</code></td><td>~450</td><td>FastAPI gateway on :7860</td><td><span class="badge b-a">rewritten</span></td></tr>
+    <tr><td><code>static/js/app.js</code> · <code>index.html</code></td><td>1,046 / 253</td><td>SPA: streaming, Stop button, HUD, math rendering</td><td><span class="badge b-a">changed</span></td></tr>
+    <tr><td><code>static/css/liquid_glass.css</code> · <code>liquid_mesh.js</code></td><td>1,370 / 200</td><td>Liquid Glass theme and mesh animation</td><td><span class="badge b-g">new</span></td></tr>
+    <tr><td><code>tests/test_fastapi_gateway.py</code></td><td>87</td><td>9 gateway tests</td><td><span class="badge b-g">new</span></td></tr>
+    <tr><td><code>start.ps1</code> · <code>setup.ps1</code></td><td>—</td><td>One-command launch and environment bootstrap</td><td>start.ps1 updated</td></tr>
+  </table></div>
+</section>
+
+<!-- SECURITY -->
+<section class="sec" id="security">
+  <h2>6. Security and robustness</h2>
+  <p class="sub">Each threat is mapped to the defence in the code and a test that exercises it.</p>
+  <div class="tw"><table>
+    <tr><th>Threat</th><th>Surface</th><th>Defence</th><th>Test</th></tr>
+    <tr><td>Drive-by web pages calling the API</td><td>:8080</td><td>Local-origin CORS allow-list</td><td><code>test_cors_preflight_unauthorized_origin_omits_header</code></td></tr>
+    <tr><td>Memory exhaustion via a forged frame</td><td>:50052</td><td>128 MB ceiling, S/d caps, size-vs-shape check</td><td><code>test_activation_header_rejects_*</code></td></tr>
+    <tr><td>Unauthenticated peers</td><td>HTTP + worker</td><td>Bearer key; v3 handshake secret; v2 refused</td><td><code>test_handshake_v3_mutual_auth_and_v2_rejection</code></td></tr>
+    <tr><td>Timing leaks on key comparison</td><td>HTTP auth</td><td>Constant-time compare on SHA-256 digests</td><td><code>test_constant_time_eq_str</code></td></tr>
+    <tr><td>Request flooding</td><td>HTTP</td><td>Tower rate-limit pools, 429 envelope</td><td><code>test_rate_limiter_sub_router_integration</code></td></tr>
+    <tr><td>Context overflow</td><td>Inference</td><td>Pre-flight prompt+max_tokens ≤ n_ctx</td><td>validation tests + <code>test_coordinator_n_ctx_reporting</code></td></tr>
+    <tr><td>Orphaned GPU processes</td><td>Windows</td><td>Job Object with kill-on-close</td><td>— (manual verification only)</td></tr>
+  </table></div>
+</section>
+
+<!-- BENCH -->
+<section class="sec" id="bench">
+  <h2>7. Measured results</h2>
+  <p class="sub">From <code>BENCHMARKS.md</code> (run DIST-01, DeepSeek-R1-Distill-14B Q4_K_M, 48 layers, d=5120).</p>
+  <div class="note"><b>Speaker note</b>Be upfront: 1.4 tok/s is the measured number. It demonstrates feasibility (a model that does not fit one 8 GB GPU runs across two), not speed.</div>
+  <div class="tw"><table>
+    <tr><th>Metric</th><th>Value</th></tr>
+    <tr><td>Split</td><td>Stage 1: layers 0..22 (4.12 GB) · Stage 2: layers 23..47 + head (4.85 GB)</td></tr>
+    <tr><td>Link</td><td>Tailscale direct WireGuard, 1.14 ms RTT</td></tr>
+    <tr><td>Wire payload</td><td>5,124 B tensor + 42 B header ≈ 5.04–5.16 KB/token; 1.33 MB for a 256-token reply</td></tr>
+    <tr><td>Weights on wire</td><td>0.0 MB</td></tr>
+    <tr><td>Time to first token</td><td>968 ms for 52 prompt tokens</td></tr>
+    <tr><td>Step time</td><td>~180 ms Stage 1 + ~500 ms Stage 2 ≈ 710 ms/token → <b>1.40 tok/s</b></td></tr>
+    <tr><td>Full-model footprint</td><td>~9.2 GB — would not fit one 8 GB RTX 4060</td></tr>
+  </table></div>
+  <div class="warn"><b>Say this before they ask:</b> <code>PROJECT_ARCHITECTURE.md</code> mentions 30–50 tok/s as a goal; the measured figure is 1.4 tok/s. Also, the browser's "MB on wire" counter is an estimate computed in <code>app.js</code> (5,166 B × tokens), and a few fallback display values are hard-coded there. The authoritative numbers are the engine's logs and <code>BENCHMARKS.md</code>.</div>
+</section>
+
+<!-- LIMITS -->
+<section class="sec" id="limits">
+  <h2>8. Deliberate constraints</h2>
+  <p class="sub">Documented in <code>LIMITATIONS.md</code> and the status tracker as accepted decisions, not oversights.</p>
+  <div class="grid2">
+    <div class="box"><h3>Two-node topology</h3><p>The target case is two laptops pooling VRAM. N-stage pipelines are future work (FIX-28).</p></div>
+    <div class="box"><h3>Windows-first</h3><p>The intended hardware is NVIDIA gaming laptops on Windows 11; Job Objects guarantee clean teardown (FIX-29).</p></div>
+    <div class="box"><h3>No Docker</h3><p>GPU passthrough on Windows is brittle; native PowerShell launch avoids it (FIX-30).</p></div>
+    <div class="box"><h3>No TLS on localhost</h3><p>Inter-node traffic rides WireGuard; loopback UI/API traffic is not encrypted (FIX-23).</p></div>
+    <div class="box"><h3>Stateless engine</h3><p>Chat history lives in the browser, as with llama-server (FIX-20).</p></div>
+    <div class="box"><h3>Desktop-first UI</h3><p>Optimised for a presentation/telemetry screen, not mobile (FIX-26).</p></div>
+  </div>
+</section>
+
+<!-- QA -->
+<section class="sec" id="qa">
+  <h2>9. Likely reviewer questions</h2>
+  <p class="sub">Click a question to expand.</p>
+  <div class="qa open"><h4 onclick="this.parentElement.classList.toggle('open')">Why pipeline parallelism instead of tensor parallelism?</h4><div>Tensor parallelism synchronises inside every layer, so it needs very high-bandwidth links. Pipeline parallelism synchronises once per token at the split point, so ~5 KB over Wi-Fi is enough.</div></div>
+  <div class="qa"><h4 onclick="this.parentElement.classList.toggle('open')">What if the worker drops mid-generation?</h4><div>The coordinator has bounded socket waits and a reconnect path for the worker transport; the failure surfaces as an error on the stream rather than a hang. For a permanent loss, run single-machine with <code>.\start.ps1 all</code> (shared memory).</div></div>
+  <div class="qa"><h4 onclick="this.parentElement.classList.toggle('open')">Does INT8 activation quantisation hurt output quality?</h4><div>Scales are computed per token row, which handles outliers better than a global scale. <code>BENCHMARKS.md</code> reports cosine similarity above 0.9995 against FP32 at the boundary. We have not run a full perplexity benchmark.</div></div>
+  <div class="qa"><h4 onclick="this.parentElement.classList.toggle('open')">Why pre-sliced files on both laptops?</h4><div>Slicing is a one-time step (<code>gguf_slicer.rs</code>); after that, start-up is an mmap, with no weight transfer on the network.</div></div>
+  <div class="qa"><h4 onclick="this.parentElement.classList.toggle('open')">How are malicious peers handled?</h4><div>WireGuard identity at the network layer; a 32-byte shared secret in the v3 handshake; v2 and malformed frames are refused; payload size is bounded and cross-checked before allocation.</div></div>
+  <div class="qa"><h4 onclick="this.parentElement.classList.toggle('open')">Why a custom engine rather than llama.cpp RPC?</h4><div>The engine adds INT8 activations, session/KV flags, authenticated handshakes, an OpenAI-compatible API with validation and rate limits, and Windows process containment. It still uses llama.cpp for the actual layer compute.</div></div>
+  <div class="qa"><h4 onclick="this.parentElement.classList.toggle('open')">What changed after 11 Sep?</h4><div>Crash fixes (CRASH-01/02, FIX-05), authentication (FIX-03), CORS (FIX-11), rate limits (FIX-08), validation (FIX-06/07/24), Stop button (FIX-19), gateway hardening (FIX-16), CI and documentation, then the October demo assets and Liquid Glass UI. See the ★ section.</div></div>
+  <div class="qa"><h4 onclick="this.parentElement.classList.toggle('open')">Is 1.4 tok/s usable?</h4><div>It is a feasibility result: the model does not fit one 8 GB GPU at all. Most of the per-token time is compute (~680 of ~710 ms), not network, so faster GPUs or a better split would help directly.</div></div>
+</section>
+
+<footer style="text-align:center;color:var(--dim);font-size:12.5px">AeroMESH reviewer briefing · generated 5 Oct 2026 from the repository at <code>b07961f</code></footer>
+</main>
+
+<script>
+function togglePresent(){const on=document.body.classList.toggle('present');const b=document.getElementById('pm');b.classList.toggle('on',on);b.textContent=on?'🎙️ Notes ON':'🎙️ Presenter notes';}
+let cat='all';
+function setCat(c,el){cat=c;document.querySelectorAll('.pill').forEach(p=>p.classList.remove('on'));el.classList.add('on');applyFilter();}
+function applyFilter(){const t=document.getElementById('q').value.toLowerCase();
+  document.querySelectorAll('.chg').forEach(c=>{const ok=(cat==='all'||c.dataset.c===cat)&&(!t||c.textContent.toLowerCase().includes(t));c.style.display=ok?'':'none';});}
+</script>
+</body>
+</html>
