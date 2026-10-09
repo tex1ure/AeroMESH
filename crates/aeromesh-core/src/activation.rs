@@ -55,7 +55,18 @@ impl ActivationDtype {
 }
 
 /// Binary frame header for high-speed P2P activation vector streaming with multi-stage session & KV tracking.
+///
 /// Fixed size: 44 bytes (explicit BigEndian serialization, independent of compiler padding).
+///
+/// # Sampling configuration
+///
+/// Per-request `temperature` / `top_p` are **not** carried on the wire: the
+/// 44-byte header is fully allocated (offsets 40..44 hold `payload_bytes`, which
+/// is required to frame the payload). In distributed mode the terminal stage
+/// samples with the parameters baked in when it loaded the model; in the
+/// single-node path (`start --role all` / no peers) the coordinator applies the
+/// request's values directly. Extending the frame with a trailer is tracked as
+/// future work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActivationHeader {
     pub magic: [u8; 4],          // b"AERO"

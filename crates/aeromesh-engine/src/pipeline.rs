@@ -15,7 +15,9 @@ use aeromesh_core::{
     TokenResponseFrame, FLAG_CLEAR_KV, FLAG_IS_PROMPT,
 };
 
-use crate::slice_loader::{ChatTemplateFormat, GgufSliceLoader, LayerSliceConfig, LlamaPipelineInstance};
+use crate::slice_loader::{
+    ChatTemplateFormat, GgufSliceLoader, LayerSliceConfig, LlamaPipelineInstance, SamplingParams,
+};
 
 pub const STOP_TOKENS: &[&str] = &[
     "<|im_end|>",
@@ -102,7 +104,6 @@ impl PipelineWorkerService {
                                     let start_time = Instant::now();
                                     let seq_len = frame.header.sequence_length.max(1);
                                     let start_pos = frame.header.token_position;
-                                    let seq_id = frame.header.sequence_id;
                                     let mut inst = instance_clone.lock().await;
 
                                     if frame.header.has_flag(FLAG_CLEAR_KV) {
@@ -137,7 +138,11 @@ impl PipelineWorkerService {
                                     }
 
                                     let eval_time_ms = start_time.elapsed().as_secs_f32() * 1000.0;
-                                    let next_token_id = inst.sample_next_token(0.7, 0.9, seq_id as u32).unwrap_or(0);
+                                    // `None` keeps the sampler configured at model load;
+                                    // the SHM path carries no per-request sampling config.
+                                    let next_token_id = inst
+                                        .sample_next_token(None, None, None, None)
+                                        .unwrap_or(0);
                                     let piece_bytes = inst.token_to_piece(next_token_id).unwrap_or_default();
                                     let token_text = String::from_utf8_lossy(&piece_bytes).to_string();
                                     let is_eos = inst.is_eog(next_token_id)
@@ -580,7 +585,13 @@ async fn handle_coordinator_connection(
             let eval_duration = start_time.elapsed();
             let eval_time_ms = eval_duration.as_secs_f32() * 1000.0;
 
-            let next_token_id = inst.sample_next_token(0.7, 0.9, seq_id as u32)?;
+            // The terminal stage owns sampling for the whole pipeline.
+            //
+            // NOTE: per-request temperature/top_p are not carried on the wire
+            // (see `ActivationHeader` docs), so a distributed worker samples
+            // with the defaults chosen when it loaded the model. This is
+            // deterministic and matches the documented behaviour.
+            let next_token_id = inst.sample_next_token(None, None, None, None)?;
             let piece_bytes = inst.token_to_piece(next_token_id).unwrap_or_default();
             let token_text = String::from_utf8_lossy(&piece_bytes).to_string();
             let is_eos = inst.is_eog(next_token_id)
@@ -643,6 +654,10 @@ async fn handle_coordinator_connection(
         pub total_layers: usize,
         pub transport: Option<PipelineTransport>,
         pub target_dtype: ActivationDtype,
+        /// Sampling configuration applied to the next generation. Set from the
+        /// HTTP request via [`Self::set_sampling`]; `None` keeps the defaults
+        /// chosen at model load.
+        pub sampling: Option<SamplingParams>,
     }
 
     impl PipelineCoordinatorClient {
@@ -698,7 +713,37 @@ async fn handle_coordinator_connection(
                 total_layers,
                 transport: None,
                 target_dtype: activation_dtype_from_env(),
+                sampling: None,
             })
+        }
+
+        /// Records the sampling configuration for the next generation.
+        ///
+        /// Values are clamped to llama.cpp's accepted ranges; unset fields keep
+        /// the model-load defaults for the active model.
+        pub fn set_sampling(&mut self, requested: SamplingParams) {
+            self.sampling = Some(requested);
+        }
+
+        /// Resolves the effective sampling configuration: the request's values
+        /// overlaid on the model-load defaults for this instance.
+        pub fn effective_sampling(&self) -> SamplingParams {
+            let base = self
+                .instance
+                .as_ref()
+                .map(|i| i.sampling_params())
+                .unwrap_or(SamplingParams::DEFAULT);
+            match self.sampling {
+                Some(req) => SamplingParams::resolve(
+                    base,
+                    Some(req.temperature),
+                    Some(req.top_p),
+                    Some(req.top_k),
+                    Some(req.min_p),
+                    Some(req.repeat_penalty),
+                ),
+                None => base,
+            }
         }
 
         pub fn get_instance_mut(&mut self) -> Result<&mut LlamaPipelineInstance> {
@@ -959,6 +1004,10 @@ async fn handle_coordinator_connection(
             None => "Local CPU/GPU Direct Execution",
         };
 
+        // Effective sampling configuration for this generation: the request's
+        // values overlaid on the model-load defaults.
+        let sampling = self.effective_sampling();
+
         println!("\n========================================================");
         println!("   AEROMESH DISTRIBUTED PIPELINE GENERATION             ");
         println!("========================================================");
@@ -970,6 +1019,8 @@ async fn handle_coordinator_connection(
         println!("  Hidden Dimension:   {}", self.hidden_dim);
         println!("  Activation Codec:   {:?} ({:.2} KB per decode step)", self.target_dtype,
             (self.hidden_dim * self.target_dtype.bytes_per_element()) as f64 / 1024.0);
+        println!("  Sampling:           temp={:.3} top_p={:.3} top_k={} min_p={:.3} repeat={:.3}",
+            sampling.temperature, sampling.top_p, sampling.top_k, sampling.min_p, sampling.repeat_penalty);
         println!("  Transport:          {}", transport_tag);
         println!("  Session ID:         {}", session_id);
         println!("  Prompt:             {:?}", prompt);
@@ -1118,7 +1169,12 @@ async fn handle_coordinator_connection(
             }
 
             let inst = self.get_instance_mut()?;
-            first_token_id = inst.sample_next_token(0.7, 0.9, 0)?;
+            first_token_id = inst.sample_next_token(
+                Some(sampling.temperature),
+                Some(sampling.top_p),
+                Some(sampling.top_k),
+                Some(sampling.min_p),
+            )?;
             is_first_eos = inst.is_eog(first_token_id);
             let piece_bytes = inst.token_to_piece(first_token_id).unwrap_or_default();
             first_token_text = String::from_utf8_lossy(&piece_bytes).to_string();
@@ -1209,7 +1265,12 @@ async fn handle_coordinator_connection(
                     }
 
                     let inst = self.get_instance_mut()?;
-                    next_token_id = inst.sample_next_token(0.7, 0.9, seq_id as u32)?;
+                    next_token_id = inst.sample_next_token(
+                        Some(sampling.temperature),
+                        Some(sampling.top_p),
+                        Some(sampling.top_k),
+                        Some(sampling.min_p),
+                    )?;
                     let token_piece_bytes = inst.token_to_piece(next_token_id).unwrap_or_default();
                     token_text = String::from_utf8_lossy(&token_piece_bytes).to_string();
                     is_eos = inst.is_eog(next_token_id)
@@ -1430,6 +1491,7 @@ mod tests_pipeline_safety {
             total_layers: 1,
             transport: None,
             target_dtype: ActivationDtype::RawF32,
+            sampling: None,
         };
 
         assert!(!client.is_ready());
@@ -1451,6 +1513,7 @@ mod tests_pipeline_safety {
             total_layers: 1,
             transport: None,
             target_dtype: ActivationDtype::RawF32,
+            sampling: None,
         };
 
         let res = client.generate_pipeline("Hello", 10, 0.7, 0.9, 1234, None).await;
@@ -1471,6 +1534,7 @@ mod tests_pipeline_safety {
             total_layers: 1,
             transport: None,
             target_dtype: ActivationDtype::RawF32,
+            sampling: None,
         };
 
         let res = client.switch_model("completely_non_existent_model_file.gguf");
@@ -1492,6 +1556,7 @@ mod tests_pipeline_safety {
             total_layers: 1,
             transport: None,
             target_dtype: ActivationDtype::RawF32,
+            sampling: None,
         };
         assert_eq!(client_with_instance.n_ctx(), 512);
 
@@ -1505,6 +1570,7 @@ mod tests_pipeline_safety {
             total_layers: 1,
             transport: None,
             target_dtype: ActivationDtype::RawF32,
+            sampling: None,
         };
         assert_eq!(client_without_instance.n_ctx(), 4096);
     }

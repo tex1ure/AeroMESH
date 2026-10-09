@@ -26,6 +26,9 @@ bin/*.lib
 bin/*.pdb
 bin/*.so
 bin/*.dylib
+# MinGW import libraries generated from the DLLs by setup.ps1 (dlltool).
+bin/*.dll.a
+bin/*-import.def
 *.exe
 *.dll
 *.lib
