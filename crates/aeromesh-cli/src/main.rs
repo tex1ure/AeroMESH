@@ -8,9 +8,30 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use aeromesh_core::tailscale::TailscaleInspector;
 use aeromesh_engine::{
-    inspect_gguf_file, resolve_model_path, EngineSupervisor, GgufSliceLoader,
-    LayerSliceConfig, PipelineCoordinatorClient, PipelineHttpServer, PipelineWorkerService,
+    inspect_gguf_file, resolve_model_path, EngineSupervisor, GgufSliceLoader, LayerSliceConfig,
+    PipelineCoordinatorClient, PipelineHttpServer, PipelineWorkerService,
 };
+
+/// GPU layers to request when the caller does not specify `--ngl`.
+///
+/// A large finite number means "offload everything" without relying on the
+/// `-1` sentinel, which was previously passed through `ngl.max(0)` and silently
+/// became **zero** GPU layers for `coordinator --serve` — the coordinator then
+/// ran entirely on CPU while its workers used the GPU.
+const DEFAULT_GPU_OFFLOAD_LAYERS: i32 = 999;
+
+/// Normalises a user-supplied `--ngl`.
+///
+/// `-1` is llama.cpp's "all layers" sentinel and maps to
+/// [`DEFAULT_GPU_OFFLOAD_LAYERS`]; negative values other than `-1` are treated
+/// as `0` (CPU only), matching llama.cpp's own clamping.
+fn resolve_ngl(requested: i32) -> i32 {
+    match requested {
+        n if n < 0 => DEFAULT_GPU_OFFLOAD_LAYERS,
+        0 => 0,
+        n => n,
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "aeromesh")]
@@ -87,8 +108,9 @@ enum Commands {
         #[arg(long)]
         layers: Option<String>,
 
-        /// Enable local tensor disk caching (for RPC backend mode)
-        #[arg(long, default_value_t = true)]
+        /// Enable local tensor disk caching (RPC backend mode only).
+        /// Defaults to true; pass `--cache false` to disable.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         cache: bool,
     },
 
@@ -189,6 +211,23 @@ enum Commands {
     },
 }
 
+impl Commands {
+    /// True when the subcommand needs `.env` secrets loaded (i.e. it will talk to
+    /// a coordinator or worker over an authenticated channel).
+    ///
+    /// Kept explicit so read-only commands such as `--help`, `status`,
+    /// `model-check` and `slice-info` do not depend on a secrets file existing.
+    fn needs_secrets(&self) -> bool {
+        matches!(
+            self,
+            Commands::Worker { .. }
+                | Commands::Coordinator { .. }
+                | Commands::Serve { .. }
+                | Commands::Start { .. }
+        )
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::registry()
@@ -196,10 +235,20 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?))
         .init();
 
-    aeromesh_engine::load_dotenv_if_present();
-    aeromesh_engine::ensure_llama_initialized();
-
+    // Parse first, then initialise only what the chosen subcommand needs.
+    //
+    // Previously `.env` loading and native-backend initialisation both ran before
+    // `Cli::parse()`, so `--help`, `status` and `probe` paid for CUDA/DLL setup
+    // and failed outright on a machine without the native runtime. The FFI layer
+    // now resolves lazily, and `LlamaPipelineInstance::open` triggers backend
+    // initialisation when a model is actually loaded.
     let cli = Cli::parse();
+
+    // Secrets are only relevant to commands that talk to the cluster.
+    if cli.command.needs_secrets() {
+        aeromesh_engine::load_dotenv_if_present();
+    }
+
     let current_dir = std::env::current_dir()?;
 
     match cli.command {
@@ -379,7 +428,7 @@ async fn main() -> Result<()> {
                     LayerSliceConfig::new(mid, total_layers.saturating_sub(1), total_layers)?
                 };
 
-                let service = PipelineWorkerService::new(&resolved_path, slice_config, 99)?;
+                let service = PipelineWorkerService::new(&resolved_path, slice_config, DEFAULT_GPU_OFFLOAD_LAYERS)?;
                 service.run_server(&final_host, final_port).await?;
             } else {
                 // Auto-prime local disk cache from SSD if model is present on disk
@@ -445,7 +494,7 @@ async fn main() -> Result<()> {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "aeromesh-model".to_string());
 
-            let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, custom_slice, 99)?;
+            let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, custom_slice, DEFAULT_GPU_OFFLOAD_LAYERS)?;
             let server = PipelineHttpServer::new(client, model_name);
             server.run(&host, port).await?;
         }
@@ -473,7 +522,7 @@ async fn main() -> Result<()> {
                     };
 
                     info!("🚀 Starting AeroMesh Zero-Weight Worker Node on port {}...", bind_port);
-                    let ngl = 999;
+                    let ngl = DEFAULT_GPU_OFFLOAD_LAYERS;
                     let service = PipelineWorkerService::new(&model_path, slice_config, ngl)?;
                     service.run_server("0.0.0.0", bind_port).await?;
                 }
@@ -501,7 +550,7 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|| "aeromesh-model".to_string());
 
                     info!("🚀 Starting AeroMesh Zero-Weight Coordinator & API Server on port {}...", api_port);
-                    let ngl = 999;
+                    let ngl = DEFAULT_GPU_OFFLOAD_LAYERS;
                     let client = PipelineCoordinatorClient::new(&model_path, worker_addrs, slice_config, ngl)?;
                     let server = PipelineHttpServer::new(client, model_name);
                     server.run("0.0.0.0", api_port).await?;
@@ -517,7 +566,7 @@ async fn main() -> Result<()> {
                         .unwrap_or(0);
 
                     let (coord_ngl, worker_ngl) = if file_size_mb <= 4500 {
-                        (999, 999)
+                        (DEFAULT_GPU_OFFLOAD_LAYERS, DEFAULT_GPU_OFFLOAD_LAYERS)
                     } else {
                         (coord_slice.layer_count() as i32, worker_slice.layer_count() as i32)
                     };
@@ -670,7 +719,7 @@ async fn main() -> Result<()> {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "aeromesh-model".to_string());
 
-                let client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs, custom_slice, ngl.max(0) as i32)?;
+                let client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs, custom_slice, resolve_ngl(ngl))?;
                 let server = PipelineHttpServer::new(client, model_name);
                 server.run("0.0.0.0", serve_port).await?;
                 return Ok(());
@@ -681,7 +730,7 @@ async fn main() -> Result<()> {
                 // Native Zero-Weight P2P Activation Streaming Mode
                 info!("Step 3/3: Dispatching via Native Zero-Weight Pipeline Engine...");
                 let worker_sock_addrs: Vec<SocketAddr> = approved_peers.iter().map(|(_, _, addr)| *addr).collect();
-                let mut client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs, custom_slice, ngl.max(0) as i32)?;
+                let mut client = PipelineCoordinatorClient::new(&model_path, worker_sock_addrs, custom_slice, resolve_ngl(ngl))?;
                 let (_output_text, perf_metrics) = client.generate_pipeline(&prompt, max_tokens, 0.7, 0.9, 1, None).await?;
 
                 println!("\n--- CLUSTER PERFORMANCE METRICS ---");
@@ -746,11 +795,39 @@ fn parse_layer_range(s: &str, total_layers: usize) -> Result<LayerSliceConfig> {
         anyhow::bail!("Invalid layer range format: '{}'. Expected e.g. '16..32' or '16..=31'", s);
     };
 
-    // Auto-map if user supplied global model coordinates (e.g. 24..48) for an already sliced stage2 file (0..24)
+    // A range that starts beyond this file's layer count cannot be honoured.
+    // Silently returning "all layers" here used to hide a very common mistake:
+    // passing global coordinates (e.g. "25..48") while pointing at an
+    // already-sliced stage file, which quietly loaded the wrong partition.
     if start >= total_layers {
-        return LayerSliceConfig::new(0, total_layers.saturating_sub(1), total_layers);
+        anyhow::bail!(
+            "Layer range '{}' starts at layer {}, but the loaded model has only {} layer(s). \
+             If you are pointing at an already-sliced stage file, use local coordinates \
+             (e.g. \"0..{}\") — the slicer re-indexes blocks per stage, so global coordinates \
+             do not apply. Pass --layers auto to take the default split.",
+            s,
+            start,
+            total_layers,
+            total_layers.saturating_sub(1)
+        );
+    }
+    if end < start {
+        anyhow::bail!(
+            "Layer range '{}' is inverted: start {} is greater than end {}",
+            s,
+            start,
+            end
+        );
     }
 
     let clamped_end = end.min(total_layers.saturating_sub(1));
+    if clamped_end != end {
+        tracing::warn!(
+            requested_end = end,
+            clamped_to = clamped_end,
+            total_layers,
+            "Layer range end exceeds this file's layer count and was clamped"
+        );
+    }
     LayerSliceConfig::new(start, clamped_end, total_layers)
 }

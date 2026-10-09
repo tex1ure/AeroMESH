@@ -763,21 +763,19 @@ pub fn safe_ggml_backend_tensor_get(
 /// Loads the dynamic ggml backend plugins (ggml-cuda.dll, ggml-cpu.dll, ...).
 pub fn load_ggml_backends(search_dirs: &[PathBuf]) {
     let syms = ggml_symbols();
-    unsafe {
-        if let Some(load_from_path) = syms.load_all_from_path {
-            for dir in search_dirs {
-                let clean = dir.to_string_lossy().trim_start_matches(r"\\?\").to_string();
-                if let Ok(c_dir) = std::ffi::CString::new(clean) {
-                    load_from_path(c_dir.as_ptr());
-                }
-            }
-            if let Ok(c_bin) = std::ffi::CString::new("bin") {
-                load_from_path(c_bin.as_ptr());
+    if let Some(load_from_path) = syms.load_all_from_path {
+        for dir in search_dirs {
+            let clean = dir.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+            if let Ok(c_dir) = std::ffi::CString::new(clean) {
+                load_from_path(c_dir.as_ptr());
             }
         }
-        if let Some(load_all) = syms.load_all {
-            load_all();
+        if let Ok(c_bin) = std::ffi::CString::new("bin") {
+            load_from_path(c_bin.as_ptr());
         }
+    }
+    if let Some(load_all) = syms.load_all {
+        load_all();
     }
 }
 
