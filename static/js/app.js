@@ -17,9 +17,6 @@
   function isAnyChatGenerating() {
     return activeStreams.size > 0;
   }
-  function isCurrentChatGenerating() {
-    return activeStreams.has(currentChatId);
-  }
 
   let activeModel = 'Loading...';
   let availableModels = [];
@@ -72,6 +69,25 @@
   };
 
   // --- INITIALIZATION ---
+  const CLUSTER_POLL_MS = 2500;
+  let clusterPollTimer = null;
+
+  function startClusterPolling() {
+    if (clusterPollTimer !== null) return;
+    clusterPollTimer = setInterval(() => {
+      // No point polling (or re-rendering) a page nobody is looking at.
+      if (document.hidden) return;
+      fetchClusterStatus();
+    }, CLUSTER_POLL_MS);
+  }
+
+  function stopClusterPolling() {
+    if (clusterPollTimer !== null) {
+      clearInterval(clusterPollTimer);
+      clusterPollTimer = null;
+    }
+  }
+
   async function init() {
     loadConversations();
     setupEventListeners();
@@ -79,7 +95,17 @@
 
     await fetchModels();
     await fetchClusterStatus();
-    setInterval(fetchClusterStatus, 2500);
+    startClusterPolling();
+
+    // Pause polling in a background tab and refresh immediately on return.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        stopClusterPolling();
+      } else {
+        fetchClusterStatus();
+        startClusterPolling();
+      }
+    });
 
     if (conversations.length === 0) {
       createNewChat();
@@ -87,27 +113,166 @@
       switchChat(conversations[0].id);
     }
 
-    lucide.createIcons();
+    if (window.lucide) lucide.createIcons();
+  }
+
+  // --- SECURITY HELPERS -----------------------------------------------------
+  // Model output is untrusted input: it can contain HTML, and a malicious or
+  // prompt-injected completion can attempt to exfiltrate the conversation or
+  // run script in this origin. Everything rendered from model or backend data
+  // therefore goes through one of these two functions.
+
+  /** Escapes a value for interpolation into an HTML template literal. */
+  function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  /** Renders Markdown to sanitized HTML. Returns a string safe for innerHTML. */
+  function renderMarkdown(text) {
+    const source = text || '';
+    if (!window.marked) {
+      // No parser available: escape rather than inject the raw string.
+      return escapeHtml(source).replace(/\n/g, '<br>');
+    }
+    const rawHtml = marked.parse(source);
+    if (window.DOMPurify) {
+      return DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true } });
+    }
+    // Fail closed: if the sanitizer did not load, do not trust the HTML.
+    console.error('DOMPurify is unavailable; rendering escaped plain text instead.');
+    return escapeHtml(source).replace(/\n/g, '<br>');
+  }
+
+  /** Sets sanitized Markdown into an element. */
+  function setMarkdown(el, text) {
+    el.innerHTML = renderMarkdown(text);
+  }
+
+  /**
+   * Derives a stable, collision-resistant session id for a chat.
+   *
+   * The engine resets its KV cache whenever the session id changes, so two
+   * chats sharing an id would share a cache. A chat's creation timestamp is
+   * unique in practice and survives a reload (it is persisted with the chat).
+   */
+  function sessionIdForChat(chat) {
+    const created = chat && chat.createdAt ? new Date(chat.createdAt).getTime() : NaN;
+    if (Number.isFinite(created) && created > 0) return created;
+    // Fallback for chats persisted before createdAt existed.
+    return Date.now();
+  }
+
+  // --- WIRE STATISTICS ------------------------------------------------------
+  // The dashboard used to display hard-coded numbers (a fixed 5,166 bytes per
+  // token, a prompt-token guess of `characters / 3.2`, and literal fallbacks
+  // such as "18.4 tok/s"). Those were independent of the configured codec, so
+  // the HUD could advertise INT8 figures during a BF16 run - roughly 2x the
+  // real traffic. Everything below is derived from what the coordinator
+  // actually reports.
+
+  /**
+   * Parses the coordinator's `per_token_kb` string (e.g. "5.04 KB/tok") into a
+   * number of kilobytes, or null when it is absent or unparseable.
+   */
+  function parsePerTokenKB() {
+    const raw = lastClusterPayload && lastClusterPayload.per_token_kb;
+    if (!raw) return null;
+    const match = String(raw).match(/([\d.]+)\s*KB/i);
+    if (!match) return null;
+    const value = parseFloat(match[1]);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  /** True when the active topology sends activations over a network link. */
+  function isDistributedTopology() {
+    if (!lastClusterPayload) return false;
+    const workers =
+      lastClusterPayload.workers || lastClusterPayload.worker_nodes || [];
+    if (workers.length > 0) return true;
+    // A shared-memory transport is explicitly intra-host.
+    const transport = String(lastClusterPayload.transport || '');
+    if (/SHM|Shared Memory/i.test(transport)) return false;
+    return Boolean(lastClusterPayload.is_direct_wireguard);
+  }
+
+  /**
+   * Builds wire-transfer statistics for `tokenCount` generated tokens.
+   *
+   * Returns `null` values rather than invented ones when the coordinator has
+   * not reported a per-token size, so the UI shows "unknown" instead of a
+   * plausible-looking number that is not real.
+   */
+  function computeWireStats(tokenCount) {
+    const distributed = isDistributedTopology();
+    if (!distributed) {
+      return {
+        isDistributed: false,
+        perTokenKB: '0 KB (shared memory)',
+        wireMB: '0.00',
+        transport: (lastClusterPayload && lastClusterPayload.transport) || 'Intra-Host SHM'
+      };
+    }
+
+    const perTokenKB = parsePerTokenKB();
+    if (perTokenKB === null) {
+      return {
+        isDistributed: true,
+        perTokenKB: 'not reported',
+        wireMB: null,
+        transport: (lastClusterPayload && lastClusterPayload.transport) || 'network'
+      };
+    }
+
+    const wireBytes = tokenCount * perTokenKB * 1024;
+    return {
+      isDistributed: true,
+      perTokenKB: `${perTokenKB.toFixed(2)} KB/tok`,
+      wireMB: (wireBytes / (1024 * 1024)).toFixed(2),
+      transport: (lastClusterPayload && lastClusterPayload.transport) || 'network'
+    };
   }
 
   // --- CONFIGURE MARKED & HIGHLIGHT.JS ---
   function configureMarked() {
-    if (window.marked) {
-      marked.setOptions({
-        breaks: true,
-        gfm: true,
-        highlight: function (code, lang) {
-          if (lang && hljs.getLanguage(lang)) {
-            try {
-              return hljs.highlight(code, { language: lang }).value;
-            } catch (err) {
-              console.error(err);
-            }
-          }
-          return hljs.highlightAuto(code).value;
-        }
-      });
+    if (!window.marked) {
+      console.error('marked failed to load; Markdown will render as plain text.');
+      return;
     }
+
+    // `highlight` moved out of marked core in v5, so the option below did
+    // nothing and code blocks rendered unhighlighted. marked-highlight
+    // re-attaches it.
+    const options = { breaks: true, gfm: true };
+
+    if (window.markedHighlight && window.hljs) {
+      const { markedHighlight } = window.markedHighlight;
+      marked.use(
+        markedHighlight({
+          langPrefix: 'hljs language-',
+          highlight(code, lang) {
+            const language = lang && hljs.getLanguage(lang) ? lang : null;
+            try {
+              return language
+                ? hljs.highlight(code, { language }).value
+                : hljs.highlightAuto(code).value;
+            } catch (err) {
+              console.error('highlight failed', err);
+              return code;
+            }
+          },
+        })
+      );
+    } else {
+      console.error('marked-highlight or highlight.js missing; code will not be highlighted.');
+    }
+
+    marked.setOptions(options);
   }
 
   // --- DYNAMIC BACKEND FETCHING (ZERO HARDCODING) ---
@@ -144,7 +309,8 @@
     availableModels.forEach((m) => {
       const item = document.createElement('div');
       item.className = `model-dropdown-item ${m.id === activeModel ? 'active' : ''}`;
-      item.innerHTML = `<span>${m.id}</span> ${m.id === activeModel ? '<i data-lucide="check" style="width: 13px; height: 13px;"></i>' : ''}`;
+      // `m.id` comes from a file name on disk, so it is untrusted input.
+      item.innerHTML = `<span>${escapeHtml(m.id)}</span> ${m.id === activeModel ? '<i data-lucide="check" style="width: 13px; height: 13px;"></i>' : ''}`;
       item.onclick = async () => {
         if (activeModel === m.id) {
           elements.modelDropdownMenu.classList.remove('active');
@@ -176,41 +342,58 @@
       elements.modelDropdownMenu.appendChild(item);
     });
 
-    lucide.createIcons();
+    if (window.lucide) lucide.createIcons();
   }
 
   // --- UNIFIED CLUSTER TELEMETRY STATE (ONE SOURCE OF TRUTH) ---
-  // Exactly three states: 'offline' | 'online_idle' | 'online_generating'
+  // Four states: 'offline' | 'online_idle' | 'online_generating' | 'worker_unreachable'
+  //
+  // The engine distinguishes "the coordinator is not answering" from "the
+  // coordinator is up but its worker peers are gone" (it reports
+  // `cluster_status: "WORKER_DISCONNECTED"`). Collapsing both into `offline`
+  // previously meant a running coordinator with dead workers displayed the
+  // "start the coordinator" recovery text.
 
   async function fetchClusterStatus() {
     try {
       const resp = await fetch('/api/cluster/status');
       if (resp.ok) {
         const data = await resp.json();
-        let mapped = 'offline';
-        if (data.state === 'offline' || data.status === 'offline' || data.connected === false) {
-          mapped = 'offline';
-        } else if (data.state === 'online_generating' || (isAnyChatGenerating() && data.connected !== false)) {
-          mapped = 'online_generating';
-        } else if (
-          data.state === 'online_idle' ||
-          data.status === 'ok' ||
-          data.connected === true ||
-          data.cluster_status === 'ONLINE'
-        ) {
-          mapped = isAnyChatGenerating() ? 'online_generating' : 'online_idle';
-        }
-        setClusterState(mapped, data);
+        setClusterState(mapClusterState(data), data);
         return;
       }
     } catch (e) {
-      // Network fetch error
+      // Network fetch error: treat as coordinator offline.
     }
     setClusterState('offline', { state: 'offline', status: 'offline' });
   }
 
+  /** Maps a /api/cluster/status payload onto one of the four UI states. */
+  function mapClusterState(data) {
+    data = data || {};
+
+    const coordinatorDown =
+      data.state === 'offline' ||
+      data.status === 'offline' ||
+      data.connected === false;
+
+    if (coordinatorDown) return 'offline';
+
+    const workerDown =
+      data.cluster_status === 'WORKER_DISCONNECTED' ||
+      data.state === 'worker_unreachable';
+
+    if (workerDown) return 'worker_unreachable';
+
+    if (isAnyChatGenerating()) return 'online_generating';
+    if (data.state === 'online_generating') return 'online_generating';
+    return 'online_idle';
+  }
+
   function setClusterState(state, payload = null) {
-    if (isAnyChatGenerating() && state !== 'offline') {
+    // A locally-running generation always wins over a polled idle state, but
+    // must not mask a genuinely unreachable worker.
+    if (isAnyChatGenerating() && (state === 'online_idle' || state === 'online_generating')) {
       state = 'online_generating';
     }
     clusterState = state;
@@ -218,6 +401,23 @@
       lastClusterPayload = payload;
     }
     renderClusterUI(clusterState, lastClusterPayload);
+  }
+
+  /**
+   * True when the telemetry modal is on screen.
+   *
+   * Its node list used to be rebuilt on every 2.5s poll even while hidden, and
+   * `lucide.createIcons()` rescans the whole document, so an idle dashboard
+   * paid for a full icon pass four times a second.
+   */
+  function isTelemetryModalOpen() {
+    return Boolean(elements.telemetryModal && elements.telemetryModal.classList.contains('active'));
+  }
+
+  /** Sets the modal node list, but only while the modal is actually visible. */
+  function setModalNodes(html) {
+    if (!isTelemetryModalOpen()) return;
+    elements.modalNodesContainer.innerHTML = html;
   }
 
   function renderClusterUI(state, data) {
@@ -228,6 +428,44 @@
     } : {});
     const workers = data.worker_nodes || data.workers || [];
     const totalLayers = data.total_layers || (data.coordinator && data.coordinator.total_layers ? data.coordinator.total_layers : 'Auto');
+
+    // The coordinator is reachable but its worker peers are not. This is a
+    // distinct condition from "offline": retrying the coordinator is useless,
+    // the worker needs starting.
+    if (state === 'worker_unreachable') {
+      elements.sidebarStatusDot.classList.add('offline');
+      elements.sidebarStatusDot.classList.remove('generating');
+      elements.clusterStatusLabel.textContent = 'Worker Disconnected';
+      elements.clusterStatusLabel.style.color = 'var(--accent-orange)';
+
+      elements.clusterStatsDynamic.innerHTML = `
+        <div class="cluster-stats-row">
+          <span>Status:</span>
+          <span style="color: var(--accent-orange); font-weight: 600;">⚠️ Coordinator up, no workers</span>
+        </div>
+        <div class="cluster-stats-row">
+          <span>Worker${workers.length > 1 ? 's' : ''}:</span>
+          <span class="stat-highlight" style="color: var(--accent-orange);">${workers.length > 0 ? escapeHtml(workers.join(', ')) : 'none registered'}</span>
+        </div>
+        <div class="cluster-stats-row">
+          <span>Fix:</span>
+          <span style="color: var(--accent-orange); font-family: monospace; font-size: 10.5px;">start a worker node</span>
+        </div>
+      `;
+
+      elements.topStatusDot.classList.add('offline');
+      elements.topStatusDot.classList.remove('generating');
+      elements.topStatusText.textContent = 'Worker Disconnected';
+      elements.topStatusText.parentElement.style.color = 'var(--accent-orange)';
+
+      elements.modalStatusDot.classList.add('offline');
+      elements.modalStatusDot.classList.remove('generating');
+      elements.modalClusterStatus.textContent =
+        'Coordinator is running but no worker peer is reachable. Run: aeromesh worker --port 50052';
+      elements.modalClusterStatus.style.color = 'var(--accent-orange)';
+      if (window.lucide) lucide.createIcons();
+      return;
+    }
 
     if (state === 'online_idle' || state === 'online_generating') {
       if (data.active_model && (elements.activeModelName.textContent === 'Coordinator Offline' || elements.activeModelName.textContent === 'Loading...')) {
@@ -265,15 +503,15 @@
         </div>
         <div class="cluster-stats-row">
           <span>Coordinator:</span>
-          <span class="stat-highlight">Layers ${localStage.layer_start ?? 0}..${localStage.layer_end ?? 23}</span>
+          <span class="stat-highlight">Layers ${escapeHtml(localStage.layer_start ?? 0)}..${escapeHtml(localStage.layer_end ?? 0)}</span>
         </div>
         <div class="cluster-stats-row">
           <span>Worker${workers.length > 1 ? 's' : ''}:</span>
-          <span class="stat-highlight" style="${workerDisconnected ? 'color: var(--accent-orange);' : ''}">${workers.length > 0 ? workers.join(', ') : (isDirectWg ? '100.66.49.50:50052' : 'Direct Pipeline')}</span>
+          <span class="stat-highlight" style="${workerDisconnected ? 'color: var(--accent-orange);' : ''}">${workers.length > 0 ? escapeHtml(workers.join(', ')) : (isDirectWg ? 'Pipeline peer' : 'Direct Pipeline')}</span>
         </div>
         <div class="cluster-stats-row">
           <span>Wire Payload:</span>
-          <span style="color: var(--accent-orange); font-weight: 600;">${data.per_token_kb || (isDirectWg ? '5.16 KB/tok' : '0.0 MB Wire')}</span>
+          <span style="color: var(--accent-orange); font-weight: 600;">${escapeHtml(data.per_token_kb || 'unknown')}</span>
         </div>
       `;
 
@@ -306,11 +544,11 @@
       }
       elements.modalClusterStatus.style.color = 'var(--accent-mint)';
 
-      elements.modalNodesContainer.innerHTML = `
+      setModalNodes(`
         <div class="node-box">
           <div>
-            <div style="font-weight: 700; color: var(--text-main); font-size: 13.5px;">Coordinator (Laptop A • Local)</div>
-            <div style="font-size: 11.5px; color: var(--text-dim);">Layers ${localStage.layer_start ?? 0}..${localStage.layer_end ?? 23} • RTX 4060 GPU • 100.66.49.50</div>
+            <div style="font-weight: 700; color: var(--text-main); font-size: 13.5px;">Coordinator (this machine)</div>
+            <div style="font-size: 11.5px; color: var(--text-dim);">Layers ${escapeHtml(localStage.layer_start ?? 0)}..${escapeHtml(localStage.layer_end ?? 0)} • Stage 1</div>
           </div>
           <div class="stat-highlight" style="font-size: 12px;">Stage 1</div>
         </div>
@@ -318,11 +556,11 @@
         <div class="mesh-link-container">
           <div class="direct-wireguard-badge">
             <i data-lucide="shield-check" style="width: 14px; height: 14px;"></i>
-            <span>Tailscale Direct WireGuard</span>
-            <span class="badge-ping">RTT: ${data.rtt_ms || '1.14'} ms</span>
+            <span>${escapeHtml(data.transport || 'Local transport')}</span>
+            <span class="badge-ping">RTT: ${escapeHtml(data.rtt_ms ?? 'n/a')} ms</span>
           </div>
           <div class="mesh-wire-stats">
-            <span>P2P Activation Streaming • ${data.per_token_kb || '5.16 KB/tok'} • Zero Model Weights on Wire (0.0 MB)</span>
+            <span>P2P activation streaming • ${escapeHtml(data.per_token_kb || 'codec not reported')} • zero model weights on wire</span>
           </div>
         </div>
 
@@ -333,10 +571,10 @@
                   (w, idx) => `
           <div class="node-box">
             <div>
-              <div style="font-weight: 700; color: var(--text-main); font-size: 13.5px;">Worker Stage ${idx + 2} (${w})</div>
-              <div style="font-size: 11.5px; color: var(--text-dim);">Layers ${localStage.layer_end ? Number(localStage.layer_end) + 1 : 24}..${totalLayers - 1} • LM Head • Activation Sink</div>
+              <div style="font-weight: 700; color: var(--text-main); font-size: 13.5px;">Worker Stage ${idx + 2} (${escapeHtml(w)})</div>
+              <div style="font-size: 11.5px; color: var(--text-dim);">Layers ${escapeHtml(localStage.layer_end !== undefined ? Number(localStage.layer_end) + 1 : 0)}..${escapeHtml(totalLayers - 1)} • LM head • activation sink</div>
             </div>
-            <div class="stat-highlight direct-badge" style="font-size: 12px;">Direct WireGuard</div>
+            <div class="stat-highlight direct-badge" style="font-size: 12px;">${isDirectWg ? 'Direct WireGuard' : 'Connected'}</div>
           </div>
         `
                 )
@@ -344,15 +582,15 @@
             : `
           <div class="node-box">
             <div>
-              <div style="font-weight: 700; color: var(--text-main); font-size: 13.5px;">Worker Stage 2 (100.66.49.50:50052)</div>
-              <div style="font-size: 11.5px; color: var(--text-dim);">Layers 24..47 • LM Head • Connected</div>
+              <div style="font-weight: 700; color: var(--text-main); font-size: 13.5px;">No worker peers</div>
+              <div style="font-size: 11.5px; color: var(--text-dim);">Running standalone on this machine</div>
             </div>
-            <div class="stat-highlight direct-badge" style="font-size: 12px;">Direct WireGuard</div>
+            <div class="stat-highlight" style="font-size: 12px;">Local</div>
           </div>
         `
         }
-      `;
-      lucide.createIcons();
+      `);
+      if (window.lucide) lucide.createIcons();
     } else {
       // Offline state
       // 1. Sidebar indicator
@@ -385,7 +623,7 @@
       elements.modalClusterStatus.textContent = 'Coordinator offline (http://127.0.0.1:8080)';
       elements.modalClusterStatus.style.color = 'var(--accent-coral)';
 
-      elements.modalNodesContainer.innerHTML = `
+      setModalNodes(`
         <div style="padding: 14px; text-align: center; color: var(--text-muted); font-size: 13px; display: flex; flex-direction: column; gap: 8px;">
           <div style="color: var(--accent-coral); font-weight: 700;">AeroMesh Coordinator is not running</div>
           <div>Start the cluster coordinator from PowerShell:</div>
@@ -393,10 +631,10 @@
             cargo run --bin aeromesh -- serve --model models/test.gguf --layers 0..24 --peers worker-ip:50052 --port 8080
           </code>
         </div>
-      `;
+      `);
     }
 
-    lucide.createIcons();
+    if (window.lucide) lucide.createIcons();
   }
 
   // --- STORAGE & CONVERSATION MANAGEMENT ---
@@ -537,7 +775,7 @@
       elements.historyList.appendChild(item);
     });
 
-    lucide.createIcons();
+    if (window.lucide) lucide.createIcons();
   }
 
   function renderMessages() {
@@ -558,12 +796,13 @@
         // Re-attach live assistant card for currently running stream
         const liveCard = createLiveAssistantRow();
         activeStreamInfo.liveCard = liveCard;
+        const stats = computeWireStats(activeStreamInfo.tokenCount);
         liveCard.update(activeStreamInfo.accumulatedText, {
-          tokPerSec: activeStreamInfo.liveTps || '18.4',
+          tokPerSec: activeStreamInfo.liveTps,
           tokenCount: activeStreamInfo.tokenCount,
-          wireMB: activeStreamInfo.wireMB || '0.00',
-          perTokenKB: activeStreamInfo.perTokenKB || '0.0 KB (SHM)',
-          isDistributed: activeStreamInfo.isDistributed || false
+          wireMB: stats.wireMB,
+          perTokenKB: stats.perTokenKB,
+          isDistributed: stats.isDistributed
         });
       } else {
         appendMessageElement(msg.role, msg.content, msg.metrics, idx);
@@ -666,7 +905,7 @@
 
       const markdownBody = document.createElement('div');
       markdownBody.className = 'markdown-body';
-      markdownBody.innerHTML = window.marked ? marked.parse(answerText || (isStillThinking ? '' : rawContent)) : (answerText || rawContent);
+      markdownBody.innerHTML = renderMarkdown(answerText || (isStillThinking ? '' : rawContent));
 
       enhanceCodeBlocks(markdownBody);
       renderMath(markdownBody);
@@ -690,9 +929,9 @@
       telemetryTag.className = 'telemetry-tag';
       if (metrics) {
         if (metrics.isDistributed || (metrics.wireMB && parseFloat(metrics.wireMB) > 0)) {
-          telemetryTag.innerHTML = `<span>⚡ ${metrics.tokPerSec || '18.4'} tok/s</span> • <span>🌐 ${metrics.wireMB || '0.88'} MB Wire</span> • <span>📦 ${metrics.perTokenKB || '5.16 KB/tok'}</span> • <span class="badge-direct-wireguard"><i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> Direct WireGuard</span>`;
+          telemetryTag.innerHTML = `<span>⚡ ${metrics.tokPerSec || '—'} tok/s</span> • <span>🌐 ${metrics.wireMB || '0.00'} MB Wire</span> • <span>📦 ${metrics.perTokenKB || 'not reported'}</span> • <span class="badge-direct-wireguard"><i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> Direct WireGuard</span>`;
         } else {
-          telemetryTag.innerHTML = `<span>⚡ ${metrics.tokPerSec || '38.5'} tok/s</span> • <span>0.0 MB Wire (SHM)</span>`;
+          telemetryTag.innerHTML = `<span>⚡ ${metrics.tokPerSec || '—'} tok/s</span> • <span>0.0 MB Wire (SHM)</span>`;
         }
       } else {
         telemetryTag.innerHTML = `<span>⚡ Zero-Weight Mesh</span>`;
@@ -707,7 +946,7 @@
     }
 
     elements.messagesContainer.appendChild(row);
-    lucide.createIcons();
+    if (window.lucide) lucide.createIcons();
     return row;
   }
 
@@ -784,7 +1023,7 @@
     row.appendChild(card);
     elements.messagesContainer.appendChild(row);
 
-    lucide.createIcons();
+    if (window.lucide) lucide.createIcons();
 
     return {
       row,
@@ -812,20 +1051,20 @@
         }
 
         if (answerText) {
-          markdownBody.innerHTML = window.marked ? marked.parse(answerText) : answerText;
+          markdownBody.innerHTML = renderMarkdown(answerText);
         } else if (!thinkText) {
-          markdownBody.innerHTML = window.marked ? marked.parse(rawText) : rawText;
+          markdownBody.innerHTML = renderMarkdown(rawText);
         } else {
           markdownBody.innerHTML = '';
         }
 
         if (liveStats) {
           if (liveStats.isDistributed) {
-            telemetryTag.innerHTML = `<span>⚡ ${liveStats.tokPerSec} tok/s</span> • <span>🌐 ${liveStats.wireMB} MB Wire</span> • <span>📦 ${liveStats.perTokenKB}</span> • <span class="badge-direct-wireguard"><i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> Direct WireGuard</span>`;
+            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(liveStats.tokPerSec)} tok/s</span> • <span>🌐 ${escapeHtml(liveStats.wireMB || 'unknown')} MB wire</span> • <span>📦 ${escapeHtml(liveStats.perTokenKB)}</span>`;
           } else {
-            telemetryTag.innerHTML = `<span>⚡ ${liveStats.tokPerSec} tok/s</span> • <span>0.0 MB Wire (SHM)</span>`;
+            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(liveStats.tokPerSec)} tok/s</span> • <span>0 MB wire (shared memory)</span>`;
           }
-          lucide.createIcons();
+          if (window.lucide) lucide.createIcons();
         }
 
         copyBtn.onclick = () => copyToClipboard(answerText || rawText, copyBtn);
@@ -835,20 +1074,29 @@
         const { thinkText, answerText } = parseThinkingBlocks(rawText);
         const finalContent = answerText || (thinkText ? '' : rawText);
 
-        markdownBody.innerHTML = window.marked ? marked.parse(finalContent) : finalContent;
+        markdownBody.innerHTML = renderMarkdown(finalContent);
         enhanceCodeBlocks(markdownBody);
         renderMath(markdownBody);
 
-        if (metrics) {
-          if (metrics.isDistributed || (metrics.wireMB && parseFloat(metrics.wireMB) > 0)) {
-            telemetryTag.innerHTML = `<span>⚡ ${metrics.tokPerSec} tok/s</span> • <span>🌐 ${metrics.wireMB} MB Wire</span> • <span>📦 ${metrics.perTokenKB || '5.16 KB/tok'}</span> • <span class="badge-direct-wireguard"><i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> Direct WireGuard</span>`;
+        if (metrics && metrics.failed) {
+          // Terminal state for an aborted or failed generation: replace the
+          // live label so the card does not claim to still be streaming.
+          const label = metrics.reason === 'Stopped' ? 'Stopped by user' : 'Stream failed';
+          telemetryTag.innerHTML = `<span>⚠️ ${escapeHtml(label)}</span>`;
+        } else if (metrics) {
+          const perToken = escapeHtml(metrics.perTokenKB || 'not reported');
+          const wire = metrics.wireMB === null || metrics.wireMB === undefined
+            ? 'unknown'
+            : `${escapeHtml(metrics.wireMB)} MB wire`;
+          if (metrics.isDistributed) {
+            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(metrics.tokPerSec)} tok/s</span> • <span>🌐 ${wire}</span> • <span>📦 ${perToken}</span>`;
           } else {
-            telemetryTag.innerHTML = `<span>⚡ ${metrics.tokPerSec || '38.5'} tok/s</span> • <span>0.0 MB Wire (SHM)</span>`;
+            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(metrics.tokPerSec)} tok/s</span> • <span>0 MB wire (shared memory)</span>`;
           }
         }
 
         copyBtn.onclick = () => copyToClipboard(finalContent, copyBtn);
-        lucide.createIcons();
+        if (window.lucide) lucide.createIcons();
       }
     };
   }
@@ -898,11 +1146,11 @@
         navigator.clipboard.writeText(textToCopy).then(() => {
           copyBtn.classList.add('copied');
           copyBtn.innerHTML = '<i data-lucide="check" style="width: 11px; height: 11px;"></i><span>Copied!</span>';
-          lucide.createIcons();
+          if (window.lucide) lucide.createIcons();
           setTimeout(() => {
             copyBtn.classList.remove('copied');
             copyBtn.innerHTML = '<i data-lucide="copy" style="width: 11px; height: 11px;"></i><span>Copy</span>';
-            lucide.createIcons();
+            if (window.lucide) lucide.createIcons();
           }, 2000);
         });
       };
@@ -917,10 +1165,10 @@
     navigator.clipboard.writeText(text).then(() => {
       const originalHtml = btnElement.innerHTML;
       btnElement.innerHTML = '<i data-lucide="check" style="width: 11px; height: 11px; color: var(--accent-mint);"></i><span>Copied</span>';
-      lucide.createIcons();
+      if (window.lucide) lucide.createIcons();
       setTimeout(() => {
         btnElement.innerHTML = originalHtml;
-        lucide.createIcons();
+        if (window.lucide) lucide.createIcons();
       }, 2000);
     });
   }
@@ -1021,9 +1269,12 @@
       content: m.content
     }));
 
-    const numericSessionId = targetChatId
-      ? Math.abs(targetChatId.split('').reduce((acc, char) => ((acc << 5) - acc + char.charCodeAt(0)) | 0, 0)) || 1001
-      : 1001;
+    // Session identity. The engine clears its KV cache when the session id
+    // changes, so a collision would silently reuse another conversation's
+    // cache. A 32-bit string hash (the previous approach) collides well within
+    // a few thousand chats. Use the chat's creation timestamp instead: unique
+    // per chat, monotonic, and stable across reloads.
+    const numericSessionId = sessionIdForChat(chat);
 
     const payload = {
       model: activeModel !== 'Loading...' && activeModel !== 'Coordinator Offline' ? activeModel : undefined,
@@ -1033,6 +1284,11 @@
       session_id: numericSessionId,
       reasoning: enableReasoning
     };
+    if (clearKvOnSend) {
+      // Ask the engine to drop its KV cache before this turn. The controls
+      // previously toggled a flag that never reached the request.
+      payload.clear_kv = true;
+    }
 
     const abortController = new AbortController();
     const liveCard = createLiveAssistantRow();
@@ -1047,9 +1303,7 @@
       accumulatedText: '',
       liveCard: liveCard,
       messageText: messageText,
-      liveTps: '18.4',
-      wireMB: '0.00',
-      perTokenKB: '0.0 KB (SHM)',
+      liveTps: '—',
       isDistributed: false
     };
 
@@ -1131,26 +1385,23 @@
               }
             }
 
+            // Token accounting: the coordinator emits exactly one SSE delta per
+            // sampled token, so counting deltas is a faithful token count.
             streamInfo.tokenCount++;
             chat.messages[assistantMessageIndex].content = streamInfo.accumulatedText;
 
             const elapsedSec = (performance.now() - streamInfo.startTime) / 1000;
-            streamInfo.liveTps = elapsedSec > 0 ? (streamInfo.tokenCount / elapsedSec).toFixed(1) : '18.4';
-            const promptTokens = Math.max(14, Math.ceil(messageText.length / 3.2));
-            const isDistributed = (lastClusterPayload && lastClusterPayload.workers && lastClusterPayload.workers.length > 0) || (lastClusterPayload && lastClusterPayload.is_direct_wireguard);
-            streamInfo.isDistributed = isDistributed;
-            const wireBytes = isDistributed ? (promptTokens * 5166 + streamInfo.tokenCount * 5166) : 0;
-            streamInfo.wireMB = (wireBytes / (1024 * 1024)).toFixed(2);
-            streamInfo.perTokenKB = isDistributed ? '5.16 KB/tok' : '0.0 KB (SHM)';
+            streamInfo.liveTps = elapsedSec > 0 ? (streamInfo.tokenCount / elapsedSec).toFixed(1) : '—';
+            streamInfo.liveStats = computeWireStats(streamInfo.tokenCount);
 
             // Live update DOM only if user is actively viewing THIS chat
             if (streamInfo.liveCard && currentChatId === targetChatId) {
               streamInfo.liveCard.update(streamInfo.accumulatedText, {
                 tokPerSec: streamInfo.liveTps,
                 tokenCount: streamInfo.tokenCount,
-                wireMB: streamInfo.wireMB,
-                perTokenKB: streamInfo.perTokenKB,
-                isDistributed: streamInfo.isDistributed
+                wireMB: streamInfo.liveStats.wireMB,
+                perTokenKB: streamInfo.liveStats.perTokenKB,
+                isDistributed: streamInfo.liveStats.isDistributed
               });
             }
 
@@ -1168,21 +1419,16 @@
       }
 
       const durationSec = (performance.now() - streamInfo.startTime) / 1000;
-      const tokPerSec = durationSec > 0 ? (streamInfo.tokenCount / durationSec).toFixed(1) : '18.4';
-      const promptTokens = Math.max(14, Math.ceil(messageText.length / 3.2));
-      const isDistributed = (lastClusterPayload && lastClusterPayload.workers && lastClusterPayload.workers.length > 0) || (lastClusterPayload && lastClusterPayload.is_direct_wireguard);
-      const wireBytes = isDistributed ? (promptTokens * 5166 + streamInfo.tokenCount * 5166) : 0;
-      const wireMB = (wireBytes / (1024 * 1024)).toFixed(2);
-      const perTokenKB = isDistributed ? '5.16 KB/tok' : '0.0 KB (SHM)';
+      const finalStats = computeWireStats(streamInfo.tokenCount);
 
       const metrics = {
-        tokPerSec,
+        tokPerSec: durationSec > 0 ? (streamInfo.tokenCount / durationSec).toFixed(1) : '—',
         durationSec: durationSec.toFixed(2),
         tokens: streamInfo.tokenCount,
-        wireMB,
-        perTokenKB,
-        isDistributed,
-        transport: isDistributed ? 'Tailscale Direct WireGuard' : 'Intra-Host SHM'
+        wireMB: finalStats.wireMB,
+        perTokenKB: finalStats.perTokenKB,
+        isDistributed: finalStats.isDistributed,
+        transport: finalStats.transport
       };
 
       chat.messages[assistantMessageIndex].metrics = metrics;
@@ -1200,7 +1446,12 @@
       }
       chat.messages[assistantMessageIndex].content = streamInfo.accumulatedText;
       if (streamInfo.liveCard && currentChatId === targetChatId) {
-        streamInfo.liveCard.finalize(streamInfo.accumulatedText, null);
+        // Pass an explicit failure marker so the card does not keep showing the
+        // live "streaming activations" label forever after an error.
+        streamInfo.liveCard.finalize(streamInfo.accumulatedText, {
+          failed: true,
+          reason: err.name === 'AbortError' ? 'Stopped' : 'Failed'
+        });
       }
       saveConversations();
     } finally {
@@ -1230,7 +1481,7 @@
       elements.sendBtn.title = 'Send Prompt (Enter)';
       elements.sendBtn.innerHTML = '<i data-lucide="arrow-up" style="width: 18px; height: 18px; stroke-width: 2.5;"></i>';
     }
-    if (window.lucide) window.lucide.createIcons();
+    if (window.lucide) lucide.createIcons();
   }
 
   function adjustTextareaHeight() {
@@ -1339,7 +1590,7 @@
       await fetchClusterStatus();
       setTimeout(() => {
         elements.modalProbeBtn.innerHTML = '<i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i><span>Refresh Status</span>';
-        lucide.createIcons();
+        if (window.lucide) lucide.createIcons();
       }, 500);
     };
   }

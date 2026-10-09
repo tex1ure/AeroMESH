@@ -14,16 +14,30 @@
   if (!canvas) return;
 
   const ctx = canvas.getContext('2d');
-  let width = (canvas.width = window.innerWidth);
-  let height = (canvas.height = window.innerHeight);
+  let width = window.innerWidth;
+  let height = window.innerHeight;
+
+  // Match the backing store to the device pixel ratio. Without this the canvas
+  // renders at CSS pixel resolution and looks soft on HiDPI displays.
+  const MAX_DPR = 2; // cap, so a 4x display does not quadruple the fill cost
+  function syncCanvasSize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  syncCanvasSize();
 
   let mouse = { x: width * 0.5, y: height * 0.45, active: false };
   let isGenerating = false;
 
   // Window resize handler
   window.addEventListener('resize', () => {
-    width = canvas.width = window.innerWidth;
-    height = canvas.height = window.innerHeight;
+    syncCanvasSize();
     initNodes();
   });
 
@@ -62,8 +76,6 @@
 
       this.x = cx + Math.cos(angle) * dist;
       this.y = cy + Math.sin(angle) * dist;
-      this.baseX = this.x;
-      this.baseY = this.y;
 
       this.vx = (Math.random() - 0.5) * 0.38;
       this.vy = (Math.random() - 0.5) * 0.38;
@@ -165,7 +177,6 @@
   initNodes();
 
   // Animation Loop
-  let frame = 0;
   function animate() {
     ctx.clearRect(0, 0, width, height);
 
@@ -233,9 +244,40 @@
       nodes[i].draw();
     }
 
-    frame++;
-    requestAnimationFrame(animate);
+    rafId = requestAnimationFrame(animate);
   }
 
-  requestAnimationFrame(animate);
+  // Pause the animation loop while the tab is hidden: a background dashboard
+  // should not keep a CPU core busy drawing invisible frames.
+  let rafId = null;
+  let running = false;
+
+  function start() {
+    if (running) return;
+    running = true;
+    rafId = requestAnimationFrame(animate);
+  }
+
+  function stop() {
+    running = false;
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      stop();
+    } else {
+      start();
+    }
+  });
+
+  // Respect the reduced-motion preference by not animating at all.
+  const prefersReducedMotion =
+    window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!prefersReducedMotion) {
+    start();
+  }
 })();

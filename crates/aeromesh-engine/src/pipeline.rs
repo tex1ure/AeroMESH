@@ -456,7 +456,9 @@ async fn handle_coordinator_connection(
     }
 
     // Step 2: Process incoming activation frames with dynamic in-place dequantization & hot-swapping
-    let mut active_session_id = 0u64;
+    // `None` until the first frame arrives, so the first session always resets
+    // the KV cache even if it is numbered 0.
+    let mut active_session_id: Option<u64> = None;
     let mut dequant_buf = Vec::new();
     let mut out_act_buf = Vec::new();
 
@@ -490,15 +492,21 @@ async fn handle_coordinator_connection(
             }
         }
 
-        // Reset KV-Cache on session change or explicit flag
-        if frame.header.session_id != active_session_id || frame.header.has_flag(FLAG_CLEAR_KV) {
+        // Reset the KV cache when the session changes or the frame asks for it.
+        // `active_session_id` starts as `None` so the very first frame of the
+        // first session always triggers a reset — a session legitimately
+        // numbered 0 previously compared equal to the initial value and was
+        // skipped.
+        if active_session_id != Some(frame.header.session_id)
+            || frame.header.has_flag(FLAG_CLEAR_KV)
+        {
             info!(
                 session_id = frame.header.session_id,
-                prev_session = active_session_id,
+                prev_session = ?active_session_id,
                 "🧹 Resetting Worker KV-Cache for new session"
             );
             inst.clear_kv_cache();
-            active_session_id = frame.header.session_id;
+            active_session_id = Some(frame.header.session_id);
         }
 
         let seq_len = frame.header.sequence_length.max(1);
@@ -598,7 +606,7 @@ async fn handle_coordinator_connection(
                 || STOP_TOKENS.iter().any(|&tag| token_text.contains(tag));
 
             let resp = TokenResponseFrame {
-                session_id: active_session_id,
+                session_id: active_session_id.unwrap_or(frame.header.session_id),
                 sequence_id: seq_id,
                 token_id: next_token_id,
                 is_eos,
@@ -1102,6 +1110,9 @@ async fn handle_coordinator_connection(
         // Stream Quantized Prefill Activation Frame [S * hidden_dim]
         let mut transport_ok = false;
         if let Some(ref mut transport) = self.transport {
+            // The prefill frame always carries FLAG_CLEAR_KV: the coordinator
+            // has just cleared its own cache and the worker must do the same so
+            // both stages start from an empty KV history for this prompt.
             let prefill_frame = ActivationFrame::from_f32_matrix_quantized_stage(
                 session_id,
                 0,
