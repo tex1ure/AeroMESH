@@ -1,7 +1,10 @@
 # Rust build output & dependencies
 target/
-Cargo.lock
 **/*.rs.bk
+
+# NOTE: Cargo.lock IS tracked on purpose. AeroMESH ships a binary (the `aeromesh`
+# CLI) plus native FFI bindings, so reproducible dependency resolution matters
+# more than the library-style "don't commit the lockfile" convention.
 
 # Python virtual environment, caches & packages
 .venv/
@@ -46,6 +49,8 @@ models/*.gguf
 *.webm
 
 # AeroMESH Shared Memory Buffers & Runtime Logs
+# NOTE: SHM ring buffers live under %TEMP%\aeromesh_shm (see aeromesh-core/src/transport.rs),
+# not in the repo; these patterns are kept for in-tree debugging runs.
 *.log
 logs/
 aeromesh_shm/

@@ -22,4 +22,3 @@ axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tokio-stream = { workspace = true }
-futures-util = { workspace = true }
