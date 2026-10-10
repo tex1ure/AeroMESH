@@ -468,6 +468,32 @@ impl ActivationFrame {
 
                 Self { header, payload }
             }
+            ActivationDtype::Fp16 => {
+                let mut payload = BytesMut::with_capacity(seq_len * d * 2);
+                for &val in matrix {
+                    let half = float_to_half(val);
+                    payload.extend_from_slice(&half.to_le_bytes());
+                }
+
+                let payload = payload.freeze();
+                let header = ActivationHeader {
+                    magic: ACTIVATION_MAGIC,
+                    version: PROTOCOL_VERSION,
+                    session_id,
+                    sequence_id,
+                    sequence_length,
+                    token_position,
+                    stage_index,
+                    total_stages,
+                    layer_index,
+                    hidden_dim,
+                    dtype: ActivationDtype::Fp16 as u8,
+                    flags,
+                    payload_bytes: payload.len() as u32,
+                };
+
+                Self { header, payload }
+            }
             _ => {
                 // Raw uncompressed FP32 (endian-safe LittleEndian serialization)
                 let mut payload = BytesMut::with_capacity(matrix.len() * 4);
@@ -558,10 +584,12 @@ impl ActivationFrame {
         let total_elements = (self.header.sequence_length as usize)
             .checked_mul(self.header.hidden_dim as usize)
             .ok_or_else(|| anyhow::anyhow!("Integer overflow calculating total f32 elements (seq_len={}, dim={})", self.header.sequence_length, self.header.hidden_dim))?;
+        let max_f32_elements = (MAX_ACTIVATION_PAYLOAD_BYTES as usize) / std::mem::size_of::<f32>();
         ensure!(
-            total_elements <= (MAX_ACTIVATION_PAYLOAD_BYTES as usize),
-            "Total elements ({}) exceeds safety limit ({})",
+            total_elements <= max_f32_elements,
+            "Total elements ({}) exceeds safety limit ({} elements / {} bytes)",
             total_elements,
+            max_f32_elements,
             MAX_ACTIVATION_PAYLOAD_BYTES
         );
         let mut out = vec![0.0f32; total_elements];
@@ -849,6 +877,24 @@ impl HandshakeRequest {
         let arch_bytes = self.model_architecture.as_bytes();
         let csum_bytes = self.checksum_prefix.as_bytes();
         let peer_bytes = self.downstream_peer.as_bytes();
+        assert!(
+            peer_bytes.len() <= MAX_HANDSHAKE_STR_LEN,
+            "downstream_peer length {} exceeds limit {}",
+            peer_bytes.len(),
+            MAX_HANDSHAKE_STR_LEN
+        );
+        assert!(
+            arch_bytes.len() <= MAX_HANDSHAKE_STR_LEN,
+            "model_architecture length {} exceeds limit {}",
+            arch_bytes.len(),
+            MAX_HANDSHAKE_STR_LEN
+        );
+        assert!(
+            csum_bytes.len() <= MAX_HANDSHAKE_STR_LEN,
+            "checksum_prefix length {} exceeds limit {}",
+            csum_bytes.len(),
+            MAX_HANDSHAKE_STR_LEN
+        );
         let mut buf = BytesMut::with_capacity(64 + arch_bytes.len() + csum_bytes.len() + peer_bytes.len());
 
         buf.extend_from_slice(&HANDSHAKE_REQ_MAGIC);
@@ -959,11 +1005,15 @@ pub struct HandshakeResponse {
 
 impl HandshakeResponse {
     pub fn ok(auth_token: [u8; 32]) -> Self {
+        Self::ok_with_layers(auth_token, 0)
+    }
+
+    pub fn ok_with_layers(auth_token: [u8; 32], worker_layer_count: u32) -> Self {
         Self {
             version: PROTOCOL_VERSION,
             auth_token,
             accepted: true,
-            worker_layer_count: 0,
+            worker_layer_count,
             error_message: String::new(),
         }
     }
@@ -1061,6 +1111,39 @@ fn half_to_float(h: u16) -> f32 {
         let exp_f = (exp + 127 - 15) as u32;
         let mant_f = mant << 13;
         f32::from_bits((sign << 31) | (exp_f << 23) | mant_f)
+    }
+}
+
+pub fn float_to_half(val: f32) -> u16 {
+    let bits = val.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xFF) as i32;
+    let mant = (bits & 0x007FFFFF) as u32;
+
+    if exp == 255 {
+        if mant != 0 {
+            0x7E00 | ((mant >> 13) as u16)
+        } else {
+            sign | 0x7C00
+        }
+    } else {
+        let new_exp = exp - 127 + 15;
+        if new_exp >= 31 {
+            sign | 0x7C00
+        } else if new_exp <= 0 {
+            if 10 - new_exp > 24 {
+                sign
+            } else {
+                let m = mant | 0x00800000;
+                let shift = (14 - new_exp) as u32;
+                let half_mant = (m >> shift) as u16;
+                sign | half_mant
+            }
+        } else {
+            let half_exp = (new_exp as u16) << 10;
+            let half_mant = (mant >> 13) as u16;
+            sign | half_exp | half_mant
+        }
     }
 }
 
@@ -1504,6 +1587,28 @@ mod tests {
 
         let recovered = decoded.to_f32_vec().unwrap();
         assert_eq!(data, recovered);
+    }
+
+    #[test]
+    fn test_fp16_roundtrip() {
+        let hidden_dim = 64;
+        let seq_len = 1;
+        let data = vec![1.0f32, -2.5f32, 0.125f32, 65504.0f32];
+        let mut full_data = vec![0.0f32; hidden_dim];
+        full_data[..data.len()].copy_from_slice(&data);
+
+        let frame = ActivationFrame::from_f32_matrix_quantized_stage(
+            123, 1, seq_len as u32, 0, 0, 2, 8, hidden_dim as u32,
+            &full_data, ActivationDtype::Fp16, 0,
+        );
+
+        assert_eq!(frame.header.dtype, ActivationDtype::Fp16 as u8);
+        assert_eq!(frame.payload.len(), hidden_dim * 2);
+
+        let recovered = frame.to_f32_vec().unwrap();
+        for (orig, rec) in full_data.iter().zip(recovered.iter()) {
+            assert!((orig - rec).abs() < 1e-3, "Mismatch: orig {} vs rec {}", orig, rec);
+        }
     }
 }
 

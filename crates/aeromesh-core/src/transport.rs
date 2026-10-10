@@ -99,7 +99,7 @@ impl ShmPipelineTransport {
             if start.elapsed() > Duration::from_secs(60) {
                 bail!("SHM activation receive timeout");
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_micros(200)).await;
         }
     }
 
@@ -119,7 +119,7 @@ impl ShmPipelineTransport {
             if start.elapsed() > Duration::from_secs(60) {
                 bail!("SHM response receive timeout");
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_micros(200)).await;
         }
     }
 }
@@ -176,7 +176,7 @@ pub struct PipelineTransportFactory;
 impl PipelineTransportFactory {
     pub fn is_local_address(addr: &SocketAddr) -> bool {
         let ip = addr.ip();
-        ip.is_loopback() || ip.to_string() == "0.0.0.0" || ip.to_string() == "127.0.0.1"
+        ip.is_loopback() || ip.is_unspecified()
     }
 
     pub async fn connect_auto(target: SocketAddr) -> Result<PipelineTransport> {

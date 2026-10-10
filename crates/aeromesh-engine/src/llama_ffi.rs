@@ -866,10 +866,10 @@ mod tests {
         macro_rules! assert_is_field {
             ($($name:ident),* $(,)?) => {
                 fn __all_names_are_fields() {
-                    #[allow(unreachable_code, clippy::diverging_sub_expression)]
-                    let api: &LlamaApi = loop {};
-                    $( let _ = &api.$name; )*
-                    let _ = api;
+                    let api: Option<&LlamaApi> = None;
+                    if let Some(api) = api {
+                        $( let _ = &api.$name; )*
+                    }
                 }
             };
         }

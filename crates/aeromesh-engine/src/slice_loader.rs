@@ -204,6 +204,7 @@ impl GgufSliceLoader {
         for idx in 0..tensor_count {
             let name = read_gguf_string(&mut cursor)?;
             let n_dims = cursor.read_u32::<LittleEndian>()? as usize;
+            ensure!(n_dims <= 8, "GGUF tensor dimensions count {} exceeds limit (8)", n_dims);
             let mut dimensions = Vec::with_capacity(n_dims);
             let mut element_count: u64 = 1;
             for _ in 0..n_dims {
@@ -214,8 +215,7 @@ impl GgufSliceLoader {
             let ggml_type = cursor.read_u32::<LittleEndian>()?;
             let offset = cursor.read_u64::<LittleEndian>()?;
 
-            let type_size = ggml_type_size_bytes(ggml_type);
-            let size_bytes = (element_count as f64 * type_size).ceil() as u64;
+            let size_bytes = crate::gguf_slicer::ggml_tensor_size_bytes(ggml_type, element_count);
 
             let layer_index = extract_layer_index(&name);
 
@@ -338,6 +338,7 @@ impl GgufSliceLoader {
 
 fn read_gguf_string<R: std::io::Read>(reader: &mut R) -> Result<String> {
     let len = reader.read_u64::<LittleEndian>()? as usize;
+    ensure!(len <= 65536, "GGUF string length {} exceeds maximum allowed (64 KiB)", len);
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).to_string())
@@ -372,28 +373,16 @@ fn skip_gguf_value<R: std::io::Read>(reader: &mut R, val_type: GgufValueType) ->
 }
 
 fn extract_layer_index(name: &str) -> Option<usize> {
-    // Matches "blk.N." or "layers.N." or "model.layers.N."
-    for part in name.split('.') {
-        if let Ok(idx) = part.parse::<usize>() {
-            return Some(idx);
+    // Specifically matches "blk.N." or "layers.N." or "model.layers.N."
+    let parts: Vec<&str> = name.split('.').collect();
+    for i in 0..parts.len().saturating_sub(1) {
+        if parts[i] == "blk" || parts[i] == "layers" {
+            if let Ok(idx) = parts[i + 1].parse::<usize>() {
+                return Some(idx);
+            }
         }
     }
     None
-}
-
-fn ggml_type_size_bytes(ggml_type: u32) -> f64 {
-    match ggml_type {
-        0 => 4.0,           // F32
-        1 => 2.0,           // F16
-        2 => 0.5 + 2.0/32.0, // Q4_0
-        3 => 0.5 + 4.0/32.0, // Q4_1
-        7 => 1.0,           // I8
-        8 => 1.0 + 2.0/32.0, // Q8_0
-        12 => 0.5625,       // Q4_K
-        13 => 0.6875,       // Q5_K
-        14 => 0.8125,       // Q6_K
-        _ => 2.0,           // Fallback estimate
-    }
 }
 
 #[cfg(test)]
@@ -423,6 +412,7 @@ mod tests {
         assert_eq!(extract_layer_index("model.layers.15.self_attn.q_proj.weight"), Some(15));
         assert_eq!(extract_layer_index("token_embd.weight"), None);
         assert_eq!(extract_layer_index("output_norm.weight"), None);
+        assert_eq!(extract_layer_index("rope_freqs.4.weight"), None);
     }
 }
 

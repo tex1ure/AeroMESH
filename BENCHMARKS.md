@@ -3,8 +3,8 @@
 **Document ID**: BM-2026-DIST-01  
 **Target System**: AeroMESH Distributed Heterogeneous LLM Pipeline  
 **Model Under Test**: `DeepSeek-R1-Distill-14B` / `Qwen-2.5-14B` (`DS.gguf`, 8.37 GB, 48 Layers, $d_{\text{model}} = 5120$)  
-**Reference Video Proof**: [`demo_assets/demo_distributed_2node_tailscale_direct.mp4`](file:///d:/New%20folder/Latest_llama/AeroMESH/demo_assets/demo_distributed_2node_tailscale_direct.mp4)  
-**Fallback Video Proof**: [`demo_assets/demo_shm_single_node_fallback.mp4`](file:///d:/New%20folder/Latest_llama/AeroMESH/demo_assets/demo_shm_single_node_fallback.mp4)
+**Distributed 2-Node Mode**: Validated over Tailscale Direct WireGuard (`100.x.y.z`)  
+**Fallback Single-Node Mode**: Validated over Intra-Host Zero-Kernel-Copy Shared Memory (SHM)
 
 ---
 

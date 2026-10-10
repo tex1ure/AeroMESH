@@ -10,16 +10,134 @@ use crate::slice_loader::LayerSliceConfig;
 pub const GGUF_MAGIC: [u8; 4] = *b"GGUF";
 pub const DEFAULT_ALIGNMENT: u64 = 32;
 
-pub fn get_stage_slice_path(out_dir: &Path, stem: &str, stage_index: usize, total_stages: usize) -> PathBuf {
+/// Builds the on-disk name for a stage slice.
+///
+/// The name encodes the layer span of the partition:
+///   * 2-stage:  `{stem}_layers{start}-{end}_stage{K}.gguf`
+///   * N-stage:  `{stem}_stage{K}_of_{M}.gguf`
+///
+/// Encoding the span matters. The two-stage names used to be
+/// `{stem}_stage1.gguf` / `{stem}_stage2.gguf`, which carry no split
+/// information, and the reuse check only compared layer *counts*. Slicing the
+/// same model with `--split 14` and then `--split 20` therefore reused the
+/// stale 14-layer partition while reporting success.
+pub fn get_stage_slice_path(
+    out_dir: &Path,
+    stem: &str,
+    stage_index: usize,
+    total_stages: usize,
+    layer_start: usize,
+    layer_end: usize,
+) -> PathBuf {
     if total_stages == 2 {
-        if stage_index == 0 {
-            out_dir.join(format!("{}_stage1.gguf", stem))
-        } else {
-            out_dir.join(format!("{}_stage2.gguf", stem))
-        }
+        out_dir.join(format!(
+            "{}_layers{}-{}_stage{}.gguf",
+            stem,
+            layer_start,
+            layer_end,
+            stage_index + 1
+        ))
     } else {
-        out_dir.join(format!("{}_stage{}_of_{}.gguf", stem, stage_index + 1, total_stages))
+        out_dir.join(format!(
+            "{}_stage{}_of_{}.gguf",
+            stem,
+            stage_index + 1,
+            total_stages
+        ))
     }
+}
+
+/// Resolves the path of a stage slice.
+///
+/// A partition written by an older build is never silently substituted: the
+/// legacy name (`{stem}_stage1.gguf`) encodes no layer span, so it cannot be
+/// validated against a request. See [`legacy_stage_slice_path`] for detecting
+/// one when reporting to the user.
+pub fn resolve_stage_slice_path(
+    out_dir: &Path,
+    stem: &str,
+    stage_index: usize,
+    total_stages: usize,
+    layer_start: usize,
+    layer_end: usize,
+) -> PathBuf {
+    get_stage_slice_path(
+        out_dir,
+        stem,
+        stage_index,
+        total_stages,
+        layer_start,
+        layer_end,
+    )
+}
+
+/// Path of a slice written by a build predating span-encoded names.
+///
+/// Used only to *report* a reusable legacy artefact, never to claim it satisfies
+/// a new request.
+pub fn legacy_stage_slice_path(
+    out_dir: &Path,
+    stem: &str,
+    stage_index: usize,
+    total_stages: usize,
+) -> PathBuf {
+    if total_stages == 2 {
+        out_dir.join(format!("{}_stage{}.gguf", stem, stage_index + 1))
+    } else {
+        out_dir.join(format!(
+            "{}_stage{}_of_{}.gguf",
+            stem,
+            stage_index + 1,
+            total_stages
+        ))
+    }
+}
+
+
+
+/// Parses the split encoded in a slice file name, if present.
+fn split_from_stage_name(name: &str) -> Option<usize> {
+    let rest = name.split("_split").nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// True when `name` looks like a stage-1 partition produced by this slicer.
+///
+/// Recognises both naming schemes:
+///   * `{stem}_split{N}_stage1.gguf` (current, 2-stage)
+///   * `{stem}_stage1.gguf`         (legacy, 2-stage, no split encoded)
+///   * `{stem}_stage1_of_{M}.gguf`  (N-stage)
+pub fn is_stage1_slice_name(name: &str) -> bool {
+    let lowered = name.to_ascii_lowercase();
+    if !lowered.ends_with(".gguf") {
+        return false;
+    }
+    lowered.ends_with("_stage1.gguf")
+        || lowered.contains("_split") && lowered.contains("_stage1.gguf")
+        || lowered.contains("_stage1_of_")
+}
+
+/// True when `name` looks like any non-terminal or terminal stage partition.
+pub fn is_stage_slice_name(name: &str) -> bool {
+    let lowered = name.to_ascii_lowercase();
+    if !lowered.ends_with(".gguf") {
+        return false;
+    }
+    if lowered.contains("_stage") && lowered.contains("_of_") {
+        return true;
+    }
+    // `_split{N}_stage{K}.gguf`
+    if lowered.contains("_split") && lowered.contains("_stage") {
+        return true;
+    }
+    // Legacy `_stage1.gguf` / `_stage2.gguf`, but not e.g. "stagehand.gguf".
+    for suffix in ["_stage1.gguf", "_stage2.gguf"] {
+        if lowered.ends_with(suffix) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Slices a single stage GGUF model file for a given node's assigned layer slice:
@@ -40,33 +158,64 @@ pub fn slice_gguf_stage<P: AsRef<Path>, Q: AsRef<Path>>(
     ensure!(stage_index < total_stages, "stage_index ({}) must be < total_stages ({})", stage_index, total_stages);
 
     let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
-    let stage_path = get_stage_slice_path(out_dir, stem, stage_index, total_stages);
+    let stage_path = resolve_stage_slice_path(
+        out_dir,
+        stem,
+        stage_index,
+        total_stages,
+        slice.layer_start,
+        slice.layer_end,
+    );
 
-    // If slice file exists, matches requested layer count, and is newer than source, reuse it
+    // Reuse an existing slice when it is structurally the artefact we were
+    // asked for.
+    //
+    // The old check also required the file to exceed an arbitrary 1000 bytes.
+    // That constant was a proxy for "not truncated", but it is wrong for small
+    // models and tests, which were silently re-sliced on every run. Structural
+    // validity is the real requirement, and it is already established by
+    // successfully opening the file as a GGUF and reading its layer count: a
+    // truncated tensor table or data section fails to parse.
     if stage_path.exists() {
-        if let Ok(loader) = crate::GgufSliceLoader::open(&stage_path) {
-            if loader.total_layers == slice.layer_count() {
-                if let (Ok(src_meta), Ok(s_meta)) = (
-                    std::fs::metadata(src_path),
-                    std::fs::metadata(&stage_path),
-                ) {
-                    if let (Ok(src_time), Ok(s_time)) = (
-                        src_meta.modified(),
-                        s_meta.modified(),
+        // A legacy (split-less) name cannot be trusted on its own: the encoded
+        // split must match the request.
+        let name_matches = match split_from_stage_name(
+            stage_path.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
+        ) {
+            Some(encoded_split) => encoded_split == slice.layer_end + 1,
+            None => true, // legacy name: fall through to the structural check
+        };
+
+        if name_matches {
+            if let Ok(loader) = crate::GgufSliceLoader::open(&stage_path) {
+                if loader.total_layers == slice.layer_count() {
+                    if let (Ok(src_meta), Ok(s_meta)) = (
+                        std::fs::metadata(src_path),
+                        std::fs::metadata(&stage_path),
                     ) {
-                        if s_time >= src_time && s_meta.len() > 1000 {
-                            info!(
-                                stage = %stage_path.display(),
-                                stage_index = stage_index,
-                                total_stages = total_stages,
-                                layers = ?slice.layer_range(),
-                                "⚡ Reusing existing partitioned sliced GGUF file"
-                            );
-                            return Ok(stage_path);
+                        if let (Ok(src_time), Ok(s_time)) = (src_meta.modified(), s_meta.modified())
+                        {
+                            if s_time >= src_time {
+                                info!(
+                                    stage = %stage_path.display(),
+                                    stage_index = stage_index,
+                                    total_stages = total_stages,
+                                    layers = ?slice.layer_range(),
+                                    bytes = s_meta.len(),
+                                    "⚡ Reusing existing partitioned sliced GGUF file"
+                                );
+                                return Ok(stage_path);
+                            }
                         }
                     }
                 }
             }
+        } else {
+            info!(
+                stage = %stage_path.display(),
+                requested_split = slice.layer_end + 1,
+                "Existing slice encodes a different split point; re-slicing"
+            );
         }
     }
 
@@ -207,7 +356,7 @@ pub fn slice_gguf_for_multi_stage<P: AsRef<Path>, Q: AsRef<Path>>(
 
     let mut all_cached = true;
     for (i, slice) in stage_slices.iter().enumerate() {
-        let p = get_stage_slice_path(out_dir, stem, i, total_stages);
+        let p = resolve_stage_slice_path(out_dir, stem, i, total_stages, slice.layer_start, slice.layer_end);
         if !p.exists() {
             all_cached = false;
         } else if let Ok(loader) = crate::GgufSliceLoader::open(&p) {
@@ -227,7 +376,7 @@ pub fn slice_gguf_for_multi_stage<P: AsRef<Path>, Q: AsRef<Path>>(
                 for p in &stage_paths {
                     if let Ok(meta) = std::fs::metadata(p) {
                         if let Ok(mtime) = meta.modified() {
-                            if mtime < src_time || meta.len() <= 1000 {
+                            if mtime < src_time {
                                 valid_timestamps = false;
                                 break;
                             }
@@ -489,11 +638,27 @@ fn write_stage_gguf(
                 for _ in 0..count {
                     writer.write_all(&one_f16)?;
                 }
+            } else if t.ggml_type == 30 {
+                // BF16: 0x3F80 (1.0 in bfloat16)
+                let count = t.size_bytes as usize / 2;
+                let one_bf16 = 0x3F80u16.to_le_bytes();
+                for _ in 0..count {
+                    writer.write_all(&one_bf16)?;
+                }
+            } else if t.ggml_type == 8 {
+                // Q8_0: block of 32 values with f16 scale d.
+                // For all 1.0, d = 1.0 (0x3C00) and each qs byte = 1 (1 * 1.0 = 1.0).
+                // block size is 34 bytes (2 bytes f16 scale + 32 bytes i8).
+                let num_blocks = t.size_bytes as usize / 34;
+                for _ in 0..num_blocks {
+                    writer.write_all(&0x3C00u16.to_le_bytes())?;
+                    writer.write_all(&[1u8; 32])?;
+                }
             } else {
-                // Fallback: copy original
-                let src_start = (src_data_offset + t.src_offset) as usize;
-                let src_end = src_start + t.size_bytes as usize;
-                writer.write_all(&src_mmap[src_start..src_end])?;
+                bail!(
+                    "Cannot inject Identity-RMSNorm for unsupported tensor ggml_type {} on tensor '{}'. Supported types: F32 (0), F16 (1), BF16 (30), Q8_0 (8).",
+                    t.ggml_type, t.name
+                );
             }
         } else {
             let src_start = (src_data_offset + t.src_offset) as usize;
@@ -546,9 +711,12 @@ fn skip_gguf_val<R: Read + Seek>(reader: &mut R, val_type: u32) -> Result<()> {
 }
 
 fn extract_layer_index(name: &str) -> Option<usize> {
-    for part in name.split('.') {
-        if let Ok(idx) = part.parse::<usize>() {
-            return Some(idx);
+    let parts: Vec<&str> = name.split('.').collect();
+    for i in 0..parts.len().saturating_sub(1) {
+        if parts[i] == "blk" || parts[i] == "layers" {
+            if let Ok(idx) = parts[i + 1].parse::<usize>() {
+                return Some(idx);
+            }
         }
     }
     None
@@ -849,5 +1017,330 @@ mod tests {
         assert!(stages[2].to_str().unwrap().contains("stage3_of_3.gguf"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Semantic assertions on the sliced output.
+    //
+    // The tests above only check that files exist and start with the GGUF
+    // magic. These verify the mechanism the whole distributed design rests on:
+    // intermediate stages must apply an Identity RMSNorm, the terminal stage
+    // must keep the genuine norm, and block counts must be rewritten.
+    // -----------------------------------------------------------------------
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "aeromesh_slicer_{tag}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Reads a F32 tensor's raw bytes out of a sliced GGUF.
+    fn read_tensor_f32(path: &Path, name: &str) -> Vec<f32> {
+        let loader = crate::slice_loader::GgufSliceLoader::open(path)
+            .unwrap_or_else(|e| panic!("failed to open {}: {e}", path.display()));
+        let bytes = loader
+            .get_tensor_bytes(name)
+            .unwrap_or_else(|| panic!("tensor {name} missing from {}", path.display()));
+        assert_eq!(bytes.len() % 4, 0, "F32 tensor should be a multiple of 4 bytes");
+        bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    fn read_block_count(path: &Path) -> u32 {
+        // Parse the KV table directly: GgufSliceLoader does not expose the value,
+        // and the rewritten block count is exactly what stage 2 depends on.
+        let file = File::open(path).unwrap();
+        let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
+        let mut cursor = std::io::Cursor::new(&mmap[..]);
+        let mut magic = [0u8; 4];
+        std::io::Read::read_exact(&mut cursor, &mut magic).unwrap();
+        assert_eq!(&magic, &GGUF_MAGIC);
+        let _version = cursor.read_u32::<LittleEndian>().unwrap();
+        let _tensor_count = cursor.read_u64::<LittleEndian>().unwrap();
+        let kv_count = cursor.read_u64::<LittleEndian>().unwrap();
+
+        fn read_string(cursor: &mut std::io::Cursor<&[u8]>) -> String {
+            let len = cursor.read_u64::<LittleEndian>().unwrap() as usize;
+            let mut buf = vec![0u8; len];
+            std::io::Read::read_exact(cursor, &mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
+        }
+
+        for _ in 0..kv_count {
+            let key = read_string(&mut cursor);
+            let value_type = cursor.read_u32::<LittleEndian>().unwrap();
+            match value_type {
+                // UINT32
+                4 => {
+                    let value = cursor.read_u32::<LittleEndian>().unwrap();
+                    if key.ends_with(".block_count") {
+                        return value;
+                    }
+                }
+                // UINT64
+                10 => {
+                    let value = cursor.read_u64::<LittleEndian>().unwrap();
+                    if key.ends_with(".block_count") {
+                        return value as u32;
+                    }
+                }
+                // STRING
+                8 => {
+                    let _ = read_string(&mut cursor);
+                }
+                // FLOAT32
+                6 => {
+                    let _ = cursor.read_u32::<LittleEndian>().unwrap();
+                }
+                other => panic!("unexpected GGUF value type {other} for key {key}"),
+            }
+        }
+        panic!("no .block_count key found in {}", path.display());
+    }
+
+    #[test]
+    fn stage1_replaces_output_norm_with_identity() {
+        let dir = unique_temp_dir("identity");
+        let src = dir.join("model.gguf");
+        create_synthetic_3layer_gguf(&src).unwrap();
+
+        // Stage 1 of 3 covers layer 0 only, so it is an intermediate stage and
+        // must neutralise the final norm.
+        let stages = slice_gguf_for_multi_stage(
+            &src,
+            &dir.join("out"),
+            &[
+                LayerSliceConfig::new(0, 0, 3).unwrap(),
+                LayerSliceConfig::new(1, 1, 3).unwrap(),
+                LayerSliceConfig::new(2, 2, 3).unwrap(),
+            ],
+        )
+        .expect("slicing failed");
+
+        let stage1_norm = read_tensor_f32(&stages[0], "output_norm.weight");
+        assert_eq!(stage1_norm.len(), 4, "synthetic norm has 4 elements");
+        assert!(
+            stage1_norm.iter().all(|v| (*v - 1.0).abs() < f32::EPSILON),
+            "stage 1 output_norm must be all 1.0 (identity), got {stage1_norm:?}"
+        );
+
+        // Stage 3 is terminal: it must keep the model's real weights (3.14).
+        let stage3_norm = read_tensor_f32(&stages[2], "output_norm.weight");
+        assert!(
+            stage3_norm.iter().all(|v| (*v - 3.14).abs() < 1e-5),
+            "terminal stage must preserve the genuine output_norm, got {stage3_norm:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_stage_split_identity_and_genuine_norm() {
+        let dir = unique_temp_dir("identity2");
+        let src = dir.join("model.gguf");
+        create_synthetic_3layer_gguf(&src).unwrap();
+
+        let (s1, s2) = slice_gguf_for_pipeline(&src, &dir.join("out"), 1).expect("slicing failed");
+
+        let s1_norm = read_tensor_f32(&s1, "output_norm.weight");
+        assert!(
+            s1_norm.iter().all(|v| (*v - 1.0).abs() < f32::EPSILON),
+            "stage 1 of a 2-way split must use an identity norm, got {s1_norm:?}"
+        );
+
+        let s2_norm = read_tensor_f32(&s2, "output_norm.weight");
+        assert!(
+            s2_norm.iter().all(|v| (*v - 3.14).abs() < 1e-5),
+            "stage 2 of a 2-way split is terminal and must keep the real norm, got {s2_norm:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn block_count_is_rewritten_per_stage() {
+        let dir = unique_temp_dir("blockcount");
+        let src = dir.join("model.gguf");
+        create_synthetic_3layer_gguf(&src).unwrap();
+
+        assert_eq!(read_block_count(&src), 3, "source declares 3 layers");
+
+        let stages = slice_gguf_for_multi_stage(
+            &src,
+            &dir.join("out"),
+            &[
+                LayerSliceConfig::new(0, 0, 3).unwrap(),
+                LayerSliceConfig::new(1, 1, 3).unwrap(),
+                LayerSliceConfig::new(2, 2, 3).unwrap(),
+            ],
+        )
+        .expect("slicing failed");
+
+        // Each stage holds exactly one layer, so llama.cpp must be told 1.
+        for (idx, path) in stages.iter().enumerate() {
+            assert_eq!(
+                read_block_count(path),
+                1,
+                "stage {} should declare 1 block, not the source total",
+                idx + 1
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layer_tensors_are_reindexed_from_zero() {
+        let dir = unique_temp_dir("reindex");
+        let src = dir.join("model.gguf");
+        create_synthetic_3layer_gguf(&src).unwrap();
+
+        // Stage 2 covers layer 1, which must be re-indexed to blk.0.
+        let stages = slice_gguf_for_multi_stage(
+            &src,
+            &dir.join("out"),
+            &[
+                LayerSliceConfig::new(0, 0, 3).unwrap(),
+                LayerSliceConfig::new(1, 2, 3).unwrap(),
+            ],
+        )
+        .expect("slicing failed");
+
+        let loader = crate::slice_loader::GgufSliceLoader::open(&stages[1]).unwrap();
+        let names: Vec<String> = loader
+            .all_tensors
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+
+        assert!(
+            names.iter().any(|n| n == "blk.0.attn_q.weight"),
+            "source layer 1 must become blk.0 in stage 2; got {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "blk.1.attn_q.weight"),
+            "source layer 2 must become blk.1 in stage 2; got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("blk.2.")),
+            "no tensor should keep a global index; got {names:?}"
+        );
+
+        // The re-indexed block must appear exactly once, with its own data.
+        let data = read_tensor_f32(&stages[1], "blk.0.attn_q.weight");
+        assert!(
+            data.iter().all(|v| (*v - 1.5).abs() < 1e-6),
+            "blk.0 of stage 2 should carry source layer 1's data (1.5), got {data:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slicing_is_idempotent_and_reuses_output() {
+        let dir = unique_temp_dir("reuse");
+        let src = dir.join("model.gguf");
+        create_synthetic_3layer_gguf(&src).unwrap();
+        let out = dir.join("out");
+
+        let first = slice_gguf_for_pipeline(&src, &out, 1).expect("first slice failed");
+        let first_len = std::fs::metadata(&first.0).unwrap().len();
+        let first_modified = std::fs::metadata(&first.0).unwrap().modified().unwrap();
+
+        // A second identical request must reuse the existing artefacts.
+        let second = slice_gguf_for_pipeline(&src, &out, 1).expect("second slice failed");
+        assert_eq!(first.0, second.0);
+        assert_eq!(first_len, std::fs::metadata(&second.0).unwrap().len());
+        assert_eq!(
+            first_modified,
+            std::fs::metadata(&second.0).unwrap().modified().unwrap(),
+            "the second call should not rewrite the file"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn different_split_points_do_not_collide() {
+        // Regression test: with split-less names and a layer-count-only reuse
+        // check, slicing at 1 and then at 2 silently returned the first
+        // partition while reporting success.
+        let dir = unique_temp_dir("splitcollision");
+        let src = dir.join("model.gguf");
+        create_synthetic_3layer_gguf(&src).unwrap();
+        let out = dir.join("out");
+
+        let (s1_at_1, s2_at_1) = slice_gguf_for_pipeline(&src, &out, 1).expect("split at 1");
+        let (s1_at_2, s2_at_2) = slice_gguf_for_pipeline(&src, &out, 2).expect("split at 2");
+
+        assert_ne!(
+            s1_at_1, s1_at_2,
+            "a different split point must produce a different stage-1 file"
+        );
+        assert_ne!(s2_at_1, s2_at_2);
+
+        // Split at 1: stage 1 = 1 layer, stage 2 = 2 layers.
+        let l1 = crate::slice_loader::GgufSliceLoader::open(&s1_at_1).unwrap();
+        let r1 = crate::slice_loader::GgufSliceLoader::open(&s2_at_1).unwrap();
+        assert_eq!(l1.total_layers, 1);
+        assert_eq!(r1.total_layers, 2);
+
+        // Split at 2: stage 1 = 2 layers, stage 2 = 1 layer.
+        let l2 = crate::slice_loader::GgufSliceLoader::open(&s1_at_2).unwrap();
+        let r2 = crate::slice_loader::GgufSliceLoader::open(&s2_at_2).unwrap();
+        assert_eq!(l2.total_layers, 2);
+        assert_eq!(r2.total_layers, 1);
+
+        // And the encoders agree with the requests.
+        assert_eq!(read_block_count(&s1_at_1), 1);
+        assert_eq!(read_block_count(&s1_at_2), 2);
+        assert_eq!(read_block_count(&s2_at_1), 2);
+        assert_eq!(read_block_count(&s2_at_2), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stage_slice_name_predicates() {
+        // Current naming
+        assert!(is_stage_slice_name("DS_layers0-23_stage1.gguf"));
+        assert!(is_stage_slice_name("DS_layers24-47_stage2.gguf"));
+        assert!(is_stage1_slice_name("DS_layers0-23_stage1.gguf"));
+        assert!(!is_stage1_slice_name("DS_layers24-47_stage2.gguf"));
+
+        // N-stage naming
+        assert!(is_stage_slice_name("DS_stage1_of_3.gguf"));
+        assert!(is_stage_slice_name("DS_stage3_of_3.gguf"));
+        assert!(is_stage1_slice_name("DS_stage1_of_3.gguf"));
+        assert!(!is_stage1_slice_name("DS_stage2_of_3.gguf"));
+
+        // Legacy naming
+        assert!(is_stage_slice_name("DS_stage1.gguf"));
+        assert!(is_stage_slice_name("DS_stage2.gguf"));
+        assert!(is_stage1_slice_name("DS_stage1.gguf"));
+        assert!(!is_stage1_slice_name("DS_stage2.gguf"));
+
+        // Ordinary models must never be mistaken for partitions
+        assert!(!is_stage_slice_name("DS.gguf"));
+        assert!(!is_stage_slice_name("qwen2.5-0.5b-instruct.gguf"));
+        assert!(!is_stage_slice_name("stagehand-model.gguf"));
+        assert!(!is_stage1_slice_name("stagehand-model.gguf"));
+        assert!(!is_stage_slice_name("deepstage_2.gguf"));
+    }
+
+    #[test]
+    fn split_parsing_from_name() {
+        assert_eq!(split_from_stage_name("DS_split24_stage1.gguf"), Some(24));
+        assert_eq!(split_from_stage_name("DS_split1_stage2.gguf"), Some(1));
+        assert_eq!(split_from_stage_name("DS_stage1.gguf"), None);
+        assert_eq!(split_from_stage_name("DS.gguf"), None);
     }
 }

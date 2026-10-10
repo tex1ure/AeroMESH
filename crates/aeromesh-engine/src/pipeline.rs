@@ -449,7 +449,7 @@ async fn handle_coordinator_connection(
             }
         }
 
-        let resp = HandshakeResponse::ok(expected_token);
+        let resp = HandshakeResponse::ok_with_layers(expected_token, current_slice.layer_count() as u32);
         socket.write_all(&resp.encode()).await?;
         socket.flush().await?;
         info!(peer = %peer_addr, "✅ Handshake accepted. Ready for activation stream.");
@@ -666,6 +666,7 @@ async fn handle_coordinator_connection(
         /// HTTP request via [`Self::set_sampling`]; `None` keeps the defaults
         /// chosen at model load.
         pub sampling: Option<SamplingParams>,
+        pub abort_flag: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl PipelineCoordinatorClient {
@@ -690,8 +691,12 @@ async fn handle_coordinator_connection(
             };
 
             let num_stages = worker_addrs.len() + 1;
-            let target_model_path = if (num_stages == 2 && path_ref.to_string_lossy().ends_with("_stage1.gguf"))
-                || (num_stages > 2 && path_ref.to_string_lossy().ends_with(&format!("_stage1_of_{}.gguf", num_stages))) {
+            // Accept both the current `_split{N}_stage1.gguf` naming and the
+            // legacy `_stage1.gguf` / `_stage1_of_{M}.gguf` forms, so an existing
+            // on-disk partition is reused instead of being re-sliced.
+            let already_stage1 =
+                crate::gguf_slicer::is_stage1_slice_name(&path_ref.to_string_lossy());
+            let target_model_path = if already_stage1 {
                 path_ref.to_path_buf()
             } else if !worker_addrs.is_empty() {
                 let out_dir = path_ref.parent().unwrap_or_else(|| Path::new("models"));
@@ -722,6 +727,7 @@ async fn handle_coordinator_connection(
                 transport: None,
                 target_dtype: activation_dtype_from_env(),
                 sampling: None,
+                abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             })
         }
 
@@ -825,8 +831,12 @@ async fn handle_coordinator_connection(
             let ngl = if file_size_mb <= 4500 { 999 } else { local_slice.layer_count() as i32 };
 
             let num_stages = self.worker_addrs.len() + 1;
-            let target_model_path = if (num_stages == 2 && path_ref.to_string_lossy().ends_with("_stage1.gguf"))
-                || (num_stages > 2 && path_ref.to_string_lossy().ends_with(&format!("_stage1_of_{}.gguf", num_stages))) {
+            // Accept both the current `_split{N}_stage1.gguf` naming and the
+            // legacy `_stage1.gguf` / `_stage1_of_{M}.gguf` forms, so an existing
+            // on-disk partition is reused instead of being re-sliced.
+            let already_stage1 =
+                crate::gguf_slicer::is_stage1_slice_name(&path_ref.to_string_lossy());
+            let target_model_path = if already_stage1 {
                 path_ref.to_path_buf()
             } else if !self.worker_addrs.is_empty() {
                 let out_dir = path_ref.parent().unwrap_or_else(|| Path::new("models"));
@@ -1040,6 +1050,7 @@ async fn handle_coordinator_connection(
         let mut generated_text = String::new();
         let mut total_tokens = 0usize;
         let mut perf_metrics = Vec::new();
+        self.abort_flag.store(false, std::sync::atomic::Ordering::SeqCst);
 
         // Verify model readiness before proceeding
         self.get_instance()?;
@@ -1214,6 +1225,10 @@ async fn handle_coordinator_connection(
         // Step 3: Autoregressive Decode Loop with Per-Row INT8 Quantized Transport
         if !is_first_eos && !is_first_stop {
             for seq_id in 1..max_tokens {
+                if self.abort_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    tracing::info!("🛑 Pipeline generation aborted by request signal");
+                    break;
+                }
                 let decode_tokens = [current_token_id];
                 if let Err(e) = self.get_instance_mut()?.evaluate_tokens_to_activations_into(&decode_tokens, current_pos, &mut decode_act_buf) {
                     self.transport = None;
@@ -1503,6 +1518,7 @@ mod tests_pipeline_safety {
             transport: None,
             target_dtype: ActivationDtype::RawF32,
             sampling: None,
+            abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         assert!(!client.is_ready());
@@ -1525,6 +1541,7 @@ mod tests_pipeline_safety {
             transport: None,
             target_dtype: ActivationDtype::RawF32,
             sampling: None,
+            abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         let res = client.generate_pipeline("Hello", 10, 0.7, 0.9, 1234, None).await;
@@ -1546,6 +1563,7 @@ mod tests_pipeline_safety {
             transport: None,
             target_dtype: ActivationDtype::RawF32,
             sampling: None,
+            abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         let res = client.switch_model("completely_non_existent_model_file.gguf");
@@ -1568,6 +1586,7 @@ mod tests_pipeline_safety {
             transport: None,
             target_dtype: ActivationDtype::RawF32,
             sampling: None,
+            abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         assert_eq!(client_with_instance.n_ctx(), 512);
 
@@ -1582,6 +1601,7 @@ mod tests_pipeline_safety {
             transport: None,
             target_dtype: ActivationDtype::RawF32,
             sampling: None,
+            abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         assert_eq!(client_without_instance.n_ctx(), 4096);
     }

@@ -188,13 +188,14 @@ impl Utf8StreamAccumulator {
             Ok(_) => self.buffer.len(),
             Err(e) => {
                 let valid_up_to = e.valid_up_to();
-                if e.error_len().is_none() {
-                    // Incomplete multi-byte sequence at the end
-                    valid_up_to
-                } else {
-                    // Actual invalid bytes: skip invalid byte and take valid up to
-                    valid_up_to
+                if let Some(err_len) = e.error_len() {
+                    if valid_up_to == 0 {
+                        // Drop the invalid byte(s) at the buffer head so stream is not permanently muted
+                        self.buffer.drain(..err_len);
+                        return self.push_bytes(&[]);
+                    }
                 }
+                valid_up_to
             }
         };
 
@@ -232,7 +233,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub model: Option<String>,
     pub messages: Vec<ChatMessage>,
-    #[serde(default = "default_max_tokens")]
+    #[serde(default)]
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub temperature: Option<f32>,
@@ -244,10 +245,6 @@ pub struct ChatCompletionRequest {
     pub session_id: Option<u64>,
     #[serde(default)]
     pub reasoning: Option<bool>,
-}
-
-fn default_max_tokens() -> Option<usize> {
-    Some(256)
 }
 
 impl ChatCompletionRequest {
@@ -396,6 +393,7 @@ pub struct AppState {
     pub coordinator: Mutex<PipelineCoordinatorClient>,
     pub model_name: Mutex<String>,
     pub cluster_meta: std::sync::RwLock<ClusterMeta>,
+    pub abort_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct PipelineHttpServer {
@@ -413,11 +411,13 @@ impl PipelineHttpServer {
             workers: coordinator.worker_addrs.iter().map(|w| w.to_string()).collect(),
         };
 
+        let abort_flag = coordinator.abort_flag.clone();
         Self {
             state: Arc::new(AppState {
                 coordinator: Mutex::new(coordinator),
                 model_name: Mutex::new(model_name),
                 cluster_meta: std::sync::RwLock::new(meta),
+                abort_flag,
             }),
         }
     }
@@ -650,7 +650,7 @@ async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_json::V
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
                 let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                if name.ends_with("_stage1.gguf") || name.ends_with("_stage2.gguf") {
+                if crate::gguf_slicer::is_stage_slice_name(&name) {
                     continue;
                 }
                 model_list.push(serde_json::json!({
@@ -685,7 +685,10 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
     let state_str = if is_busy { "online_generating" } else { "online_idle" };
 
     let current_model = state.model_name.lock().await.clone();
-    let meta = state.cluster_meta.read().unwrap().clone();
+    let meta = match state.cluster_meta.read() {
+        Ok(m) => m.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
 
     let has_workers = !meta.workers.is_empty();
     let is_connected = if has_workers {
@@ -768,8 +771,9 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
     }))
 }
 
-async fn handle_chat_abort() -> Json<serde_json::Value> {
+async fn handle_chat_abort(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     info!("🛑 Received explicit generation abort request via /api/chat/abort");
+    state.abort_flag.store(true, std::sync::atomic::Ordering::SeqCst);
     Json(serde_json::json!({
         "status": "aborted",
         "message": "Generation abort signal acknowledged"
@@ -1024,8 +1028,15 @@ async fn handle_chat_completions(
         let stream = ReceiverStream::new(token_rx);
 
         let mut accumulator = Utf8StreamAccumulator::new();
+        let mut is_first = true;
         let sse_stream = tokio_stream::StreamExt::map(stream, move |bytes| {
             let text = accumulator.push_bytes(&bytes);
+            let role = if is_first {
+                is_first = false;
+                Some("assistant".to_string())
+            } else {
+                None
+            };
             let chunk = ChatCompletionChunk {
                 id: format!("chatcmpl-{}", session_id),
                 object: "chat.completion.chunk".to_string(),
@@ -1034,7 +1045,7 @@ async fn handle_chat_completions(
                 choices: vec![ChatCompletionChunkChoice {
                     index: 0,
                     delta: ChatCompletionChunkDelta {
-                        role: None,
+                        role,
                         content: if text.is_empty() { None } else { Some(text) },
                     },
                     finish_reason: None,
@@ -1045,7 +1056,30 @@ async fn handle_chat_completions(
             Ok::<Event, axum::Error>(Event::default().data(json_str))
         });
 
-        Sse::new(sse_stream)
+        let term_model = active_model.clone();
+        let term_chunk = ChatCompletionChunk {
+            id: format!("chatcmpl-{}", session_id),
+            object: "chat.completion.chunk".to_string(),
+            created: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            model: term_model,
+            choices: vec![ChatCompletionChunkChoice {
+                index: 0,
+                delta: ChatCompletionChunkDelta {
+                    role: None,
+                    content: None,
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+        };
+        let term_json = serde_json::to_string(&term_chunk).unwrap_or_default();
+        let terminal_events = vec![
+            Ok::<Event, axum::Error>(Event::default().data(term_json)),
+            Ok::<Event, axum::Error>(Event::default().data("[DONE]")),
+        ];
+        let terminal_stream = tokio_stream::iter(terminal_events);
+        let combined_stream = tokio_stream::StreamExt::chain(sse_stream, terminal_stream);
+
+        Sse::new(combined_stream)
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
@@ -1290,9 +1324,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_chat_abort_endpoint() {
-        let Json(res) = handle_chat_abort().await;
+        let dummy_client = PipelineCoordinatorClient {
+            model_path: std::path::PathBuf::from("mock.gguf"),
+            local_slice: crate::LayerSliceConfig::new(0, 0, 1).unwrap(),
+            worker_addrs: Vec::new(),
+            instance: None,
+            status: CoordinatorStatus::Closed,
+            hidden_dim: 128,
+            total_layers: 1,
+            transport: None,
+            target_dtype: aeromesh_core::ActivationDtype::RawF32,
+            sampling: None,
+            abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let server = PipelineHttpServer::new(dummy_client, "mock".to_string());
+        let Json(res) = handle_chat_abort(State(server.state.clone())).await;
         assert_eq!(res["status"], "aborted");
         assert_eq!(res["message"], "Generation abort signal acknowledged");
+        assert!(server.state.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]

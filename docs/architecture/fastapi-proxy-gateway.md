@@ -4,7 +4,7 @@
 > **Component**: `app.py`  
 > **Default Gateway Port**: `7860`  
 > **Target Backend Port**: `8080` (Axum Engine)  
-> **Test Suite**: `tests/test_fastapi_gateway.py` (9 / 9 Passing)
+> **Test Suite**: `tests/test_fastapi_gateway.py` (27 / 27 Passing)
 
 ---
 
@@ -138,7 +138,7 @@ Streaming LLM completions require specialized HTTP proxy semantics to prevent to
 
 ## 6. Verification & Automated Tests
 
-The gateway implementation is thoroughly validated via automated integration tests in [tests/test_fastapi_gateway.py](file:///d:/New%20folder/Latest_llama/AeroMESH/tests/test_fastapi_gateway.py):
+The gateway implementation is thoroughly validated via automated integration tests in [tests/test_fastapi_gateway.py](../../tests/test_fastapi_gateway.py):
 
 ```powershell
 python -m pytest tests/test_fastapi_gateway.py -v

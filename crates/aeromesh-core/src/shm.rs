@@ -7,6 +7,14 @@ use memmap2::{MmapMut, MmapOptions};
 pub const SHM_MAGIC: &[u8; 4] = b"ASHM";
 pub const SHM_HEADER_SIZE: usize = 192; // Cache-line aligned 64B * 3
 pub const DEFAULT_SHM_BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB ring buffer
+pub const HEAD_OFFSET: usize = 64;
+pub const TAIL_OFFSET: usize = 128;
+pub const CAP_OFFSET: usize = 8;
+
+const _: () = {
+    assert!(HEAD_OFFSET % std::mem::align_of::<AtomicUsize>() == 0);
+    assert!(TAIL_OFFSET % std::mem::align_of::<AtomicUsize>() == 0);
+};
 
 /// SPSC Memory-Mapped Lock-Free Ring Buffer
 pub struct SharedMemoryRingBuffer {
@@ -33,14 +41,18 @@ impl SharedMemoryRingBuffer {
 
         let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
-        // Initialize header if new
-        if &mmap[0..4] != SHM_MAGIC {
+        // Initialize header if new, or reset if corrupt / capacity changed
+        let existing_cap = u64::from_le_bytes(mmap[CAP_OFFSET..CAP_OFFSET + 8].try_into().unwrap_or([0; 8])) as usize;
+        let is_valid = &mmap[0..4] == SHM_MAGIC && existing_cap == capacity;
+
+        if !is_valid {
             mmap[0..4].copy_from_slice(SHM_MAGIC);
+            mmap[CAP_OFFSET..CAP_OFFSET + 8].copy_from_slice(&(capacity as u64).to_le_bytes());
             // Head atomic (offset 64)
-            let head_atomic = unsafe { &*(&mmap[64] as *const u8 as *const AtomicUsize) };
+            let head_atomic = unsafe { &*(&mmap[HEAD_OFFSET] as *const u8 as *const AtomicUsize) };
             head_atomic.store(0, Ordering::SeqCst);
             // Tail atomic (offset 128)
-            let tail_atomic = unsafe { &*(&mmap[128] as *const u8 as *const AtomicUsize) };
+            let tail_atomic = unsafe { &*(&mmap[TAIL_OFFSET] as *const u8 as *const AtomicUsize) };
             tail_atomic.store(0, Ordering::SeqCst);
         }
 
@@ -53,12 +65,12 @@ impl SharedMemoryRingBuffer {
 
     #[inline]
     fn head(&self) -> &AtomicUsize {
-        unsafe { &*(&self.mmap[64] as *const u8 as *const AtomicUsize) }
+        unsafe { &*(&self.mmap[HEAD_OFFSET] as *const u8 as *const AtomicUsize) }
     }
 
     #[inline]
     fn tail(&self) -> &AtomicUsize {
-        unsafe { &*(&self.mmap[128] as *const u8 as *const AtomicUsize) }
+        unsafe { &*(&self.mmap[TAIL_OFFSET] as *const u8 as *const AtomicUsize) }
     }
 
     /// Write a contiguous slice into the ring buffer (non-blocking)
