@@ -1,11 +1,11 @@
-use std::fs::File;
-use std::io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use crate::slice_loader::LayerSliceConfig;
 use anyhow::{bail, ensure, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use memmap2::Mmap;
+use std::fs::File;
+use std::io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use tracing::info;
-use crate::slice_loader::LayerSliceConfig;
 
 pub const GGUF_MAGIC: [u8; 4] = *b"GGUF";
 pub const DEFAULT_ALIGNMENT: u64 = 32;
@@ -93,8 +93,6 @@ pub fn legacy_stage_slice_path(
     }
 }
 
-
-
 /// Parses the split encoded in a slice file name, if present.
 fn split_from_stage_name(name: &str) -> Option<usize> {
     let rest = name.split("_split").nth(1)?;
@@ -154,10 +152,22 @@ pub fn slice_gguf_stage<P: AsRef<Path>, Q: AsRef<Path>>(
     let out_dir = output_dir.as_ref();
     std::fs::create_dir_all(out_dir)?;
 
-    ensure!(total_stages >= 2, "total_stages must be >= 2 (got {})", total_stages);
-    ensure!(stage_index < total_stages, "stage_index ({}) must be < total_stages ({})", stage_index, total_stages);
+    ensure!(
+        total_stages >= 2,
+        "total_stages must be >= 2 (got {})",
+        total_stages
+    );
+    ensure!(
+        stage_index < total_stages,
+        "stage_index ({}) must be < total_stages ({})",
+        stage_index,
+        total_stages
+    );
 
-    let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+    let stem = src_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model");
     let stage_path = resolve_stage_slice_path(
         out_dir,
         stem,
@@ -180,7 +190,10 @@ pub fn slice_gguf_stage<P: AsRef<Path>, Q: AsRef<Path>>(
         // A legacy (split-less) name cannot be trusted on its own: the encoded
         // split must match the request.
         let name_matches = match split_from_stage_name(
-            stage_path.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
+            stage_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default(),
         ) {
             Some(encoded_split) => encoded_split == slice.layer_end + 1,
             None => true, // legacy name: fall through to the structural check
@@ -189,10 +202,9 @@ pub fn slice_gguf_stage<P: AsRef<Path>, Q: AsRef<Path>>(
         if name_matches {
             if let Ok(loader) = crate::GgufSliceLoader::open(&stage_path) {
                 if loader.total_layers == slice.layer_count() {
-                    if let (Ok(src_meta), Ok(s_meta)) = (
-                        std::fs::metadata(src_path),
-                        std::fs::metadata(&stage_path),
-                    ) {
+                    if let (Ok(src_meta), Ok(s_meta)) =
+                        (std::fs::metadata(src_path), std::fs::metadata(&stage_path))
+                    {
                         if let (Ok(src_time), Ok(s_time)) = (src_meta.modified(), s_meta.modified())
                         {
                             if s_time >= src_time {
@@ -238,10 +250,14 @@ pub fn slice_gguf_stage<P: AsRef<Path>, Q: AsRef<Path>>(
 
     let mut magic = [0u8; 4];
     cursor.read_exact(&mut magic)?;
-    ensure!(&magic == &GGUF_MAGIC, "Invalid GGUF magic bytes");
+    ensure!(magic == GGUF_MAGIC, "Invalid GGUF magic bytes");
 
     let version = cursor.read_u32::<LittleEndian>()?;
-    ensure!(version == 2 || version == 3, "Unsupported GGUF version: {}", version);
+    ensure!(
+        version == 2 || version == 3,
+        "Unsupported GGUF version: {}",
+        version
+    );
 
     let tensor_count = cursor.read_u64::<LittleEndian>()? as usize;
     let kv_count = cursor.read_u64::<LittleEndian>()? as usize;
@@ -345,18 +361,31 @@ pub fn slice_gguf_for_multi_stage<P: AsRef<Path>, Q: AsRef<Path>>(
 ) -> Result<Vec<PathBuf>> {
     ensure!(!stage_slices.is_empty(), "stage_slices must not be empty");
     let total_stages = stage_slices.len();
-    ensure!(total_stages >= 2, "Multi-stage pipeline requires at least 2 stages");
+    ensure!(
+        total_stages >= 2,
+        "Multi-stage pipeline requires at least 2 stages"
+    );
 
     let src_path = source_model.as_ref();
     let out_dir = output_dir.as_ref();
     std::fs::create_dir_all(out_dir)?;
 
-    let stem = src_path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+    let stem = src_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model");
     let mut stage_paths = Vec::with_capacity(total_stages);
 
     let mut all_cached = true;
     for (i, slice) in stage_slices.iter().enumerate() {
-        let p = resolve_stage_slice_path(out_dir, stem, i, total_stages, slice.layer_start, slice.layer_end);
+        let p = resolve_stage_slice_path(
+            out_dir,
+            stem,
+            i,
+            total_stages,
+            slice.layer_start,
+            slice.layer_end,
+        );
         if !p.exists() {
             all_cached = false;
         } else if let Ok(loader) = crate::GgufSliceLoader::open(&p) {
@@ -420,10 +449,14 @@ pub fn slice_gguf_for_pipeline<P: AsRef<Path>, Q: AsRef<Path>>(
 
     let mut magic = [0u8; 4];
     cursor.read_exact(&mut magic)?;
-    ensure!(&magic == &GGUF_MAGIC, "Invalid GGUF magic bytes");
+    ensure!(magic == GGUF_MAGIC, "Invalid GGUF magic bytes");
 
     let version = cursor.read_u32::<LittleEndian>()?;
-    ensure!(version == 2 || version == 3, "Unsupported GGUF version: {}", version);
+    ensure!(
+        version == 2 || version == 3,
+        "Unsupported GGUF version: {}",
+        version
+    );
 
     let _tensor_count = cursor.read_u64::<LittleEndian>()?;
     let kv_count = cursor.read_u64::<LittleEndian>()? as usize;
@@ -446,8 +479,16 @@ pub fn slice_gguf_for_pipeline<P: AsRef<Path>, Q: AsRef<Path>>(
         }
     }
 
-    ensure!(total_layers > 0, "Could not determine model block_count from GGUF metadata");
-    ensure!(split_at > 0 && split_at < total_layers, "split_at ({}) must be > 0 and < total_layers ({})", split_at, total_layers);
+    ensure!(
+        total_layers > 0,
+        "Could not determine model block_count from GGUF metadata"
+    );
+    ensure!(
+        split_at > 0 && split_at < total_layers,
+        "split_at ({}) must be > 0 and < total_layers ({})",
+        split_at,
+        total_layers
+    );
 
     let s1 = LayerSliceConfig::new(0, split_at - 1, total_layers)?;
     let s2 = LayerSliceConfig::new(split_at, total_layers - 1, total_layers)?;
@@ -481,6 +522,7 @@ struct SlicedTensor {
     is_identity_norm: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_stage_gguf(
     dest_path: &Path,
     version: u32,
@@ -663,7 +705,10 @@ fn write_stage_gguf(
         } else {
             let src_start = (src_data_offset + t.src_offset) as usize;
             let src_end = src_start + t.size_bytes as usize;
-            ensure!(src_end <= src_mmap.len(), "Source tensor offset exceeds mmap length");
+            ensure!(
+                src_end <= src_mmap.len(),
+                "Source tensor offset exceeds mmap length"
+            );
             writer.write_all(&src_mmap[src_start..src_end])?;
         }
     }
@@ -680,7 +725,11 @@ fn write_gguf_string<W: Write>(writer: &mut W, s: &str) -> Result<()> {
 
 fn read_gguf_string<R: Read>(reader: &mut R) -> Result<String> {
     let len = reader.read_u64::<LittleEndian>()? as usize;
-    ensure!(len <= 64 * 1024, "GGUF string length ({}) exceeds 64KB safety limit", len);
+    ensure!(
+        len <= 64 * 1024,
+        "GGUF string length ({}) exceeds 64KB safety limit",
+        len
+    );
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).to_string())
@@ -688,23 +737,38 @@ fn read_gguf_string<R: Read>(reader: &mut R) -> Result<String> {
 
 fn skip_gguf_val<R: Read + Seek>(reader: &mut R, val_type: u32) -> Result<()> {
     match val_type {
-        0 | 1 | 7 => { reader.seek(SeekFrom::Current(1))?; }
-        2 | 3 => { reader.seek(SeekFrom::Current(2))?; }
-        4 | 5 | 6 => { reader.seek(SeekFrom::Current(4))?; }
+        0 | 1 | 7 => {
+            reader.seek(SeekFrom::Current(1))?;
+        }
+        2 | 3 => {
+            reader.seek(SeekFrom::Current(2))?;
+        }
+        4..=6 => {
+            reader.seek(SeekFrom::Current(4))?;
+        }
         8 => {
             let len = reader.read_u64::<LittleEndian>()?;
-            ensure!(len <= (i64::MAX as u64), "GGUF string length exceeds seek bounds");
+            ensure!(
+                len <= (i64::MAX as u64),
+                "GGUF string length exceeds seek bounds"
+            );
             reader.seek(SeekFrom::Current(len as i64))?;
         }
         9 => {
             let elem_type = reader.read_u32::<LittleEndian>()?;
             let count = reader.read_u64::<LittleEndian>()?;
-            ensure!(count <= 1_000_000, "GGUF array count ({}) exceeds maximum safe limit", count);
+            ensure!(
+                count <= 1_000_000,
+                "GGUF array count ({}) exceeds maximum safe limit",
+                count
+            );
             for _ in 0..count {
                 skip_gguf_val(reader, elem_type)?;
             }
         }
-        10 | 11 | 12 => { reader.seek(SeekFrom::Current(8))?; }
+        10..=12 => {
+            reader.seek(SeekFrom::Current(8))?;
+        }
         _ => bail!("Unknown GGUF val_type: {}", val_type),
     }
     Ok(())
@@ -740,46 +804,46 @@ fn reindex_tensor_name(name: &str, old_idx: usize, new_idx: usize) -> String {
 
 pub fn ggml_tensor_size_bytes(ggml_type: u32, element_count: u64) -> u64 {
     let (blck_size, type_size): (u64, u64) = match ggml_type {
-        0 => (1, 4),     // F32
-        1 => (1, 2),     // F16
-        2 => (32, 18),   // Q4_0
-        3 => (32, 20),   // Q4_1
-        6 => (32, 22),   // Q5_0
-        7 => (32, 24),   // Q5_1
-        8 => (32, 34),   // Q8_0
-        9 => (32, 36),   // Q8_1
-        10 => (256, 84), // Q2_K
-        11 => (256, 110),// Q3_K
-        12 => (256, 144),// Q4_K
-        13 => (256, 176),// Q5_K
-        14 => (256, 210),// Q6_K
-        15 => (256, 292),// Q8_K
-        16 => (256, 66), // IQ2_XXS
-        17 => (256, 74), // IQ2_XS
-        18 => (256, 98), // IQ3_XXS
-        19 => (256, 48), // IQ1_S
-        20 => (32, 18),  // IQ4_NL
-        21 => (256, 110),// IQ3_S
-        22 => (256, 82), // IQ2_S
-        23 => (256, 136),// IQ4_XS
-        24 => (1, 1),    // I8
-        25 => (1, 2),    // I16
-        26 => (1, 4),    // I32
-        27 => (1, 8),    // I64
-        28 => (1, 8),    // F64
-        29 => (256, 70), // IQ1_M
-        30 => (1, 2),    // BF16
-        39 => (32, 18),  // MXFP4
-        40 => (32, 18),  // NVFP4
-        41 => (32, 6),   // Q1_0
-        42 => (32, 10),  // Q2_0
+        0 => (1, 4),      // F32
+        1 => (1, 2),      // F16
+        2 => (32, 18),    // Q4_0
+        3 => (32, 20),    // Q4_1
+        6 => (32, 22),    // Q5_0
+        7 => (32, 24),    // Q5_1
+        8 => (32, 34),    // Q8_0
+        9 => (32, 36),    // Q8_1
+        10 => (256, 84),  // Q2_K
+        11 => (256, 110), // Q3_K
+        12 => (256, 144), // Q4_K
+        13 => (256, 176), // Q5_K
+        14 => (256, 210), // Q6_K
+        15 => (256, 292), // Q8_K
+        16 => (256, 66),  // IQ2_XXS
+        17 => (256, 74),  // IQ2_XS
+        18 => (256, 98),  // IQ3_XXS
+        19 => (256, 48),  // IQ1_S
+        20 => (32, 18),   // IQ4_NL
+        21 => (256, 110), // IQ3_S
+        22 => (256, 82),  // IQ2_S
+        23 => (256, 136), // IQ4_XS
+        24 => (1, 1),     // I8
+        25 => (1, 2),     // I16
+        26 => (1, 4),     // I32
+        27 => (1, 8),     // I64
+        28 => (1, 8),     // F64
+        29 => (256, 70),  // IQ1_M
+        30 => (1, 2),     // BF16
+        39 => (32, 18),   // MXFP4
+        40 => (32, 18),   // NVFP4
+        41 => (32, 6),    // Q1_0
+        42 => (32, 10),   // Q2_0
         _ => (1, 2),
     };
 
     if blck_size == 1 {
         element_count * type_size
     } else {
-        ((element_count + blck_size - 1) / blck_size) * type_size
+        element_count.div_ceil(blck_size) * type_size
     }
 }
 
@@ -969,13 +1033,21 @@ mod tests {
         }
 
         // 16 floats for blk.0
-        for _ in 0..16 { writer.write_all(&0.5f32.to_le_bytes())?; }
+        for _ in 0..16 {
+            writer.write_all(&0.5f32.to_le_bytes())?;
+        }
         // 16 floats for blk.1
-        for _ in 0..16 { writer.write_all(&1.5f32.to_le_bytes())?; }
+        for _ in 0..16 {
+            writer.write_all(&1.5f32.to_le_bytes())?;
+        }
         // 16 floats for blk.2
-        for _ in 0..16 { writer.write_all(&2.5f32.to_le_bytes())?; }
-        // 4 floats for output_norm (original weight = 3.14)
-        for _ in 0..4 { writer.write_all(&3.14f32.to_le_bytes())?; }
+        for _ in 0..16 {
+            writer.write_all(&2.5f32.to_le_bytes())?;
+        }
+        // 4 floats for output_norm (original weight = 2.75)
+        for _ in 0..4 {
+            writer.write_all(&2.75f32.to_le_bytes())?;
+        }
 
         writer.flush()?;
         Ok(())
@@ -1000,7 +1072,8 @@ mod tests {
         let s1 = LayerSliceConfig::new(1, 1, 3).unwrap();
         let s2 = LayerSliceConfig::new(2, 2, 3).unwrap();
 
-        let stages = slice_gguf_for_multi_stage(&src_model, &out_dir, &[s0, s1, s2]).expect("Multi-stage slicing failed");
+        let stages = slice_gguf_for_multi_stage(&src_model, &out_dir, &[s0, s1, s2])
+            .expect("Multi-stage slicing failed");
         assert_eq!(stages.len(), 3);
 
         for p in &stages {
@@ -1047,7 +1120,11 @@ mod tests {
         let bytes = loader
             .get_tensor_bytes(name)
             .unwrap_or_else(|| panic!("tensor {name} missing from {}", path.display()));
-        assert_eq!(bytes.len() % 4, 0, "F32 tensor should be a multiple of 4 bytes");
+        assert_eq!(
+            bytes.len() % 4,
+            0,
+            "F32 tensor should be a multiple of 4 bytes"
+        );
         bytes
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -1116,7 +1193,7 @@ mod tests {
         // must neutralise the final norm.
         let stages = slice_gguf_for_multi_stage(
             &src,
-            &dir.join("out"),
+            dir.join("out"),
             &[
                 LayerSliceConfig::new(0, 0, 3).unwrap(),
                 LayerSliceConfig::new(1, 1, 3).unwrap(),
@@ -1135,7 +1212,7 @@ mod tests {
         // Stage 3 is terminal: it must keep the model's real weights (3.14).
         let stage3_norm = read_tensor_f32(&stages[2], "output_norm.weight");
         assert!(
-            stage3_norm.iter().all(|v| (*v - 3.14).abs() < 1e-5),
+            stage3_norm.iter().all(|v| (*v - 2.75).abs() < 1e-5),
             "terminal stage must preserve the genuine output_norm, got {stage3_norm:?}"
         );
 
@@ -1148,7 +1225,7 @@ mod tests {
         let src = dir.join("model.gguf");
         create_synthetic_3layer_gguf(&src).unwrap();
 
-        let (s1, s2) = slice_gguf_for_pipeline(&src, &dir.join("out"), 1).expect("slicing failed");
+        let (s1, s2) = slice_gguf_for_pipeline(&src, dir.join("out"), 1).expect("slicing failed");
 
         let s1_norm = read_tensor_f32(&s1, "output_norm.weight");
         assert!(
@@ -1158,7 +1235,7 @@ mod tests {
 
         let s2_norm = read_tensor_f32(&s2, "output_norm.weight");
         assert!(
-            s2_norm.iter().all(|v| (*v - 3.14).abs() < 1e-5),
+            s2_norm.iter().all(|v| (*v - 2.75).abs() < 1e-5),
             "stage 2 of a 2-way split is terminal and must keep the real norm, got {s2_norm:?}"
         );
 
@@ -1175,7 +1252,7 @@ mod tests {
 
         let stages = slice_gguf_for_multi_stage(
             &src,
-            &dir.join("out"),
+            dir.join("out"),
             &[
                 LayerSliceConfig::new(0, 0, 3).unwrap(),
                 LayerSliceConfig::new(1, 1, 3).unwrap(),
@@ -1206,7 +1283,7 @@ mod tests {
         // Stage 2 covers layer 1, which must be re-indexed to blk.0.
         let stages = slice_gguf_for_multi_stage(
             &src,
-            &dir.join("out"),
+            dir.join("out"),
             &[
                 LayerSliceConfig::new(0, 0, 3).unwrap(),
                 LayerSliceConfig::new(1, 2, 3).unwrap(),
@@ -1215,11 +1292,7 @@ mod tests {
         .expect("slicing failed");
 
         let loader = crate::slice_loader::GgufSliceLoader::open(&stages[1]).unwrap();
-        let names: Vec<String> = loader
-            .all_tensors
-            .iter()
-            .map(|t| t.name.clone())
-            .collect();
+        let names: Vec<String> = loader.all_tensors.iter().map(|t| t.name.clone()).collect();
 
         assert!(
             names.iter().any(|n| n == "blk.0.attn_q.weight"),

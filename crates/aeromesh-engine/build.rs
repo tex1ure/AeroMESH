@@ -17,10 +17,10 @@ const LINK_LIB_STEMS: [&str; 2] = ["llama", "ggml"];
 
 fn import_lib_names(stem: &str) -> [String; 4] {
     [
-        format!("{stem}.lib"),        // MSVC import library
-        format!("{stem}.dll.a"),      // MinGW/GNU import library
-        format!("lib{stem}.dll.a"),   // MinGW/GNU import library (prefixed)
-        format!("lib{stem}.a"),       // static/archived form
+        format!("{stem}.lib"),      // MSVC import library
+        format!("{stem}.dll.a"),    // MinGW/GNU import library
+        format!("lib{stem}.dll.a"), // MinGW/GNU import library (prefixed)
+        format!("lib{stem}.a"),     // static/archived form
     ]
 }
 
@@ -52,8 +52,20 @@ fn main() {
     }
 
     search_dirs.push(root_dir.join("bin"));
-    search_dirs.push(root_dir.join("llama.cpp").join("build").join("src").join("Release"));
-    search_dirs.push(root_dir.join("llama.cpp").join("build").join("bin").join("Release"));
+    search_dirs.push(
+        root_dir
+            .join("llama.cpp")
+            .join("build")
+            .join("src")
+            .join("Release"),
+    );
+    search_dirs.push(
+        root_dir
+            .join("llama.cpp")
+            .join("build")
+            .join("bin")
+            .join("Release"),
+    );
     search_dirs.push(root_dir.join("target").join("release"));
     search_dirs.push(root_dir.join("target").join("debug"));
 
@@ -62,7 +74,10 @@ fn main() {
         if !dir.is_dir() {
             continue;
         }
-        if LINK_LIB_STEMS.iter().any(|stem| dir_has_import_lib(dir, stem)) {
+        if LINK_LIB_STEMS
+            .iter()
+            .any(|stem| dir_has_import_lib(dir, stem))
+        {
             println!("cargo:rustc-link-search=native={}", dir.display());
             found_any = true;
         }

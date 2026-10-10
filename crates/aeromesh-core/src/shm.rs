@@ -1,8 +1,8 @@
+use anyhow::{ensure, Result};
+use memmap2::{MmapMut, MmapOptions};
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use anyhow::{ensure, Result};
-use memmap2::{MmapMut, MmapOptions};
 
 pub const SHM_MAGIC: &[u8; 4] = b"ASHM";
 pub const SHM_HEADER_SIZE: usize = 192; // Cache-line aligned 64B * 3
@@ -12,8 +12,8 @@ pub const TAIL_OFFSET: usize = 128;
 pub const CAP_OFFSET: usize = 8;
 
 const _: () = {
-    assert!(HEAD_OFFSET % std::mem::align_of::<AtomicUsize>() == 0);
-    assert!(TAIL_OFFSET % std::mem::align_of::<AtomicUsize>() == 0);
+    assert!(HEAD_OFFSET.is_multiple_of(std::mem::align_of::<AtomicUsize>()));
+    assert!(TAIL_OFFSET.is_multiple_of(std::mem::align_of::<AtomicUsize>()));
 };
 
 /// SPSC Memory-Mapped Lock-Free Ring Buffer
@@ -35,6 +35,7 @@ impl SharedMemoryRingBuffer {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path_ref)?;
 
         file.set_len(total_file_size)?;
@@ -42,7 +43,11 @@ impl SharedMemoryRingBuffer {
         let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
         // Initialize header if new, or reset if corrupt / capacity changed
-        let existing_cap = u64::from_le_bytes(mmap[CAP_OFFSET..CAP_OFFSET + 8].try_into().unwrap_or([0; 8])) as usize;
+        let existing_cap = u64::from_le_bytes(
+            mmap[CAP_OFFSET..CAP_OFFSET + 8]
+                .try_into()
+                .unwrap_or([0; 8]),
+        ) as usize;
         let is_valid = &mmap[0..4] == SHM_MAGIC && existing_cap == capacity;
 
         if !is_valid {
@@ -85,7 +90,12 @@ impl SharedMemoryRingBuffer {
             tail - head - 1
         };
 
-        ensure!(available >= len + 4, "SHM Ring Buffer Overflow (Available: {}, Requested: {})", available, len + 4);
+        ensure!(
+            available >= len + 4,
+            "SHM Ring Buffer Overflow (Available: {}, Requested: {})",
+            available,
+            len + 4
+        );
 
         // Write 4-byte length prefix
         let len_bytes = (len as u32).to_le_bytes();
@@ -138,7 +148,8 @@ impl SharedMemoryRingBuffer {
         self.read_raw(tail, &mut len_bytes);
         let len = u32::from_le_bytes(len_bytes) as usize;
 
-        let max_allowed = (self.capacity.saturating_sub(4)).min(crate::activation::MAX_ACTIVATION_PAYLOAD_BYTES as usize);
+        let max_allowed = (self.capacity.saturating_sub(4))
+            .min(crate::activation::MAX_ACTIVATION_PAYLOAD_BYTES as usize);
         ensure!(
             len <= max_allowed && len <= available - 4,
             "Shared memory length prefix ({}) exceeds valid bounds (available payload: {}, max allowed: {})",
@@ -204,8 +215,14 @@ mod tests {
         rb.tail().store(0, Ordering::Release);
 
         let res = rb.read_slice();
-        assert!(res.is_err(), "Must reject oversized length prefix without allocating");
-        assert!(res.unwrap_err().to_string().contains("exceeds valid bounds"));
+        assert!(
+            res.is_err(),
+            "Must reject oversized length prefix without allocating"
+        );
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds valid bounds"));
 
         let _ = std::fs::remove_file(&path);
     }

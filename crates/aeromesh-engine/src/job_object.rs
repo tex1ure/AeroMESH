@@ -1,11 +1,11 @@
+use anyhow::Result;
 use std::os::windows::io::AsRawHandle;
 use std::process::Child;
-use anyhow::Result;
 use tracing::info;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 
@@ -40,7 +40,9 @@ impl SafeProcessJob {
 
         if res == 0 {
             unsafe { CloseHandle(job_handle) };
-            return Err(anyhow::anyhow!("Failed to configure JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE"));
+            return Err(anyhow::anyhow!(
+                "Failed to configure JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE"
+            ));
         }
 
         info!("🛡️ Windows Job Object initialized (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE active)");
@@ -51,9 +53,14 @@ impl SafeProcessJob {
         let raw_handle = child.as_raw_handle() as HANDLE;
         let res = unsafe { AssignProcessToJobObject(self.job_handle, raw_handle) };
         if res == 0 {
-            return Err(anyhow::anyhow!("Failed to assign child process to Windows Job Object"));
+            return Err(anyhow::anyhow!(
+                "Failed to assign child process to Windows Job Object"
+            ));
         }
-        info!(pid = child.id(), "Assigned child process to Windows Job Object");
+        info!(
+            pid = child.id(),
+            "Assigned child process to Windows Job Object"
+        );
         Ok(())
     }
 }
@@ -62,7 +69,9 @@ impl Drop for SafeProcessJob {
     fn drop(&mut self) {
         if !self.job_handle.is_null() {
             unsafe { CloseHandle(self.job_handle) };
-            info!("🛡️ Windows Job Object handle closed (kernel reclaimed all child processes & VRAM)");
+            info!(
+                "🛡️ Windows Job Object handle closed (kernel reclaimed all child processes & VRAM)"
+            );
         }
     }
 }

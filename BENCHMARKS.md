@@ -63,14 +63,14 @@ Standard distributed architectures stream weights or raw FP32 activations over c
 
 ## 3. Measured Empirical Telemetry (`DIST-01` Run)
 
-The following metrics were logged by the engine during the recorded run shown in `demo_distributed_2node_tailscale_direct.mp4`:
+The following metrics were logged by the engine during the distributed validation run (`DIST-01`):
 
 ### A. Network & Activation Payload Metrics
 - **Model Hidden Dimension ($d_{\text{model}}$)**: 5,120
 - **Raw FP32 Activation Size**: $5120 \times 4\text{ bytes} = 20,480\text{ bytes} = \mathbf{20.00\text{ KB/tok}}$
 - **Quantized INT8 Tensor Size**: $5120 \times 1\text{ byte} + 4\text{ bytes scale} = 5,124\text{ bytes} = \mathbf{5.004\text{ KB/tok}}$
-- **AeroMesh Packet Frame Header**: 42 bytes (`magic`, `version`, `seq_id`, `pos`, `layer_idx`, `dim`, `dtype`, `flags`)
-- **Total Wire Payload per Decode Token**: $5124 + 42 = \mathbf{5,166\text{ bytes}} = \mathbf{5.04\text{--}5.16\text{ KB/tok}}$
+- **AeroMesh Packet Frame Header**: 44 bytes (Protocol v4: `magic`, `version`, `session_id`, `sequence_id`, `seq_len`, `pos`, `stage_idx`, `total_stages`, `layer_idx`, `dim`, `dtype`, `flags`, `payload_bytes`)
+- **Total Wire Payload per Decode Token**: $5124 + 44 = \mathbf{5,168\text{ bytes}} = \mathbf{5.05\text{--}5.17\text{ KB/tok}}$
 - **Network Bandwidth Compression Ratio**: **74.77% reduction** (4x transmission throughput gain)
 - **Model Weights Transferred over Network**: **0.00 MB** (Zero-Weight Principle)
 - **Total Network Payload for 256-Token Generation**: **1.33 MB Wire**

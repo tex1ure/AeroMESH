@@ -47,14 +47,14 @@ AeroMESH implements a zero-trust, defense-in-depth security model across all thr
 
 ### B. FastAPI Web Gateway (Port 7860)
 - **Secret Ingestion**: Automatically reads `AEROMESH_API_KEY` from `.env` or system environment.
-- **Proxy Injection**: Injects `Authorization: Bearer <AEROMESH_API_KEY>` on all upstream `httpx` calls to coordinator port 8080 (`/v1/models`, `/v1/chat/completions`, `/api/cluster/status`, `/health`).
+- **Proxy Injection**: Injects `Authorization: Bearer <AEROMESH_API_KEY>` on all upstream `httpx` calls to coordinator port 8080 (`/v1/models`, `/v1/chat/completions`, `/api/chat/stream`, `/api/chat/abort`, `/api/model/switch`, `/api/cluster/status`, `/health`).
 - **Loopback Protection**: `verify_gateway_access` dependency ensures requests originate from loopback (`127.0.0.1` / `::1`) or provide valid credentials, preventing unauthorized LAN access if port 7860 is accidentally bound broadly.
 
 ### C. Worker TCP Handshake (Port 50052)
-- **Protocol Version**: Bumped to `PROTOCOL_VERSION = 3`.
-- **Legacy Packet Rejection**: Nodes running legacy protocol version 2 (lacking authentication fields) are immediately rejected with an explicit warning log:
+- **Protocol Version**: Current: `PROTOCOL_VERSION = 4`.
+- **Legacy Packet Rejection**: Nodes running legacy protocol versions (< 4) are immediately rejected with an explicit warning log:
   ```
-  Handshake rejected: received legacy protocol version 2 (missing auth_token). AeroMesh requires PROTOCOL_VERSION 3 with mutual authentication.
+  Handshake rejected: received legacy protocol version {} (< 4). AeroMesh requires PROTOCOL_VERSION 4 for multi-node pipeline support.
   ```
 - **Mutual Handshake Token**:
   - Derived from `AEROMESH_WORKER_SECRET` using SHA-256 into a 32-byte token (`[u8; 32]`).

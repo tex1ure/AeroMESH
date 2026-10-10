@@ -157,8 +157,7 @@ pub struct LlamaSamplerChainParams {
     pub no_perf: bool,
 }
 
-pub type LlamaLogCallback =
-    extern "C" fn(level: i32, text: *const c_char, user_data: *mut c_void);
+pub type LlamaLogCallback = extern "C" fn(level: i32, text: *const c_char, user_data: *mut c_void);
 
 /// A fully resolved set of llama.cpp entry points.
 ///
@@ -187,11 +186,8 @@ pub struct LlamaApi {
     pub llama_model_get_vocab: unsafe extern "C" fn(model: *const LlamaModel) -> *const LlamaVocab,
     pub llama_model_n_embd: unsafe extern "C" fn(model: *const LlamaModel) -> i32,
     pub llama_model_n_layer: unsafe extern "C" fn(model: *const LlamaModel) -> i32,
-    pub llama_model_desc: unsafe extern "C" fn(
-        model: *const LlamaModel,
-        buf: *mut c_char,
-        buf_size: usize,
-    ) -> i32,
+    pub llama_model_desc:
+        unsafe extern "C" fn(model: *const LlamaModel, buf: *mut c_char, buf_size: usize) -> i32,
 
     pub llama_tokenize: unsafe extern "C" fn(
         vocab: *const LlamaVocab,
@@ -222,14 +218,16 @@ pub struct LlamaApi {
         unparse_special: bool,
     ) -> i32,
 
-    pub llama_vocab_is_eog: unsafe extern "C" fn(vocab: *const LlamaVocab, token: LlamaToken) -> bool,
+    pub llama_vocab_is_eog:
+        unsafe extern "C" fn(vocab: *const LlamaVocab, token: LlamaToken) -> bool,
     pub llama_vocab_is_control:
         unsafe extern "C" fn(vocab: *const LlamaVocab, token: LlamaToken) -> bool,
     pub llama_vocab_bos: unsafe extern "C" fn(vocab: *const LlamaVocab) -> LlamaToken,
     pub llama_vocab_eos: unsafe extern "C" fn(vocab: *const LlamaVocab) -> LlamaToken,
     pub llama_vocab_n_tokens: unsafe extern "C" fn(vocab: *const LlamaVocab) -> i32,
 
-    pub llama_batch_init: unsafe extern "C" fn(n_tokens: i32, embd: i32, n_seq_max: i32) -> LlamaBatch,
+    pub llama_batch_init:
+        unsafe extern "C" fn(n_tokens: i32, embd: i32, n_seq_max: i32) -> LlamaBatch,
     pub llama_batch_free: unsafe extern "C" fn(batch: LlamaBatch),
 
     pub llama_decode: unsafe extern "C" fn(ctx: *mut LlamaContext, batch: LlamaBatch) -> i32,
@@ -243,9 +241,11 @@ pub struct LlamaApi {
         unsafe extern "C" fn(chain: *mut LlamaSampler, smpl: *mut LlamaSampler),
     pub llama_sampler_init_greedy: unsafe extern "C" fn() -> *mut LlamaSampler,
     pub llama_sampler_init_temp: unsafe extern "C" fn(t: f32) -> *mut LlamaSampler,
-    pub llama_sampler_init_top_p: unsafe extern "C" fn(p: f32, min_keep: usize) -> *mut LlamaSampler,
+    pub llama_sampler_init_top_p:
+        unsafe extern "C" fn(p: f32, min_keep: usize) -> *mut LlamaSampler,
     pub llama_sampler_init_top_k: unsafe extern "C" fn(k: i32) -> *mut LlamaSampler,
-    pub llama_sampler_init_min_p: unsafe extern "C" fn(p: f32, min_keep: usize) -> *mut LlamaSampler,
+    pub llama_sampler_init_min_p:
+        unsafe extern "C" fn(p: f32, min_keep: usize) -> *mut LlamaSampler,
     pub llama_sampler_init_penalties: unsafe extern "C" fn(
         penalty_last_n: i32,
         penalty_repeat: f32,
@@ -426,8 +426,18 @@ fn candidate_dll_dirs() -> Vec<PathBuf> {
     if let Ok(cwd) = std::env::current_dir() {
         dirs.push(cwd.join("bin"));
         dirs.push(cwd.join("..").join("bin"));
-        dirs.push(cwd.join("llama.cpp").join("build").join("bin").join("Release"));
-        dirs.push(cwd.join("llama.cpp").join("build").join("bin").join("Debug"));
+        dirs.push(
+            cwd.join("llama.cpp")
+                .join("build")
+                .join("bin")
+                .join("Release"),
+        );
+        dirs.push(
+            cwd.join("llama.cpp")
+                .join("build")
+                .join("bin")
+                .join("Debug"),
+        );
     }
 
     dirs
@@ -499,13 +509,10 @@ pub fn api() -> Result<&'static LlamaApi, String> {
                             );
                         }
                         match std::env::var("PATH") {
-                            Ok(path_var) => std::env::set_var(
-                                "PATH",
-                                format!("{};{}", abs.display(), path_var),
-                            ),
-                            Err(_) => {
-                                std::env::set_var("PATH", abs.display().to_string())
+                            Ok(path_var) => {
+                                std::env::set_var("PATH", format!("{};{}", abs.display(), path_var))
                             }
+                            Err(_) => std::env::set_var("PATH", abs.display().to_string()),
                         }
                     }
                     let _ = &dir;
@@ -601,9 +608,8 @@ fn load_and_resolve(dll: &std::path::Path) -> Result<LlamaApi, String> {
         use std::os::windows::ffi::OsStrExt;
         let mut wide: Vec<u16> = dll.as_os_str().encode_wide().collect();
         wide.push(0);
-        let handle = unsafe {
-            windows_sys::Win32::System::LibraryLoader::LoadLibraryW(wide.as_ptr())
-        };
+        let handle =
+            unsafe { windows_sys::Win32::System::LibraryLoader::LoadLibraryW(wide.as_ptr()) };
         if handle.is_null() {
             return Err(format!(
                 "LoadLibraryW failed (error {})",
@@ -615,7 +621,10 @@ fn load_and_resolve(dll: &std::path::Path) -> Result<LlamaApi, String> {
             .filter(|name| {
                 let c = std::ffi::CString::new(*name).unwrap();
                 unsafe {
-                    windows_sys::Win32::System::LibraryLoader::GetProcAddress(handle, c.as_ptr() as *const u8)
+                    windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+                        handle,
+                        c.as_ptr() as *const u8,
+                    )
                 }
                 .is_none()
             })
@@ -628,7 +637,7 @@ fn load_and_resolve(dll: &std::path::Path) -> Result<LlamaApi, String> {
                 missing.join(", ")
             ));
         }
-        unsafe { resolve_from(handle as *mut c_void) }
+        unsafe { resolve_from(handle) }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -657,9 +666,8 @@ fn load_ggml_symbols(dll: &std::path::Path) -> GgmlSymbols {
         use std::os::windows::ffi::OsStrExt;
         let mut wide: Vec<u16> = dll.as_os_str().encode_wide().collect();
         wide.push(0);
-        let handle = unsafe {
-            windows_sys::Win32::System::LibraryLoader::LoadLibraryW(wide.as_ptr())
-        };
+        let handle =
+            unsafe { windows_sys::Win32::System::LibraryLoader::LoadLibraryW(wide.as_ptr()) };
         if handle.is_null() {
             return out;
         }
@@ -685,7 +693,6 @@ fn load_ggml_symbols(dll: &std::path::Path) -> GgmlSymbols {
             if h.is_null() {
                 continue;
             }
-            let h = h as *mut c_void;
             if out.tensor_get.is_none() {
                 out.tensor_get = unsafe { lookup(h, "ggml_backend_tensor_get") };
             }
@@ -700,7 +707,7 @@ fn load_ggml_symbols(dll: &std::path::Path) -> GgmlSymbols {
             }
         }
 
-        let h = handle as *mut c_void;
+        let h = handle;
         if out.tensor_get.is_none() {
             out.tensor_get = unsafe { lookup(h, "ggml_backend_tensor_get") };
         }
@@ -765,7 +772,10 @@ pub fn load_ggml_backends(search_dirs: &[PathBuf]) {
     let syms = ggml_symbols();
     if let Some(load_from_path) = syms.load_all_from_path {
         for dir in search_dirs {
-            let clean = dir.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+            let clean = dir
+                .to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_string();
             if let Ok(c_dir) = std::ffi::CString::new(clean) {
                 load_from_path(c_dir.as_ptr());
             }
@@ -829,7 +839,10 @@ pub fn try_ensure_llama_initialized() -> Result<(), String> {
             }
 
             let count = ggml_backend_reg_count();
-            info!(backend_count = count, "✅ Native llama.cpp / GGML backend initialized");
+            info!(
+                backend_count = count,
+                "✅ Native llama.cpp / GGML backend initialized"
+            );
             Ok(())
         })
         .clone()
@@ -857,7 +870,11 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), names.len(), "duplicate symbol names in the list");
+        assert_eq!(
+            sorted.len(),
+            names.len(),
+            "duplicate symbol names in the list"
+        );
 
         // Every name the resolver looks up must be a real field of `LlamaApi`.
         // Referencing each as a field forces a compile error if a field is

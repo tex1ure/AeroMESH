@@ -232,16 +232,16 @@ curl.exe -s http://127.0.0.1:8080/api/cluster/status -H "Authorization: Bearer $
   "quantization": "Per-Row INT8 Dynamic Scaling (75% Wire Reduction)",
   "coordinator": {
     "model": "models/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
-    "local_layers": "0..=24",
-    "total_layers": 49,
+    "local_layers": "0..=23",
+    "total_layers": 48,
     "hidden_dim": 5120,
     "transport": "Tailscale Direct WireGuard"
   },
   "local_stage": {
     "layer_start": 0,
-    "layer_end": 24
+    "layer_end": 23
   },
-  "total_layers": 49,
+  "total_layers": 48,
   "hidden_dim": 5120,
   "workers": ["100.101.147.24:50052"],
   "worker_nodes": ["100.101.147.24:50052"],
@@ -255,6 +255,25 @@ curl.exe -s http://127.0.0.1:8080/api/cluster/status -H "Authorization: Bearer $
 
 ## 7. Gateway Proxy Architecture (`app.py` :7860)
 
-- **Security Boundary**: The FastAPI application on port 7860 handles static asset hosting and acts as a gateway proxy for all `/v1/*` and `/api/*` endpoints.
-- **Credential Injection**: Local browsers accessing the dashboard do not need direct access to `AEROMESH_API_KEY`. The gateway injects the `Authorization: Bearer` header on proxy requests to `:8080`.
-- **Cancellation**: The gateway provides an additional endpoint `POST /api/chat/abort` to signal stream termination and forward the abort to the Axum engine.
+The FastAPI web gateway (`app.py`) serves the single-page application and acts as an authenticated reverse proxy to the direct Axum coordinator API on port `8080`.
+
+### Security & Ingress Guards
+- **Loopback Enforcement & Auth**: The `verify_gateway_access` dependency permits loopback clients (`127.0.0.1` / `::1`) by default. External LAN/WAN requests must provide `Authorization: Bearer <AEROMESH_GATEWAY_API_KEY>`; if `AEROMESH_GATEWAY_API_KEY` is not configured, the gateway fails closed (`401 Unauthorized`) for all non-loopback connections.
+- **Credential Stripping & Injection**: Any caller-supplied `Authorization` header is stripped before the gateway injects the canonical `Authorization: Bearer <AEROMESH_API_KEY>` upstream to port `8080`, preventing token collisions or caller impersonation.
+- **Payload Bound**: Request payloads are bounded by a `MAX_REQUEST_BYTES = 2_097_152` (2 MB) ceiling to eliminate memory exhaustion attacks.
+
+### Full Gateway Route Surface
+| Endpoint | Method | Auth | Description |
+|---|---|---|---|
+| `/` | `GET` | Loopback / Gateway Key | Serves the cached single-page chat dashboard (`index.html`) |
+| `/static/*` | `GET` | Public | Static CSS (`liquid_glass.css`), JS (`app.js`, `liquid_mesh.js`), and assets with `Cache-Control: public, max-age=3600` |
+| `/health` | `GET` | Public | Gateway health check returning JSON status and upstream coordinator backend reachability |
+| `/ready` | `GET` | Public | Readiness probe returning `200 OK` when backend coordinator is online, or `503 Service Unavailable` when offline |
+| `/v1/models` | `GET` | Loopback / Gateway Key | Upstream models proxy; falls back to offline model discovery from `models/*.gguf` with `created` and `is_active` fields |
+| `/v1/chat/completions` | `POST` | Loopback / Gateway Key | OpenAI-compatible chat completion proxy with credential injection |
+| `/api/chat` | `POST` | Loopback / Gateway Key | Alias route for `/v1/chat/completions` |
+| `/api/chat/stream` | `POST` | Loopback / Gateway Key | Real-time SSE streaming chat route with infinite read timeout for long generations |
+| `/api/chat/abort` | `POST` | Loopback / Gateway Key | Signals generation abort to Axum backend, triggering instant cancellation of decode loop |
+| `/api/model/switch` | `POST` | Loopback / Gateway Key | Forwards model hot-swap and layer-slice repartition commands upstream |
+| `/api/cluster/status` | `GET` | Loopback / Gateway Key | Telemetry proxy reporting node connectivity, RTT, and tensor dimensions |
+| `/v1/{path:path}` | Any | Loopback / Gateway Key | Catch-all forwarder for arbitrary OpenAI API routes |

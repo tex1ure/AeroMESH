@@ -1,18 +1,18 @@
+use anyhow::{bail, ensure, Context, Result};
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use anyhow::{bail, ensure, Context, Result};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
-use sha2::{Digest, Sha256};
 
 use aeromesh_core::{
-    ActivationDtype, ActivationFrame, HandshakeRequest, HandshakeResponse,
-    PipelineTransport, PipelineTransportFactory, ShmPipelineTransport,
-    TokenResponseFrame, FLAG_CLEAR_KV, FLAG_IS_PROMPT,
+    ActivationDtype, ActivationFrame, HandshakeRequest, HandshakeResponse, PipelineTransport,
+    PipelineTransportFactory, ShmPipelineTransport, TokenResponseFrame, FLAG_CLEAR_KV,
+    FLAG_IS_PROMPT,
 };
 
 use crate::slice_loader::{
@@ -55,15 +55,16 @@ impl PipelineWorkerService {
             path_ref.to_path_buf()
         } else {
             let out_dir = path_ref.parent().unwrap_or_else(|| Path::new("models"));
-            let stage_idx = if slice_config.is_first_stage {
-                0
-            } else {
-                1
-            };
+            let stage_idx = if slice_config.is_first_stage { 0 } else { 1 };
             crate::gguf_slicer::slice_gguf_stage(path_ref, out_dir, &slice_config, stage_idx, 2)?
         };
 
-        let instance = LlamaPipelineInstance::open(&target_model_path, slice_config.clone(), n_gpu_layers, 4096)?;
+        let instance = LlamaPipelineInstance::open(
+            &target_model_path,
+            slice_config.clone(),
+            n_gpu_layers,
+            4096,
+        )?;
 
         info!(
             model = %target_model_path.display(),
@@ -80,7 +81,8 @@ impl PipelineWorkerService {
 
     pub async fn run_server(&self, host: &str, port: u16) -> Result<()> {
         let bind_addr = format!("{}:{}", host, port);
-        let listener = TcpListener::bind(&bind_addr).await
+        let listener = TcpListener::bind(&bind_addr)
+            .await
             .context(format!("Failed to bind worker TCP socket to {}", bind_addr))?;
 
         info!(
@@ -112,11 +114,23 @@ impl PipelineWorkerService {
 
                                     // Dynamic model hot-swap on dimension mismatch
                                     if frame.header.hidden_dim as usize != inst.hidden_dim {
-                                        let _ = hot_swap_worker_model(&mut inst, frame.header.hidden_dim, frame.header.layer_index);
+                                        let _ = hot_swap_worker_model(
+                                            &mut inst,
+                                            frame.header.hidden_dim,
+                                            frame.header.layer_index,
+                                        );
                                     }
 
-                                    let total_elements = match (seq_len as usize).checked_mul(frame.header.hidden_dim as usize) {
-                                        Some(elems) if elems <= (aeromesh_core::MAX_ACTIVATION_PAYLOAD_BYTES as usize) => elems,
+                                    let total_elements = match (seq_len as usize)
+                                        .checked_mul(frame.header.hidden_dim as usize)
+                                    {
+                                        Some(elems)
+                                            if elems
+                                                <= (aeromesh_core::MAX_ACTIVATION_PAYLOAD_BYTES
+                                                    as usize) =>
+                                        {
+                                            elems
+                                        }
                                         _ => {
                                             error!(
                                                 seq_len = seq_len,
@@ -132,7 +146,11 @@ impl PipelineWorkerService {
                                         continue;
                                     }
 
-                                    if let Err(e) = inst.evaluate_activations_to_logits(&dequant_buf, seq_len, start_pos) {
+                                    if let Err(e) = inst.evaluate_activations_to_logits(
+                                        &dequant_buf,
+                                        seq_len,
+                                        start_pos,
+                                    ) {
                                         error!(error = %e, "SHM Stage 2 forward pass error");
                                         continue;
                                     }
@@ -140,11 +158,12 @@ impl PipelineWorkerService {
                                     let eval_time_ms = start_time.elapsed().as_secs_f32() * 1000.0;
                                     // `None` keeps the sampler configured at model load;
                                     // the SHM path carries no per-request sampling config.
-                                    let next_token_id = inst
-                                        .sample_next_token(None, None, None, None)
-                                        .unwrap_or(0);
-                                    let piece_bytes = inst.token_to_piece(next_token_id).unwrap_or_default();
-                                    let token_text = String::from_utf8_lossy(&piece_bytes).to_string();
+                                    let next_token_id =
+                                        inst.sample_next_token(None, None, None, None).unwrap_or(0);
+                                    let piece_bytes =
+                                        inst.token_to_piece(next_token_id).unwrap_or_default();
+                                    let token_text =
+                                        String::from_utf8_lossy(&piece_bytes).to_string();
                                     let is_eos = inst.is_eog(next_token_id)
                                         || token_text.contains("<|im_end|>")
                                         || token_text.contains("<|endoftext|>")
@@ -180,7 +199,14 @@ impl PipelineWorkerService {
             let slice_clone = self.slice_config.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_coordinator_connection(&mut socket, peer_addr, instance_clone, slice_clone).await {
+                if let Err(e) = handle_coordinator_connection(
+                    &mut socket,
+                    peer_addr,
+                    instance_clone,
+                    slice_clone,
+                )
+                .await
+                {
                     error!(peer = %peer_addr, error = %e, "Pipeline worker connection closed with error");
                 }
             });
@@ -211,20 +237,39 @@ fn hot_swap_worker_model_stage(
     if let Ok(entries) = std::fs::read_dir(models_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.extension().and_then(|e| e.to_str()) == Some("gguf") && !p.to_string_lossy().contains("_stage") {
+            if p.extension().and_then(|e| e.to_str()) == Some("gguf")
+                && !p.to_string_lossy().contains("_stage")
+            {
                 if let Ok(loader) = GgufSliceLoader::open(&p) {
                     if loader.hidden_dim == target_hidden_dim {
                         let total_layers = loader.total_layers;
                         let w_start = worker_start.min(total_layers.saturating_sub(1));
                         let w_end = worker_end.min(total_layers.saturating_sub(1));
                         let new_slice = LayerSliceConfig::new(w_start, w_end, total_layers)?;
-                        let file_size_mb = std::fs::metadata(&p).map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
-                        let ngl = if file_size_mb <= 4500 { 999 } else { new_slice.layer_count() as i32 };
+                        let file_size_mb = std::fs::metadata(&p)
+                            .map(|m| m.len() / (1024 * 1024))
+                            .unwrap_or(0);
+                        let ngl = if file_size_mb <= 4500 {
+                            999
+                        } else {
+                            new_slice.layer_count() as i32
+                        };
 
                         let out_dir = p.parent().unwrap_or_else(|| Path::new("models"));
-                        let target_path = crate::gguf_slicer::slice_gguf_stage(&p, out_dir, &new_slice, stage_index, total_stages)?;
+                        let target_path = crate::gguf_slicer::slice_gguf_stage(
+                            &p,
+                            out_dir,
+                            &new_slice,
+                            stage_index,
+                            total_stages,
+                        )?;
 
-                        let new_inst = match LlamaPipelineInstance::open(&target_path, new_slice.clone(), ngl, 4096) {
+                        let new_inst = match LlamaPipelineInstance::open(
+                            &target_path,
+                            new_slice.clone(),
+                            ngl,
+                            4096,
+                        ) {
                             Ok(new_i) => {
                                 inst.close();
                                 new_i
@@ -232,7 +277,12 @@ fn hot_swap_worker_model_stage(
                             Err(first_err) => {
                                 warn!(error = %first_err, "Worker two-phase hot swap failed (VRAM pressure). Releasing active model to retry...");
                                 inst.close();
-                                LlamaPipelineInstance::open(&target_path, new_slice.clone(), ngl, 4096)?
+                                LlamaPipelineInstance::open(
+                                    &target_path,
+                                    new_slice.clone(),
+                                    ngl,
+                                    4096,
+                                )?
                             }
                         };
                         *inst = new_inst;
@@ -243,11 +293,25 @@ fn hot_swap_worker_model_stage(
             }
         }
     }
-    bail!("Worker could not find a local GGUF model in 'models/' matching hidden_dim={}", target_hidden_dim)
+    bail!(
+        "Worker could not find a local GGUF model in 'models/' matching hidden_dim={}",
+        target_hidden_dim
+    )
 }
 
-fn hot_swap_worker_model(inst: &mut LlamaPipelineInstance, target_hidden_dim: u32, boundary_layer: u16) -> Result<LayerSliceConfig> {
-    hot_swap_worker_model_stage(inst, target_hidden_dim, boundary_layer as usize, inst.total_layers.saturating_sub(1), 1, 2)
+fn hot_swap_worker_model(
+    inst: &mut LlamaPipelineInstance,
+    target_hidden_dim: u32,
+    boundary_layer: u16,
+) -> Result<LayerSliceConfig> {
+    hot_swap_worker_model_stage(
+        inst,
+        target_hidden_dim,
+        boundary_layer as usize,
+        inst.total_layers.saturating_sub(1),
+        1,
+        2,
+    )
 }
 
 async fn handle_coordinator_connection(
@@ -342,7 +406,10 @@ async fn handle_coordinator_connection(
                 }
                 Err(e) => {
                     warn!(peer = %peer_addr, error = %e, "🚨 Worker failed to hot-swap model");
-                    let resp = HandshakeResponse::reject(format!("Worker failed to hot-swap model: {}", e));
+                    let resp = HandshakeResponse::reject(format!(
+                        "Worker failed to hot-swap model: {}",
+                        e
+                    ));
                     let _ = socket.write_all(&resp.encode()).await;
                     let _ = socket.flush().await;
                     let _ = socket.shutdown().await;
@@ -354,7 +421,12 @@ async fn handle_coordinator_connection(
 
         // Connect downstream if downstream_peer is specified
         if !req.downstream_peer.is_empty() {
-            let peer_parts: Vec<&str> = req.downstream_peer.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let peer_parts: Vec<&str> = req
+                .downstream_peer
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
             if !peer_parts.is_empty() {
                 let next_peer_addr = peer_parts[0];
                 let remaining_peers = peer_parts[1..].join(",");
@@ -365,11 +437,17 @@ async fn handle_coordinator_connection(
                     "🔗 Intermediate Stage Worker: Connecting downstream to next pipeline peer..."
                 );
 
-                let mut ds_stream = match tokio::time::timeout(SOCKET_TIMEOUT, TcpStream::connect(next_peer_addr)).await {
+                let mut ds_stream = match tokio::time::timeout(
+                    SOCKET_TIMEOUT,
+                    TcpStream::connect(next_peer_addr),
+                )
+                .await
+                {
                     Ok(Ok(s)) => s,
                     Ok(Err(e)) => {
                         warn!(next_peer = next_peer_addr, error = %e, "Failed to connect to downstream pipeline peer");
-                        let resp = HandshakeResponse::reject(format!("Downstream connect failed: {}", e));
+                        let resp =
+                            HandshakeResponse::reject(format!("Downstream connect failed: {}", e));
                         let _ = socket.write_all(&resp.encode()).await;
                         let _ = socket.flush().await;
                         return Ok(());
@@ -386,11 +464,13 @@ async fn handle_coordinator_connection(
 
                 let next_stage = req.stage_index + 1;
                 let next_worker_start = req.worker_layer_end + 1;
-                let layers_per_stage = (req.total_layers as usize).div_ceil(req.total_stages as usize);
+                let layers_per_stage =
+                    (req.total_layers as usize).div_ceil(req.total_stages as usize);
                 let next_worker_end = if remaining_peers.is_empty() {
                     req.total_layers.saturating_sub(1)
                 } else {
-                    ((next_worker_start as usize + layers_per_stage - 1).min(req.total_layers as usize - 1)) as u32
+                    ((next_worker_start as usize + layers_per_stage - 1)
+                        .min(req.total_layers as usize - 1)) as u32
                 };
 
                 let downstream_req = HandshakeRequest {
@@ -420,20 +500,27 @@ async fn handle_coordinator_connection(
                 let resp_fut = HandshakeResponse::decode_async(&mut ds_stream);
                 match tokio::time::timeout(SOCKET_TIMEOUT, resp_fut).await {
                     Ok(Ok(resp)) if resp.accepted => {
-                        info!(next_peer = next_peer_addr, "✅ Downstream peer accepted handshake");
+                        info!(
+                            next_peer = next_peer_addr,
+                            "✅ Downstream peer accepted handshake"
+                        );
                         downstream_socket = Some(ds_stream);
                         downstream_peer_str = next_peer_addr.to_string();
                     }
                     Ok(Ok(resp)) => {
                         warn!(next_peer = next_peer_addr, error = %resp.error_message, "Downstream peer rejected handshake");
-                        let r = HandshakeResponse::reject(format!("Downstream peer rejected handshake: {}", resp.error_message));
+                        let r = HandshakeResponse::reject(format!(
+                            "Downstream peer rejected handshake: {}",
+                            resp.error_message
+                        ));
                         let _ = socket.write_all(&r.encode()).await;
                         let _ = socket.flush().await;
                         return Ok(());
                     }
                     Ok(Err(e)) => {
                         warn!(next_peer = next_peer_addr, error = %e, "Downstream handshake error");
-                        let r = HandshakeResponse::reject(format!("Downstream handshake error: {}", e));
+                        let r =
+                            HandshakeResponse::reject(format!("Downstream handshake error: {}", e));
                         let _ = socket.write_all(&r.encode()).await;
                         let _ = socket.flush().await;
                         return Ok(());
@@ -449,7 +536,8 @@ async fn handle_coordinator_connection(
             }
         }
 
-        let resp = HandshakeResponse::ok_with_layers(expected_token, current_slice.layer_count() as u32);
+        let resp =
+            HandshakeResponse::ok_with_layers(expected_token, current_slice.layer_count() as u32);
         socket.write_all(&resp.encode()).await?;
         socket.flush().await?;
         info!(peer = %peer_addr, "✅ Handshake accepted. Ready for activation stream.");
@@ -514,7 +602,13 @@ async fn handle_coordinator_connection(
         let seq_id = frame.header.sequence_id;
         let total_elements = (seq_len as usize)
             .checked_mul(frame.header.hidden_dim as usize)
-            .ok_or_else(|| anyhow::anyhow!("Integer overflow calculating total elements (seq_len={}, dim={})", seq_len, frame.header.hidden_dim))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Integer overflow calculating total elements (seq_len={}, dim={})",
+                    seq_len,
+                    frame.header.hidden_dim
+                )
+            })?;
         ensure!(
             total_elements <= (aeromesh_core::MAX_ACTIVATION_PAYLOAD_BYTES as usize),
             "Total elements ({}) exceeds safety limit ({})",
@@ -537,7 +631,12 @@ async fn handle_coordinator_connection(
 
         if let Some(ref mut ds) = downstream_socket {
             // Intermediate Node Execution: activations -> activations
-            inst.evaluate_activations_to_activations(&dequant_buf, seq_len, start_pos, &mut out_act_buf)?;
+            inst.evaluate_activations_to_activations(
+                &dequant_buf,
+                seq_len,
+                start_pos,
+                &mut out_act_buf,
+            )?;
             let eval_duration = start_time.elapsed();
             let eval_time_ms = eval_duration.as_secs_f32() * 1000.0;
             drop(inst);
@@ -640,264 +739,305 @@ async fn handle_coordinator_connection(
     Ok(())
 }
 
-    // ---------------------------------------------------------------------------
-    // Coordinator Pipeline Client (Zero-Weight Pipeline Stage 1 Orchestrator)
-    // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Coordinator Pipeline Client (Zero-Weight Pipeline Stage 1 Orchestrator)
+// ---------------------------------------------------------------------------
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub enum CoordinatorStatus {
-        Ready,
-        Loading(PathBuf),
-        Failed(String),
-        Closed,
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoordinatorStatus {
+    Ready,
+    Loading(PathBuf),
+    Failed(String),
+    Closed,
+}
 
-    pub struct PipelineCoordinatorClient {
-        pub model_path: PathBuf,
-        pub local_slice: LayerSliceConfig,
-        pub worker_addrs: Vec<SocketAddr>,
-        pub instance: Option<LlamaPipelineInstance>,
-        pub status: CoordinatorStatus,
-        pub hidden_dim: usize,
-        pub total_layers: usize,
-        pub transport: Option<PipelineTransport>,
-        pub target_dtype: ActivationDtype,
-        /// Sampling configuration applied to the next generation. Set from the
-        /// HTTP request via [`Self::set_sampling`]; `None` keeps the defaults
-        /// chosen at model load.
-        pub sampling: Option<SamplingParams>,
-        pub abort_flag: Arc<std::sync::atomic::AtomicBool>,
-    }
+pub struct PipelineCoordinatorClient {
+    pub model_path: PathBuf,
+    pub local_slice: LayerSliceConfig,
+    pub worker_addrs: Vec<SocketAddr>,
+    pub instance: Option<LlamaPipelineInstance>,
+    pub status: CoordinatorStatus,
+    pub hidden_dim: usize,
+    pub total_layers: usize,
+    pub transport: Option<PipelineTransport>,
+    pub target_dtype: ActivationDtype,
+    /// Sampling configuration applied to the next generation. Set from the
+    /// HTTP request via [`Self::set_sampling`]; `None` keeps the defaults
+    /// chosen at model load.
+    pub sampling: Option<SamplingParams>,
+    pub abort_flag: Arc<std::sync::atomic::AtomicBool>,
+}
 
-    impl PipelineCoordinatorClient {
-        pub fn new<P: AsRef<Path>>(
-            model_path: P,
-            worker_addrs: Vec<SocketAddr>,
-            custom_slice: Option<LayerSliceConfig>,
-            n_gpu_layers: i32,
-        ) -> Result<Self> {
-            let path_ref = model_path.as_ref();
-            let loader = GgufSliceLoader::open(path_ref)?;
-            let total_layers = loader.total_layers;
+impl PipelineCoordinatorClient {
+    pub fn new<P: AsRef<Path>>(
+        model_path: P,
+        worker_addrs: Vec<SocketAddr>,
+        custom_slice: Option<LayerSliceConfig>,
+        n_gpu_layers: i32,
+    ) -> Result<Self> {
+        let path_ref = model_path.as_ref();
+        let loader = GgufSliceLoader::open(path_ref)?;
+        let total_layers = loader.total_layers;
 
-            let local_slice = if let Some(slice) = custom_slice {
-                slice
-            } else {
-                let num_nodes = worker_addrs.len() + 1;
-                let splits = loader.compute_balanced_splits(num_nodes);
-                splits.first().cloned().unwrap_or(
-                    LayerSliceConfig::new(0, total_layers.saturating_sub(1) / 2, total_layers)?,
-                )
-            };
-
-            let num_stages = worker_addrs.len() + 1;
-            // Accept both the current `_split{N}_stage1.gguf` naming and the
-            // legacy `_stage1.gguf` / `_stage1_of_{M}.gguf` forms, so an existing
-            // on-disk partition is reused instead of being re-sliced.
-            let already_stage1 =
-                crate::gguf_slicer::is_stage1_slice_name(&path_ref.to_string_lossy());
-            let target_model_path = if already_stage1 {
-                path_ref.to_path_buf()
-            } else if !worker_addrs.is_empty() {
-                let out_dir = path_ref.parent().unwrap_or_else(|| Path::new("models"));
-                crate::gguf_slicer::slice_gguf_stage(path_ref, out_dir, &local_slice, 0, num_stages)?
-            } else {
-                path_ref.to_path_buf()
-            };
-
-            let instance = LlamaPipelineInstance::open(&target_model_path, local_slice.clone(), n_gpu_layers, 4096)?;
-            let hidden_dim = instance.hidden_dim;
-
-            info!(
-                model = %target_model_path.display(),
-                workers = worker_addrs.len(),
-                local_layers = %format!("{}..={}", local_slice.layer_start, local_slice.layer_end),
-                hidden_dim = hidden_dim,
-                "Initialized Pipeline Coordinator Client"
-            );
-
-            Ok(Self {
-                model_path: target_model_path,
-                local_slice,
-                worker_addrs,
-                instance: Some(instance),
-                status: CoordinatorStatus::Ready,
-                hidden_dim,
+        let local_slice = if let Some(slice) = custom_slice {
+            slice
+        } else {
+            let num_nodes = worker_addrs.len() + 1;
+            let splits = loader.compute_balanced_splits(num_nodes);
+            splits.first().cloned().unwrap_or(LayerSliceConfig::new(
+                0,
+                total_layers.saturating_sub(1) / 2,
                 total_layers,
-                transport: None,
-                target_dtype: activation_dtype_from_env(),
-                sampling: None,
-                abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            })
-        }
+            )?)
+        };
 
-        /// Records the sampling configuration for the next generation.
-        ///
-        /// Values are clamped to llama.cpp's accepted ranges; unset fields keep
-        /// the model-load defaults for the active model.
-        pub fn set_sampling(&mut self, requested: SamplingParams) {
-            self.sampling = Some(requested);
-        }
+        let num_stages = worker_addrs.len() + 1;
+        // Accept both the current `_split{N}_stage1.gguf` naming and the
+        // legacy `_stage1.gguf` / `_stage1_of_{M}.gguf` forms, so an existing
+        // on-disk partition is reused instead of being re-sliced.
+        let already_stage1 = crate::gguf_slicer::is_stage1_slice_name(&path_ref.to_string_lossy());
+        let target_model_path = if already_stage1 {
+            path_ref.to_path_buf()
+        } else if !worker_addrs.is_empty() {
+            let out_dir = path_ref.parent().unwrap_or_else(|| Path::new("models"));
+            crate::gguf_slicer::slice_gguf_stage(path_ref, out_dir, &local_slice, 0, num_stages)?
+        } else {
+            path_ref.to_path_buf()
+        };
 
-        /// Resolves the effective sampling configuration: the request's values
-        /// overlaid on the model-load defaults for this instance.
-        pub fn effective_sampling(&self) -> SamplingParams {
-            let base = self
+        let instance = LlamaPipelineInstance::open(
+            &target_model_path,
+            local_slice.clone(),
+            n_gpu_layers,
+            4096,
+        )?;
+        let hidden_dim = instance.hidden_dim;
+
+        info!(
+            model = %target_model_path.display(),
+            workers = worker_addrs.len(),
+            local_layers = %format!("{}..={}", local_slice.layer_start, local_slice.layer_end),
+            hidden_dim = hidden_dim,
+            "Initialized Pipeline Coordinator Client"
+        );
+
+        Ok(Self {
+            model_path: target_model_path,
+            local_slice,
+            worker_addrs,
+            instance: Some(instance),
+            status: CoordinatorStatus::Ready,
+            hidden_dim,
+            total_layers,
+            transport: None,
+            target_dtype: activation_dtype_from_env(),
+            sampling: None,
+            abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
+
+    /// Records the sampling configuration for the next generation.
+    ///
+    /// Values are clamped to llama.cpp's accepted ranges; unset fields keep
+    /// the model-load defaults for the active model.
+    pub fn set_sampling(&mut self, requested: SamplingParams) {
+        self.sampling = Some(requested);
+    }
+
+    /// Resolves the effective sampling configuration: the request's values
+    /// overlaid on the model-load defaults for this instance.
+    pub fn effective_sampling(&self) -> SamplingParams {
+        let base = self
+            .instance
+            .as_ref()
+            .map(|i| i.sampling_params())
+            .unwrap_or(SamplingParams::DEFAULT);
+        match self.sampling {
+            Some(req) => SamplingParams::resolve(
+                base,
+                Some(req.temperature),
+                Some(req.top_p),
+                Some(req.top_k),
+                Some(req.min_p),
+                Some(req.repeat_penalty),
+            ),
+            None => base,
+        }
+    }
+
+    pub fn get_instance_mut(&mut self) -> Result<&mut LlamaPipelineInstance> {
+        match &mut self.instance {
+            Some(inst) if inst.is_ready() => Ok(inst),
+            _ => {
+                let reason = match &self.status {
+                    CoordinatorStatus::Failed(e) => {
+                        format!("Model pipeline is unavailable (load failed: {})", e)
+                    }
+                    CoordinatorStatus::Loading(p) => {
+                        format!("Model pipeline is currently loading ({})", p.display())
+                    }
+                    CoordinatorStatus::Closed => "Model pipeline is closed".to_string(),
+                    CoordinatorStatus::Ready => {
+                        "Model pipeline instance is not initialized".to_string()
+                    }
+                };
+                bail!(reason)
+            }
+        }
+    }
+
+    pub fn get_instance(&self) -> Result<&LlamaPipelineInstance> {
+        match &self.instance {
+            Some(inst) if inst.is_ready() => Ok(inst),
+            _ => {
+                let reason = match &self.status {
+                    CoordinatorStatus::Failed(e) => {
+                        format!("Model pipeline is unavailable (load failed: {})", e)
+                    }
+                    CoordinatorStatus::Loading(p) => {
+                        format!("Model pipeline is currently loading ({})", p.display())
+                    }
+                    CoordinatorStatus::Closed => "Model pipeline is closed".to_string(),
+                    CoordinatorStatus::Ready => {
+                        "Model pipeline instance is not initialized".to_string()
+                    }
+                };
+                bail!(reason)
+            }
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.status == CoordinatorStatus::Ready
+            && self
                 .instance
                 .as_ref()
-                .map(|i| i.sampling_params())
-                .unwrap_or(SamplingParams::DEFAULT);
-            match self.sampling {
-                Some(req) => SamplingParams::resolve(
-                    base,
-                    Some(req.temperature),
-                    Some(req.top_p),
-                    Some(req.top_k),
-                    Some(req.min_p),
-                    Some(req.repeat_penalty),
-                ),
-                None => base,
-            }
+                .map(|i| i.is_ready())
+                .unwrap_or(false)
+    }
+
+    pub fn status(&self) -> &CoordinatorStatus {
+        &self.status
+    }
+
+    pub fn n_ctx(&self) -> usize {
+        self.instance.as_ref().map(|i| i.n_ctx).unwrap_or(4096)
+    }
+
+    pub fn detect_chat_format(&self) -> ChatTemplateFormat {
+        if let Ok(inst) = self.get_instance() {
+            inst.detect_chat_format()
+        } else {
+            ChatTemplateFormat::ChatML
+        }
+    }
+
+    pub fn switch_model<P: AsRef<Path>>(&mut self, new_model_path: P) -> Result<()> {
+        let path_ref = new_model_path.as_ref();
+        if !path_ref.exists() {
+            bail!("Model file not found at {:?}", path_ref);
         }
 
-        pub fn get_instance_mut(&mut self) -> Result<&mut LlamaPipelineInstance> {
-            match &mut self.instance {
-                Some(inst) if inst.is_ready() => Ok(inst),
-                _ => {
-                    let reason = match &self.status {
-                        CoordinatorStatus::Failed(e) => format!("Model pipeline is unavailable (load failed: {})", e),
-                        CoordinatorStatus::Loading(p) => format!("Model pipeline is currently loading ({})", p.display()),
-                        CoordinatorStatus::Closed => "Model pipeline is closed".to_string(),
-                        CoordinatorStatus::Ready => "Model pipeline instance is not initialized".to_string(),
-                    };
-                    bail!(reason)
+        // Step 1: Pre-validate GGUF structure and compute slice before modifying state
+        let loader = GgufSliceLoader::open(path_ref)?;
+        let total_layers = loader.total_layers;
+        let num_nodes = self.worker_addrs.len() + 1;
+        let splits = loader.compute_balanced_splits(num_nodes);
+        let local_slice = splits.first().cloned().unwrap_or(LayerSliceConfig::new(
+            0,
+            total_layers.saturating_sub(1) / 2,
+            total_layers,
+        )?);
+
+        let file_size_mb = std::fs::metadata(path_ref)
+            .map(|m| m.len() / (1024 * 1024))
+            .unwrap_or(0);
+        let ngl = if file_size_mb <= 4500 {
+            999
+        } else {
+            local_slice.layer_count() as i32
+        };
+
+        let num_stages = self.worker_addrs.len() + 1;
+        // Accept both the current `_split{N}_stage1.gguf` naming and the
+        // legacy `_stage1.gguf` / `_stage1_of_{M}.gguf` forms, so an existing
+        // on-disk partition is reused instead of being re-sliced.
+        let already_stage1 = crate::gguf_slicer::is_stage1_slice_name(&path_ref.to_string_lossy());
+        let target_model_path = if already_stage1 {
+            path_ref.to_path_buf()
+        } else if !self.worker_addrs.is_empty() {
+            let out_dir = path_ref.parent().unwrap_or_else(|| Path::new("models"));
+            crate::gguf_slicer::slice_gguf_stage(path_ref, out_dir, &local_slice, 0, num_stages)?
+        } else {
+            path_ref.to_path_buf()
+        };
+
+        // Step 2: Attempt two-phase transactional model loading (zero downtime switch)
+        let new_instance = match LlamaPipelineInstance::open(
+            &target_model_path,
+            local_slice.clone(),
+            ngl,
+            4096,
+        ) {
+            Ok(inst) => {
+                // Two-phase load succeeded! Safely close old instance and take new one
+                if let Some(mut old) = self.instance.take() {
+                    old.close();
                 }
+                inst
             }
-        }
-
-        pub fn get_instance(&self) -> Result<&LlamaPipelineInstance> {
-            match &self.instance {
-                Some(inst) if inst.is_ready() => Ok(inst),
-                _ => {
-                    let reason = match &self.status {
-                        CoordinatorStatus::Failed(e) => format!("Model pipeline is unavailable (load failed: {})", e),
-                        CoordinatorStatus::Loading(p) => format!("Model pipeline is currently loading ({})", p.display()),
-                        CoordinatorStatus::Closed => "Model pipeline is closed".to_string(),
-                        CoordinatorStatus::Ready => "Model pipeline instance is not initialized".to_string(),
-                    };
-                    bail!(reason)
+            Err(first_err) => {
+                // Two-phase load failed (likely CUDA VRAM constraint from having two models concurrent).
+                // Release active model to maximize available VRAM and retry single-model load.
+                warn!(
+                    error = %first_err,
+                    "Two-phase model load failed (likely VRAM pressure). Freeing active model to retry single-instance load..."
+                );
+                if let Some(mut old) = self.instance.take() {
+                    old.close();
                 }
-            }
-        }
+                self.status = CoordinatorStatus::Loading(target_model_path.clone());
 
-        pub fn is_ready(&self) -> bool {
-            self.status == CoordinatorStatus::Ready && self.instance.as_ref().map(|i| i.is_ready()).unwrap_or(false)
-        }
-
-        pub fn status(&self) -> &CoordinatorStatus {
-            &self.status
-        }
-
-        pub fn n_ctx(&self) -> usize {
-            self.instance.as_ref().map(|i| i.n_ctx).unwrap_or(4096)
-        }
-
-        pub fn detect_chat_format(&self) -> ChatTemplateFormat {
-            if let Ok(inst) = self.get_instance() {
-                inst.detect_chat_format()
-            } else {
-                ChatTemplateFormat::ChatML
-            }
-        }
-
-        pub fn switch_model<P: AsRef<Path>>(&mut self, new_model_path: P) -> Result<()> {
-            let path_ref = new_model_path.as_ref();
-            if !path_ref.exists() {
-                bail!("Model file not found at {:?}", path_ref);
-            }
-
-            // Step 1: Pre-validate GGUF structure and compute slice before modifying state
-            let loader = GgufSliceLoader::open(path_ref)?;
-            let total_layers = loader.total_layers;
-            let num_nodes = self.worker_addrs.len() + 1;
-            let splits = loader.compute_balanced_splits(num_nodes);
-            let local_slice = splits.first().cloned().unwrap_or(
-                LayerSliceConfig::new(0, total_layers.saturating_sub(1) / 2, total_layers)?,
-            );
-
-            let file_size_mb = std::fs::metadata(path_ref)
-                .map(|m| m.len() / (1024 * 1024))
-                .unwrap_or(0);
-            let ngl = if file_size_mb <= 4500 { 999 } else { local_slice.layer_count() as i32 };
-
-            let num_stages = self.worker_addrs.len() + 1;
-            // Accept both the current `_split{N}_stage1.gguf` naming and the
-            // legacy `_stage1.gguf` / `_stage1_of_{M}.gguf` forms, so an existing
-            // on-disk partition is reused instead of being re-sliced.
-            let already_stage1 =
-                crate::gguf_slicer::is_stage1_slice_name(&path_ref.to_string_lossy());
-            let target_model_path = if already_stage1 {
-                path_ref.to_path_buf()
-            } else if !self.worker_addrs.is_empty() {
-                let out_dir = path_ref.parent().unwrap_or_else(|| Path::new("models"));
-                crate::gguf_slicer::slice_gguf_stage(path_ref, out_dir, &local_slice, 0, num_stages)?
-            } else {
-                path_ref.to_path_buf()
-            };
-
-            // Step 2: Attempt two-phase transactional model loading (zero downtime switch)
-            let new_instance = match LlamaPipelineInstance::open(&target_model_path, local_slice.clone(), ngl, 4096) {
-                Ok(inst) => {
-                    // Two-phase load succeeded! Safely close old instance and take new one
-                    if let Some(mut old) = self.instance.take() {
-                        old.close();
-                    }
-                    inst
-                }
-                Err(first_err) => {
-                    // Two-phase load failed (likely CUDA VRAM constraint from having two models concurrent).
-                    // Release active model to maximize available VRAM and retry single-model load.
-                    warn!(
-                        error = %first_err,
-                        "Two-phase model load failed (likely VRAM pressure). Freeing active model to retry single-instance load..."
-                    );
-                    if let Some(mut old) = self.instance.take() {
-                        old.close();
-                    }
-                    self.status = CoordinatorStatus::Loading(target_model_path.clone());
-
-                    match LlamaPipelineInstance::open(&target_model_path, local_slice.clone(), ngl, 4096) {
-                        Ok(inst) => inst,
-                        Err(second_err) => {
-                            let err_msg = format!("Failed to load model {:?}: {}", target_model_path, second_err);
-                            error!(error = %err_msg, "Model switch failed. Transitioning coordinator to Failed state.");
-                            self.instance = None;
-                            self.status = CoordinatorStatus::Failed(err_msg.clone());
-                            self.transport = None;
-                            bail!(err_msg);
-                        }
+                match LlamaPipelineInstance::open(
+                    &target_model_path,
+                    local_slice.clone(),
+                    ngl,
+                    4096,
+                ) {
+                    Ok(inst) => inst,
+                    Err(second_err) => {
+                        let err_msg = format!(
+                            "Failed to load model {:?}: {}",
+                            target_model_path, second_err
+                        );
+                        error!(error = %err_msg, "Model switch failed. Transitioning coordinator to Failed state.");
+                        self.instance = None;
+                        self.status = CoordinatorStatus::Failed(err_msg.clone());
+                        self.transport = None;
+                        bail!(err_msg);
                     }
                 }
-            };
+            }
+        };
 
-            let hidden_dim = new_instance.hidden_dim;
-            self.model_path = target_model_path;
-            self.local_slice = local_slice;
-            self.instance = Some(new_instance);
-            self.status = CoordinatorStatus::Ready;
-            self.hidden_dim = hidden_dim;
-            self.total_layers = total_layers;
-            self.transport = None; // Force fresh transport handshake with new model dimensions
+        let hidden_dim = new_instance.hidden_dim;
+        self.model_path = target_model_path;
+        self.local_slice = local_slice;
+        self.instance = Some(new_instance);
+        self.status = CoordinatorStatus::Ready;
+        self.hidden_dim = hidden_dim;
+        self.total_layers = total_layers;
+        self.transport = None; // Force fresh transport handshake with new model dimensions
 
-            info!(
-                model = %self.model_path.display(),
-                hidden_dim = self.hidden_dim,
-                total_layers = self.total_layers,
-                "🔄 Switched active model in coordinator"
-            );
+        info!(
+            model = %self.model_path.display(),
+            hidden_dim = self.hidden_dim,
+            total_layers = self.total_layers,
+            "🔄 Switched active model in coordinator"
+        );
 
-            Ok(())
-        }
+        Ok(())
+    }
 
     pub async fn ensure_connected(&mut self) -> Result<()> {
         if self.transport.is_some() || self.worker_addrs.is_empty() {
@@ -917,7 +1057,12 @@ async fn handle_coordinator_connection(
         }
 
         // Remote TCP Connection & Handshake Execution
-        let mut stream = match tokio::time::timeout(SOCKET_TIMEOUT, TcpStream::connect(target_worker)).await {
+        let mut stream = match tokio::time::timeout(
+            SOCKET_TIMEOUT,
+            TcpStream::connect(target_worker),
+        )
+        .await
+        {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 warn!(worker = %target_worker, error = %e, "Worker connection failed. Running in coordinator local mode.");
@@ -988,7 +1133,9 @@ async fn handle_coordinator_connection(
                     return Ok(());
                 }
                 info!(worker = %target_worker, "✅ Handshake verified with mutual authentication. Connected to remote Stage 2 Worker via Tuned TCP Socket");
-                self.transport = Some(PipelineTransport::Tcp(aeromesh_core::TcpPipelineTransport::new(stream)?));
+                self.transport = Some(PipelineTransport::Tcp(
+                    aeromesh_core::TcpPipelineTransport::new(stream)?,
+                ));
             }
             Ok(Ok(resp)) => {
                 warn!(worker = %target_worker, error = %resp.error_message, "🚨 Worker rejected handshake");
@@ -1030,15 +1177,27 @@ async fn handle_coordinator_connection(
         println!("   AEROMESH DISTRIBUTED PIPELINE GENERATION             ");
         println!("========================================================");
         println!("  Pipeline Stages:    {} node(s)", total_stages);
-        println!("  Stage 0 (Coord):    Layers {}..={}", self.local_slice.layer_start, self.local_slice.layer_end);
+        println!(
+            "  Stage 0 (Coord):    Layers {}..={}",
+            self.local_slice.layer_start, self.local_slice.layer_end
+        );
         for (i, w) in self.worker_addrs.iter().enumerate() {
             println!("  Stage {} (Worker):   {}", i + 1, w);
         }
         println!("  Hidden Dimension:   {}", self.hidden_dim);
-        println!("  Activation Codec:   {:?} ({:.2} KB per decode step)", self.target_dtype,
-            (self.hidden_dim * self.target_dtype.bytes_per_element()) as f64 / 1024.0);
-        println!("  Sampling:           temp={:.3} top_p={:.3} top_k={} min_p={:.3} repeat={:.3}",
-            sampling.temperature, sampling.top_p, sampling.top_k, sampling.min_p, sampling.repeat_penalty);
+        println!(
+            "  Activation Codec:   {:?} ({:.2} KB per decode step)",
+            self.target_dtype,
+            (self.hidden_dim * self.target_dtype.bytes_per_element()) as f64 / 1024.0
+        );
+        println!(
+            "  Sampling:           temp={:.3} top_p={:.3} top_k={} min_p={:.3} repeat={:.3}",
+            sampling.temperature,
+            sampling.top_p,
+            sampling.top_k,
+            sampling.min_p,
+            sampling.repeat_penalty
+        );
         println!("  Transport:          {}", transport_tag);
         println!("  Session ID:         {}", session_id);
         println!("  Prompt:             {:?}", prompt);
@@ -1050,7 +1209,8 @@ async fn handle_coordinator_connection(
         let mut generated_text = String::new();
         let mut total_tokens = 0usize;
         let mut perf_metrics = Vec::new();
-        self.abort_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.abort_flag
+            .store(false, std::sync::atomic::Ordering::SeqCst);
 
         // Verify model readiness before proceeding
         self.get_instance()?;
@@ -1102,7 +1262,9 @@ async fn handle_coordinator_connection(
 
         // Step 2: Prefill Stage 1
         let prefill_start = Instant::now();
-        let prefill_activations = self.get_instance_mut()?.evaluate_tokens_to_activations(&prompt_tokens, 0)?;
+        let prefill_activations = self
+            .get_instance_mut()?
+            .evaluate_tokens_to_activations(&prompt_tokens, 0)?;
         let prefill_time = prefill_start.elapsed();
 
         // Phase 1 Boundary Watchdog: Inspect Coordinator prefill egress activations
@@ -1111,7 +1273,10 @@ async fn handle_coordinator_connection(
             &prefill_activations,
             &[prompt_len as usize, self.hidden_dim],
         ) {
-            tracing::error!("🚨 Coordinator prefill egress watchdog assertion failed: {}", e);
+            tracing::error!(
+                "🚨 Coordinator prefill egress watchdog assertion failed: {}",
+                e
+            );
         }
 
         let mut first_token_id = 0;
@@ -1202,7 +1367,10 @@ async fn handle_coordinator_connection(
             first_token_text = String::from_utf8_lossy(&piece_bytes).to_string();
         }
 
-        let is_first_stop = is_first_eos || STOP_TOKENS.iter().any(|&tag| first_token_text.contains(tag));
+        let is_first_stop = is_first_eos
+            || STOP_TOKENS
+                .iter()
+                .any(|&tag| first_token_text.contains(tag));
 
         if !is_first_stop && !first_token_text.is_empty() {
             print!("{}", first_token_text);
@@ -1211,7 +1379,9 @@ async fn handle_coordinator_connection(
             generated_text.push_str(&first_token_text);
             if let Some(ref tx) = token_tx {
                 if tx.send(first_token_text.as_bytes().to_vec()).await.is_err() {
-                    info!("🛑 Client disconnected / aborted during prefill. Halting generation loop.");
+                    info!(
+                        "🛑 Client disconnected / aborted during prefill. Halting generation loop."
+                    );
                     return Ok((generated_text, perf_metrics));
                 }
             }
@@ -1230,7 +1400,14 @@ async fn handle_coordinator_connection(
                     break;
                 }
                 let decode_tokens = [current_token_id];
-                if let Err(e) = self.get_instance_mut()?.evaluate_tokens_to_activations_into(&decode_tokens, current_pos, &mut decode_act_buf) {
+                if let Err(e) = self
+                    .get_instance_mut()?
+                    .evaluate_tokens_to_activations_into(
+                        &decode_tokens,
+                        current_pos,
+                        &mut decode_act_buf,
+                    )
+                {
                     self.transport = None;
                     bail!("Stage 1 decode forward pass error: {}", e);
                 }
@@ -1241,7 +1418,10 @@ async fn handle_coordinator_connection(
                     &decode_act_buf,
                     &[1, self.hidden_dim],
                 ) {
-                    tracing::error!("🚨 Coordinator decode egress watchdog assertion failed: {}", e);
+                    tracing::error!(
+                        "🚨 Coordinator decode egress watchdog assertion failed: {}",
+                        e
+                    );
                 }
 
                 let mut next_token_id = 0;
@@ -1332,7 +1512,10 @@ async fn handle_coordinator_connection(
 
                 // Phrase-level & character runaway degeneration guard:
                 if seq_id % 2 == 0 && is_degenerate_loop(&generated_text) {
-                    tracing::warn!("🔁 Repetition loop detected after {} tokens. Halting generation.", total_tokens);
+                    tracing::warn!(
+                        "🔁 Repetition loop detected after {} tokens. Halting generation.",
+                        total_tokens
+                    );
                     if let Some(ref tx) = token_tx {
                         let _ = tx.send(token_text.as_bytes().to_vec()).await;
                     }
@@ -1362,8 +1545,15 @@ async fn handle_coordinator_connection(
             dt => (self.hidden_dim * dt.bytes_per_element()) as f64,
         };
 
-        perf_metrics.push(format!("Prefill Latency: {:.2} ms ({} tokens)", prefill_time.as_secs_f32() * 1000.0, prompt_len));
-        perf_metrics.push(format!("Total Generation Time: {:.2} s", total_time.as_secs_f64()));
+        perf_metrics.push(format!(
+            "Prefill Latency: {:.2} ms ({} tokens)",
+            prefill_time.as_secs_f32() * 1000.0,
+            prompt_len
+        ));
+        perf_metrics.push(format!(
+            "Total Generation Time: {:.2} s",
+            total_time.as_secs_f64()
+        ));
         perf_metrics.push(format!("Tokens Generated: {}", total_tokens));
         perf_metrics.push(format!("Inference Speed: {:.2} tok/s", tok_per_sec));
         perf_metrics.push(format!(
@@ -1544,8 +1734,13 @@ mod tests_pipeline_safety {
             abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
-        let res = client.generate_pipeline("Hello", 10, 0.7, 0.9, 1234, None).await;
-        assert!(res.is_err(), "generate_pipeline must reject when in Failed state without crashing");
+        let res = client
+            .generate_pipeline("Hello", 10, 0.7, 0.9, 1234, None)
+            .await;
+        assert!(
+            res.is_err(),
+            "generate_pipeline must reject when in Failed state without crashing"
+        );
         let err_msg = res.unwrap_err().to_string();
         assert!(err_msg.contains("Model pipeline is unavailable (load failed:"));
     }
@@ -1570,7 +1765,11 @@ mod tests_pipeline_safety {
         assert!(res.is_err(), "switch_model must fail on non-existent file");
         // Old model instance must NOT have been taken or closed
         assert!(client.instance.is_some(), "Instance must still be present");
-        assert_eq!(client.status, CoordinatorStatus::Ready, "Status must remain Ready");
+        assert_eq!(
+            client.status,
+            CoordinatorStatus::Ready,
+            "Status must remain Ready"
+        );
     }
 
     #[test]

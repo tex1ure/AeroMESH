@@ -1,9 +1,9 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::process::Command;
 use std::time::{Duration, Instant};
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
@@ -100,12 +100,9 @@ impl TailscaleInspector {
 
     pub async fn probe_socket_link(target: SocketAddr) -> Result<PeerLinkQuality> {
         let start = Instant::now();
-        let stream = tokio::time::timeout(
-            Duration::from_millis(3000),
-            TcpStream::connect(target),
-        )
-        .await
-        .context(format!("Timeout connecting to Tailscale target {}", target))??;
+        let stream = tokio::time::timeout(Duration::from_millis(3000), TcpStream::connect(target))
+            .await
+            .context(format!("Timeout connecting to Tailscale target {}", target))??;
 
         // Ensure TCP_NODELAY is active for minimum latency
         stream.set_nodelay(true)?;
@@ -197,7 +194,9 @@ impl TailscaleInspector {
 
             let start = Instant::now();
             let rpc_online =
-                match tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(socket)).await {
+                match tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(socket))
+                    .await
+                {
                     Ok(Ok(stream)) => {
                         let _ = stream.set_nodelay(true);
                         true
@@ -246,14 +245,20 @@ impl TailscaleInspector {
 
                     if let Ok(addr) = addr_str.parse::<SocketAddr>() {
                         let start = Instant::now();
-                        if let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_millis(1500), TcpStream::connect(addr)).await {
+                        if let Ok(Ok(stream)) = tokio::time::timeout(
+                            Duration::from_millis(1500),
+                            TcpStream::connect(addr),
+                        )
+                        .await
+                        {
                             let _ = stream.set_nodelay(true);
                             rpc_online = true;
                             rtt_ms = Some((start.elapsed().as_micros() as f64) / 1000.0);
                         }
                     }
 
-                    let cluster_ready = rpc_online && is_direct && rtt_ms.is_some_and(|r| r <= 150.0);
+                    let cluster_ready =
+                        rpc_online && is_direct && rtt_ms.is_some_and(|r| r <= 150.0);
 
                     nodes.push(DiscoveredNodeStatus {
                         host_name: peer.host_name,

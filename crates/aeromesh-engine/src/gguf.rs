@@ -1,8 +1,8 @@
+use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use anyhow::{bail, Context, Result};
-use sha2::{Digest, Sha256};
 use tracing::info;
 
 #[derive(Debug, Clone)]
@@ -78,7 +78,11 @@ pub fn resolve_model_path<P: AsRef<Path>>(input_path: Option<P>) -> Result<PathB
     }
 
     // Auto-discover in current directory or models/ folder
-    for candidate_dir in &[Path::new("models"), Path::new("."), Path::new("..").join("models").as_path()] {
+    for candidate_dir in &[
+        Path::new("models"),
+        Path::new("."),
+        Path::new("..").join("models").as_path(),
+    ] {
         if candidate_dir.exists() {
             if let Ok(entries) = std::fs::read_dir(candidate_dir) {
                 let mut candidates: Vec<PathBuf> = Vec::new();
@@ -111,13 +115,17 @@ pub fn resolve_model_path<P: AsRef<Path>>(input_path: Option<P>) -> Result<PathB
 
 pub fn inspect_gguf_file<P: AsRef<Path>>(path: P) -> Result<GgufMetadata> {
     let resolved = resolve_model_path(Some(path))?;
-    let mut file = File::open(&resolved).context(format!("Failed to open GGUF model file at {:?}", resolved))?;
+    let mut file = File::open(&resolved)
+        .context(format!("Failed to open GGUF model file at {:?}", resolved))?;
     let file_size_bytes = file.metadata()?.len();
 
     let mut magic = [0u8; 4];
     file.read_exact(&mut magic)?;
     if &magic != b"GGUF" {
-        bail!("Invalid GGUF header magic. Expected 'GGUF', got {:?}", magic);
+        bail!(
+            "Invalid GGUF header magic. Expected 'GGUF', got {:?}",
+            magic
+        );
     }
 
     let mut ver_bytes = [0u8; 4];
@@ -127,7 +135,10 @@ pub fn inspect_gguf_file<P: AsRef<Path>>(path: P) -> Result<GgufMetadata> {
         bail!("Unsupported GGUF version: {}", version);
     }
     if version > 3 {
-        tracing::warn!("GGUF version {} is newer than expected (2..=3); attempting to parse", version);
+        tracing::warn!(
+            "GGUF version {} is newer than expected (2..=3); attempting to parse",
+            version
+        );
     }
 
     let mut count_bytes = [0u8; 8];

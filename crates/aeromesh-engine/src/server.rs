@@ -1,14 +1,11 @@
 //! AeroMESH Secure Control Surface & API Server
-//! 
+//!
 //! Threat Model (SEC-01):
 //! - Browser -> Web Gateway (7860): Binds 127.0.0.1 by default. Remote exposure requires Tailscale with ACLs.
 //! - Gateway -> Coordinator Axum (8080): Binds 127.0.0.1 by default. Authenticated via Bearer token matching AEROMESH_API_KEY.
 //! - Coordinator -> Worker TCP (50052): Authenticated via mutual SHA-256 handshake secret (AEROMESH_WORKER_SECRET) over Tailscale Direct WireGuard.
 //! - /health endpoint is explicitly exempted from auth for cluster health probes and liveness checks.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use axum::{
     error_handling::HandleErrorLayer,
@@ -23,6 +20,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
@@ -52,7 +52,11 @@ pub struct ApiErrorResponse {
 }
 
 impl ApiErrorResponse {
-    pub fn new(message: impl Into<String>, error_type: impl Into<String>, code: Option<&str>) -> Self {
+    pub fn new(
+        message: impl Into<String>,
+        error_type: impl Into<String>,
+        code: Option<&str>,
+    ) -> Self {
         Self {
             error: ApiErrorDetail {
                 message: message.into(),
@@ -82,7 +86,11 @@ impl ApiErrorResponse {
     pub fn unauthorized(msg: &str) -> (StatusCode, Json<Self>) {
         (
             StatusCode::UNAUTHORIZED,
-            Json(Self::new(msg, "authentication_error", Some("invalid_api_key"))),
+            Json(Self::new(
+                msg,
+                "authentication_error",
+                Some("invalid_api_key"),
+            )),
         )
     }
 
@@ -115,7 +123,10 @@ impl ApiErrorResponse {
         )
     }
 
-    pub fn service_unavailable(msg: impl Into<String>, code: Option<&str>) -> (StatusCode, Json<Self>) {
+    pub fn service_unavailable(
+        msg: impl Into<String>,
+        code: Option<&str>,
+    ) -> (StatusCode, Json<Self>) {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(Self::with_param(msg, "model_unavailable", None, code)),
@@ -125,7 +136,12 @@ impl ApiErrorResponse {
     pub fn not_found(msg: impl Into<String>, param: Option<&str>) -> (StatusCode, Json<Self>) {
         (
             StatusCode::NOT_FOUND,
-            Json(Self::with_param(msg, "invalid_request_error", param, Some("not_found"))),
+            Json(Self::with_param(
+                msg,
+                "invalid_request_error",
+                param,
+                Some("not_found"),
+            )),
         )
     }
 
@@ -200,7 +216,8 @@ impl Utf8StreamAccumulator {
         };
 
         if valid_len > 0 {
-            let valid_str = unsafe { std::str::from_utf8_unchecked(&self.buffer[..valid_len]) }.to_string();
+            let valid_str =
+                unsafe { std::str::from_utf8_unchecked(&self.buffer[..valid_len]) }.to_string();
             self.buffer.drain(..valid_len);
             valid_str
         } else {
@@ -270,7 +287,10 @@ impl ChatCompletionRequest {
                     Some("invalid_value"),
                 ));
             }
-            if !matches!(role.as_str(), "system" | "user" | "assistant" | "tool" | "function") {
+            if !matches!(
+                role.as_str(),
+                "system" | "user" | "assistant" | "tool" | "function"
+            ) {
                 return Err(ApiErrorResponse::unprocessable(
                     format!("Message at index {} has an invalid role '{}'. Allowed roles: 'system', 'user', 'assistant', 'tool', 'function'.", i, msg.role),
                     Some("messages.role"),
@@ -290,7 +310,10 @@ impl ChatCompletionRequest {
         if let Some(t) = self.temperature {
             if t.is_nan() || t.is_infinite() || !(0.0..=2.0).contains(&t) {
                 return Err(ApiErrorResponse::unprocessable(
-                    format!("'temperature' must be a finite number between 0.0 and 2.0, got {}", t),
+                    format!(
+                        "'temperature' must be a finite number between 0.0 and 2.0, got {}",
+                        t
+                    ),
                     Some("temperature"),
                     Some("invalid_value"),
                 ));
@@ -301,7 +324,10 @@ impl ChatCompletionRequest {
         if let Some(p) = self.top_p {
             if p.is_nan() || p.is_infinite() || !(0.0..=1.0).contains(&p) {
                 return Err(ApiErrorResponse::unprocessable(
-                    format!("'top_p' must be a finite number between 0.0 and 1.0, got {}", p),
+                    format!(
+                        "'top_p' must be a finite number between 0.0 and 1.0, got {}",
+                        p
+                    ),
                     Some("top_p"),
                     Some("invalid_value"),
                 ));
@@ -312,7 +338,10 @@ impl ChatCompletionRequest {
         if let Some(m) = self.max_tokens {
             if m == 0 || m > 32768 {
                 return Err(ApiErrorResponse::unprocessable(
-                    format!("'max_tokens' must be an integer between 1 and 32768, got {}", m),
+                    format!(
+                        "'max_tokens' must be an integer between 1 and 32768, got {}",
+                        m
+                    ),
                     Some("max_tokens"),
                     Some("invalid_value"),
                 ));
@@ -408,7 +437,11 @@ impl PipelineHttpServer {
             local_layer_end: coordinator.local_slice.layer_end,
             total_layers: coordinator.total_layers,
             hidden_dim: coordinator.hidden_dim,
-            workers: coordinator.worker_addrs.iter().map(|w| w.to_string()).collect(),
+            workers: coordinator
+                .worker_addrs
+                .iter()
+                .map(|w| w.to_string())
+                .collect(),
         };
 
         let abort_flag = coordinator.abort_flag.clone();
@@ -557,7 +590,9 @@ async fn auth_middleware(
     Ok(next.run(req).await)
 }
 
-async fn handle_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+async fn handle_health(
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<serde_json::Value>) {
     let (status_code, state_str) = match state.coordinator.try_lock() {
         Ok(coord) => match coord.status {
             CoordinatorStatus::Ready => (StatusCode::OK, "online_idle"),
@@ -649,7 +684,11 @@ async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_json::V
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
-                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if crate::gguf_slicer::is_stage_slice_name(&name) {
                     continue;
                 }
@@ -682,7 +721,11 @@ async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_json::V
 
 async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let is_busy = state.coordinator.try_lock().is_err();
-    let state_str = if is_busy { "online_generating" } else { "online_idle" };
+    let state_str = if is_busy {
+        "online_generating"
+    } else {
+        "online_idle"
+    };
 
     let current_model = state.model_name.lock().await.clone();
     let meta = match state.cluster_meta.read() {
@@ -773,7 +816,9 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
 
 async fn handle_chat_abort(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     info!("🛑 Received explicit generation abort request via /api/chat/abort");
-    state.abort_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    state
+        .abort_flag
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     Json(serde_json::json!({
         "status": "aborted",
         "message": "Generation abort signal acknowledged"
@@ -798,7 +843,11 @@ fn sanitize_chat_content(content: &str) -> String {
     clean.trim().to_string()
 }
 
-fn format_chat_prompt(messages: &[ChatMessage], format: ChatTemplateFormat, is_reasoning: bool) -> String {
+fn format_chat_prompt(
+    messages: &[ChatMessage],
+    format: ChatTemplateFormat,
+    is_reasoning: bool,
+) -> String {
     if messages.is_empty() {
         return String::new();
     }
@@ -853,9 +902,13 @@ fn format_chat_prompt(messages: &[ChatMessage], format: ChatTemplateFormat, is_r
         }
         ChatTemplateFormat::ChatML => {
             let mut prompt = String::new();
-            let has_system = messages.iter().any(|m| m.role.eq_ignore_ascii_case("system"));
+            let has_system = messages
+                .iter()
+                .any(|m| m.role.eq_ignore_ascii_case("system"));
             if !has_system && !is_reasoning {
-                prompt.push_str("<|im_start|>system\nYou are a helpful, intelligent AI assistant.<|im_end|>\n");
+                prompt.push_str(
+                    "<|im_start|>system\nYou are a helpful, intelligent AI assistant.<|im_end|>\n",
+                );
             }
 
             for msg in messages {
@@ -882,7 +935,9 @@ fn format_chat_prompt(messages: &[ChatMessage], format: ChatTemplateFormat, is_r
                 if clean.is_empty() {
                     continue;
                 }
-                prompt.push_str(&format!("<|start_header_id|>{role}<|end_header_id|>\n\n{clean}<|eot_id|>"));
+                prompt.push_str(&format!(
+                    "<|start_header_id|>{role}<|end_header_id|>\n\n{clean}<|eot_id|>"
+                ));
             }
             prompt.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
             prompt
@@ -926,7 +981,10 @@ async fn handle_chat_completions(
     // Auto-switch model if request specifies a different model
     if let Some(ref target_model) = req.model {
         let current_mn = state.model_name.lock().await.clone();
-        if target_model != &current_mn && (target_model.ends_with(".gguf") || std::path::Path::new("models").join(target_model).exists()) {
+        if target_model != &current_mn
+            && (target_model.ends_with(".gguf")
+                || std::path::Path::new("models").join(target_model).exists())
+        {
             let model_path = if std::path::Path::new(target_model).exists() {
                 std::path::PathBuf::from(target_model)
             } else {
@@ -935,9 +993,10 @@ async fn handle_chat_completions(
             let mut coord = state.coordinator.lock().await;
             if let Err(e) = coord.switch_model(&model_path) {
                 error!(error = %e, target_model = %target_model, "Failed to switch model on chat request");
-                return ApiErrorResponse::internal(
-                    format!("Failed to switch to requested model '{}': {}", target_model, e),
-                )
+                return ApiErrorResponse::internal(format!(
+                    "Failed to switch to requested model '{}': {}",
+                    target_model, e
+                ))
                 .into_response();
             } else {
                 let mut mn = state.model_name.lock().await;
@@ -969,7 +1028,8 @@ async fn handle_chat_completions(
                 CoordinatorStatus::Ready => "Model pipeline instance is not ready".to_string(),
             };
 
-            return ApiErrorResponse::service_unavailable(err_msg, Some("model_not_ready")).into_response();
+            return ApiErrorResponse::service_unavailable(err_msg, Some("model_not_ready"))
+                .into_response();
         }
         (coord.detect_chat_format(), coord.n_ctx())
     };
@@ -984,8 +1044,12 @@ async fn handle_chat_completions(
     let is_streaming = req.stream.unwrap_or(true);
     let prompt = format_chat_prompt(&req.messages, chat_format, is_reasoning);
 
-    let max_tokens = req.max_tokens.unwrap_or(if is_reasoning { 2048 } else { 512 });
-    let temp = req.temperature.unwrap_or(if is_reasoning { 0.6 } else { 0.7 });
+    let max_tokens = req
+        .max_tokens
+        .unwrap_or(if is_reasoning { 2048 } else { 512 });
+    let temp = req
+        .temperature
+        .unwrap_or(if is_reasoning { 0.6 } else { 0.7 });
     let top_p = req.top_p.unwrap_or(if is_reasoning { 0.95 } else { 0.9 });
     let session_id = req.session_id.unwrap_or_else(|| {
         SystemTime::now()
@@ -1040,7 +1104,10 @@ async fn handle_chat_completions(
             let chunk = ChatCompletionChunk {
                 id: format!("chatcmpl-{}", session_id),
                 object: "chat.completion.chunk".to_string(),
-                created: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+                created: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
                 model: model_name.clone(),
                 choices: vec![ChatCompletionChunkChoice {
                     index: 0,
@@ -1060,7 +1127,10 @@ async fn handle_chat_completions(
         let term_chunk = ChatCompletionChunk {
             id: format!("chatcmpl-{}", session_id),
             object: "chat.completion.chunk".to_string(),
-            created: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            created: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
             model: term_model,
             choices: vec![ChatCompletionChunkChoice {
                 index: 0,
@@ -1096,7 +1166,10 @@ async fn handle_chat_completions(
                 let resp = ChatCompletionResponse {
                     id: format!("chatcmpl-{}", session_id),
                     object: "chat.completion".to_string(),
-                    created: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+                    created: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
                     model: current_model,
                     choices: vec![ChatChoice {
                         index: 0,
@@ -1120,8 +1193,14 @@ mod tests {
 
     #[test]
     fn test_constant_time_eq_str() {
-        assert!(constant_time_eq_str("secret-token-12345", "secret-token-12345"));
-        assert!(!constant_time_eq_str("secret-token-12345", "secret-token-12346"));
+        assert!(constant_time_eq_str(
+            "secret-token-12345",
+            "secret-token-12345"
+        ));
+        assert!(!constant_time_eq_str(
+            "secret-token-12345",
+            "secret-token-12346"
+        ));
         assert!(!constant_time_eq_str("secret-token-12345", "secret-token"));
         assert!(!constant_time_eq_str("", "secret-token"));
         assert!(constant_time_eq_str("", ""));
@@ -1147,7 +1226,10 @@ mod tests {
         );
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         let json_val = serde_json::to_value(&body).unwrap();
-        assert_eq!(json_val["error"]["message"], "'temperature' must be a finite number between 0.0 and 2.0, got 3.5");
+        assert_eq!(
+            json_val["error"]["message"],
+            "'temperature' must be a finite number between 0.0 and 2.0, got 3.5"
+        );
         assert_eq!(json_val["error"]["type"], "invalid_request_error");
         assert_eq!(json_val["error"]["param"], "temperature");
         assert_eq!(json_val["error"]["code"], "invalid_value");
@@ -1207,11 +1289,24 @@ mod tests {
 
     #[test]
     fn test_chat_completion_validation_temperature_bounds_returns_422() {
-        for bad_temp in [-1.0f32, -0.01, 2.01, 100.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for bad_temp in [
+            -1.0f32,
+            -0.01,
+            2.01,
+            100.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
             let mut req = sample_valid_request();
             req.temperature = Some(bad_temp);
             let (status, Json(err)) = req.validate().unwrap_err();
-            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "Testing temp {}", bad_temp);
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Testing temp {}",
+                bad_temp
+            );
             assert_eq!(err.error.param, Some("temperature".to_string()));
             assert_eq!(err.error.code, Some("invalid_value".to_string()));
         }
@@ -1230,7 +1325,12 @@ mod tests {
             let mut req = sample_valid_request();
             req.top_p = Some(bad_p);
             let (status, Json(err)) = req.validate().unwrap_err();
-            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "Testing top_p {}", bad_p);
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Testing top_p {}",
+                bad_p
+            );
             assert_eq!(err.error.param, Some("top_p".to_string()));
             assert_eq!(err.error.code, Some("invalid_value".to_string()));
         }
@@ -1248,7 +1348,12 @@ mod tests {
             let mut req = sample_valid_request();
             req.max_tokens = Some(bad_max);
             let (status, Json(err)) = req.validate().unwrap_err();
-            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "Testing max_tokens {}", bad_max);
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Testing max_tokens {}",
+                bad_max
+            );
             assert_eq!(err.error.param, Some("max_tokens".to_string()));
             assert_eq!(err.error.code, Some("invalid_value".to_string()));
         }
@@ -1317,7 +1422,10 @@ mod tests {
 
     #[test]
     fn test_build_cors_layer_with_custom_env_origin() {
-        std::env::set_var("AEROMESH_ALLOWED_ORIGIN", "http://192.168.1.100:7860, http://lan-host:7860");
+        std::env::set_var(
+            "AEROMESH_ALLOWED_ORIGIN",
+            "http://192.168.1.100:7860, http://lan-host:7860",
+        );
         let _cors = build_cors_layer();
         std::env::remove_var("AEROMESH_ALLOWED_ORIGIN");
     }
@@ -1341,7 +1449,10 @@ mod tests {
         let Json(res) = handle_chat_abort(State(server.state.clone())).await;
         assert_eq!(res["status"], "aborted");
         assert_eq!(res["message"], "Generation abort signal acknowledged");
-        assert!(server.state.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(server
+            .state
+            .abort_flag
+            .load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -1409,12 +1520,13 @@ mod tests {
             .layer(health_limiter);
 
         let completions_router = Router::new()
-            .route("/v1/chat/completions", post(|| async { (StatusCode::OK, "chat_ok") }))
+            .route(
+                "/v1/chat/completions",
+                post(|| async { (StatusCode::OK, "chat_ok") }),
+            )
             .layer(completions_limiter);
 
-        let app = Router::new()
-            .merge(health_router)
-            .merge(completions_router);
+        let app = Router::new().merge(health_router).merge(completions_router);
 
         use tower::ServiceExt;
 
@@ -1426,7 +1538,9 @@ mod tests {
 
         let r1 = app.clone().oneshot(req1).await.unwrap();
         assert_eq!(r1.status(), StatusCode::OK);
-        let body_bytes1 = axum::body::to_bytes(r1.into_body(), usize::MAX).await.unwrap();
+        let body_bytes1 = axum::body::to_bytes(r1.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert_eq!(&body_bytes1[..], b"health_ok");
 
         let req2 = axum::http::Request::builder()
@@ -1437,8 +1551,9 @@ mod tests {
 
         let r2 = app.oneshot(req2).await.unwrap();
         assert_eq!(r2.status(), StatusCode::OK);
-        let body_bytes2 = axum::body::to_bytes(r2.into_body(), usize::MAX).await.unwrap();
+        let body_bytes2 = axum::body::to_bytes(r2.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert_eq!(&body_bytes2[..], b"chat_ok");
     }
 }
-

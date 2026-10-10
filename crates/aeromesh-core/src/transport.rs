@@ -1,7 +1,7 @@
+use anyhow::{bail, Result};
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::time::Duration;
-use anyhow::{bail, Result};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -23,7 +23,8 @@ impl TcpPipelineTransport {
     }
 
     pub async fn connect(addr: SocketAddr) -> Result<Self> {
-        let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(addr)).await??;
+        let stream =
+            tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(addr)).await??;
         stream.set_nodelay(true)?;
         Ok(Self { stream })
     }
@@ -66,8 +67,10 @@ impl ShmPipelineTransport {
         let forward_path = base_dir.join(format!("channel_{}_fwd.bin", channel_id));
         let backward_path = base_dir.join(format!("channel_{}_bwd.bin", channel_id));
 
-        let send_rb = SharedMemoryRingBuffer::create_or_open(&forward_path, DEFAULT_SHM_BUFFER_SIZE)?;
-        let recv_rb = SharedMemoryRingBuffer::create_or_open(&backward_path, DEFAULT_SHM_BUFFER_SIZE)?;
+        let send_rb =
+            SharedMemoryRingBuffer::create_or_open(&forward_path, DEFAULT_SHM_BUFFER_SIZE)?;
+        let recv_rb =
+            SharedMemoryRingBuffer::create_or_open(&backward_path, DEFAULT_SHM_BUFFER_SIZE)?;
 
         Ok(Self { send_rb, recv_rb })
     }
@@ -77,8 +80,10 @@ impl ShmPipelineTransport {
         let forward_path = base_dir.join(format!("channel_{}_fwd.bin", channel_id));
         let backward_path = base_dir.join(format!("channel_{}_bwd.bin", channel_id));
 
-        let recv_rb = SharedMemoryRingBuffer::create_or_open(&forward_path, DEFAULT_SHM_BUFFER_SIZE)?;
-        let send_rb = SharedMemoryRingBuffer::create_or_open(&backward_path, DEFAULT_SHM_BUFFER_SIZE)?;
+        let recv_rb =
+            SharedMemoryRingBuffer::create_or_open(&forward_path, DEFAULT_SHM_BUFFER_SIZE)?;
+        let send_rb =
+            SharedMemoryRingBuffer::create_or_open(&backward_path, DEFAULT_SHM_BUFFER_SIZE)?;
 
         Ok(Self { send_rb, recv_rb })
     }

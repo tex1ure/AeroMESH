@@ -1,8 +1,8 @@
+use crate::job_object::SafeProcessJob;
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use anyhow::{bail, Context, Result};
 use tracing::{error, info};
-use crate::job_object::SafeProcessJob;
 
 #[derive(Debug, Clone)]
 pub struct InferenceResult {
@@ -22,11 +22,23 @@ impl EngineSupervisor {
         let ws = workspace_root.as_ref();
         let candidates = [
             ws.join("bin"),
-            ws.join("llama.cpp").join("build").join("bin").join("Release"),
+            ws.join("llama.cpp")
+                .join("build")
+                .join("bin")
+                .join("Release"),
             ws.join("..").join("bin"),
-            ws.join("..").join("llama.cpp").join("build").join("bin").join("Release"),
+            ws.join("..")
+                .join("llama.cpp")
+                .join("build")
+                .join("bin")
+                .join("Release"),
             ws.join("..").join("..").join("bin"),
-            ws.join("..").join("..").join("llama.cpp").join("build").join("bin").join("Release"),
+            ws.join("..")
+                .join("..")
+                .join("llama.cpp")
+                .join("build")
+                .join("bin")
+                .join("Release"),
         ];
 
         let mut found_dir = None;
@@ -39,7 +51,10 @@ impl EngineSupervisor {
 
         let bin_dir = match found_dir {
             Some(d) => d,
-            None => bail!("Could not find llama.cpp binary directory in {:?} or parent directories", ws),
+            None => bail!(
+                "Could not find llama.cpp binary directory in {:?} or parent directories",
+                ws
+            ),
         };
 
         info!(bin_dir = %bin_dir.display(), "Engine supervisor initialized with binary directory");
@@ -65,10 +80,10 @@ impl EngineSupervisor {
             cmd.arg("--cache");
         }
 
-        let child = cmd
-            .current_dir(&self.bin_dir)
-            .spawn()
-            .context(format!("Failed to start ggml-rpc-server at {}:{}", host, port))?;
+        let child = cmd.current_dir(&self.bin_dir).spawn().context(format!(
+            "Failed to start ggml-rpc-server at {}:{}",
+            host, port
+        ))?;
 
         self.job.assign_child(&child)?;
         self.active_children.push(child);
@@ -102,7 +117,10 @@ impl EngineSupervisor {
         } else if exe_cli.exists() {
             exe_cli
         } else {
-            bail!("llama-completion.exe / llama-cli.exe not found in {:?}", self.bin_dir);
+            bail!(
+                "llama-completion.exe / llama-cli.exe not found in {:?}",
+                self.bin_dir
+            );
         };
 
         let mut cmd = Command::new(&exe);
@@ -148,11 +166,22 @@ impl EngineSupervisor {
 
         for line in stderr_str.lines() {
             let trimmed = line.trim();
-            if (trimmed.contains("RPC") || trimmed.contains("CUDA") || trimmed.contains("offload") || trimmed.contains("device") || trimmed.contains("remote") || trimmed.contains("backend"))
-                && !trimmed.contains("DEBUG") && !trimmed.is_empty() {
+            if (trimmed.contains("RPC")
+                || trimmed.contains("CUDA")
+                || trimmed.contains("offload")
+                || trimmed.contains("device")
+                || trimmed.contains("remote")
+                || trimmed.contains("backend"))
+                && !trimmed.contains("DEBUG")
+                && !trimmed.is_empty()
+            {
                 rpc_devices.push(trimmed.to_string());
             }
-            if trimmed.contains("eval time") || trimmed.contains("prompt eval time") || trimmed.contains("total time") || trimmed.contains("tokens per second") {
+            if trimmed.contains("eval time")
+                || trimmed.contains("prompt eval time")
+                || trimmed.contains("total time")
+                || trimmed.contains("tokens per second")
+            {
                 perf_metrics.push(trimmed.to_string());
             }
         }

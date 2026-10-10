@@ -77,7 +77,7 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 
 ## Screenshots
 
-AeroMESH includes a dependency-free claymorphic web dashboard for chat, model slicing, cluster telemetry, and live pipeline monitoring.
+AeroMESH includes a dependency-free web dashboard for chat, model slicing, cluster telemetry, and live pipeline monitoring. *(Screenshots below show UI mockups rendered during interface verification)*
 
 <table>
   <tr>
@@ -175,28 +175,30 @@ cargo run --bin aeromesh -- slice --model "models/model.gguf" --split 14
 
 Network transport uses custom fixed-header binary frames over low-latency TCP sockets with `TCP_NODELAY` forced on both endpoints. All integers are encoded in Big-Endian format.
 
-#### 1. ActivationHeader (42 Bytes Fixed Size)
+#### 1. ActivationHeader (44 Bytes Fixed Size)
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | `0..4` | `magic` | `[u8; 4]` | Protocol magic identifier: `b"AERO"` (`0x41 0x45 0x52 0x4F`) |
-| `4..6` | `version` | `u16` | Protocol version (current: `2`) |
+| `4..6` | `version` | `u16` | Protocol version (current: `4`) |
 | `6..14` | `session_id` | `u64` | Multi-turn chat session identifier |
 | `14..22` | `sequence_id` | `u64` | Monotonic token generation sequence counter |
 | `22..26` | `sequence_length` | `u32` | Sequence length $S$ ($S = 1$ for decode, $S > 1$ for prefill) |
 | `26..30` | `token_position` | `u32` | Absolute offset position within KV cache |
-| `30..32` | `layer_index` | `u16` | Boundary split layer index (e.g., `14` or `24`) |
-| `32..36` | `hidden_dim` | `u32` | Hidden dimension size $d_{\text{model}}$ (e.g., `1536`, `4096`, `5120`) |
-| `36..37` | `dtype` | `u8` | Data type encoding (`0`=FP32, `1`=FP16, `2`=BF16, `3`=INT8-Row, `4`=FP8) |
-| `37..38` | `flags` | `u8` | Bitmask: `0x01`=Clear KV, `0x02`=Prompt prefill, `0x04`=EOS |
-| `38..42` | `payload_bytes` | `u32` | Byte length of activation payload immediately following |
+| `30..31` | `stage_index` | `u8` | Current pipeline stage index (0-indexed) |
+| `31..32` | `total_stages` | `u8` | Total pipeline stages in cluster ($\ge 2$) |
+| `32..34` | `layer_index` | `u16` | Boundary split layer index (e.g., `23` or `24`) |
+| `34..38` | `hidden_dim` | `u32` | Hidden dimension size $d_{\text{model}}$ (e.g., `1536`, `4096`, `5120`) |
+| `38..39` | `dtype` | `u8` | Data type encoding (`0`=FP32, `1`=FP16, `2`=BF16, `3`=INT8-Row, `4`=FP8) |
+| `39..40` | `flags` | `u8` | Bitmask: `0x01`=Clear KV, `0x02`=Prompt prefill, `0x04`=EOS |
+| `40..44` | `payload_bytes` | `u32` | Byte length of activation payload immediately following |
 
 #### 2. TokenResponseFrame (35 Bytes Fixed Header + Variable Text Payload)
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | `0..4` | `magic` | `[u8; 4]` | Magic identifier: `b"ATOK"` (`0x41 0x54 0x4F 0x4B`) |
-| `4..6` | `version` | `u16` | Protocol version (`2`) |
+| `4..6` | `version` | `u16` | Protocol version (`4`) |
 | `6..14` | `session_id` | `u64` | Session ID |
 | `14..22` | `sequence_id` | `u64` | Sequence ID matching corresponding `ActivationHeader` |
 | `22..26` | `token_id` | `i32` | Sampled vocabulary token ID |
@@ -336,8 +338,9 @@ AeroMESH/
 ├── models/                       # Local directory for .gguf model files
 └── static/                       # Web UI assets
     ├── index.html                # Single-page interface markup
-    ├── css/claymorphic.css       # Dark claymorphic design system
-    └── js/app.js                 # UI logic, SSE parser, KaTeX math & telemetry HUD
+    ├── css/liquid_glass.css      # Dark liquid glass design system
+    ├── js/app.js                 # UI logic, SSE parser, KaTeX math & telemetry HUD
+    └── js/liquid_mesh.js         # Interactive background mesh canvas animation
 ```
 
 ---
@@ -472,12 +475,12 @@ Start the coordinator with the lower layer range and register Laptop B as a peer
 ```powershell
 cargo run --release --bin aeromesh -- serve `
     --model "models/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf" `
-    --layers 0..24 `
+    --layers 0..23 `
     --peers "100.101.147.24:50052" `
     --port 8080
 ```
 
-The coordinator slices layers 0 through 24 with Identity RMSNorm, executes the binary handshake with Laptop B, and starts an OpenAI-compatible HTTP API server on `http://0.0.0.0:8080`.
+The coordinator slices layers 0 through 23 with Identity RMSNorm, executes the binary handshake with Laptop B, and starts an OpenAI-compatible HTTP API server on `http://127.0.0.1:8080` (or `0.0.0.0` if passed `--host 0.0.0.0`).
 
 #### Step 4: Launch Web Interface
 
