@@ -145,7 +145,7 @@ function Initialize-AeroMeshSecrets {
             "AEROMESH_ACTIVATION_DTYPE=$($fileKeys['AEROMESH_ACTIVATION_DTYPE'])"
         )
         if ([string]::IsNullOrWhiteSpace($fileKeys['AEROMESH_ACTIVATION_DTYPE'])) {
-            $lines[4] = "AEROMESH_ACTIVATION_DTYPE=bf16"
+            $lines[4] = "AEROMESH_ACTIVATION_DTYPE=int8"
         }
         Set-Content -Path $envPath -Value $lines -Encoding UTF8
         Write-Host "  [*] Generated cluster secrets in .env" -ForegroundColor DarkGray
@@ -155,8 +155,8 @@ function Initialize-AeroMeshSecrets {
     $env:AEROMESH_WORKER_SECRET = $workerSecret
     $env:LLAMA_API_KEY = $apiKey
     if (-not $env:AEROMESH_ACTIVATION_DTYPE) {
-        $env:AEROMESH_ACTIVATION_DTYPE = "bf16"
-        [System.Environment]::SetEnvironmentVariable("AEROMESH_ACTIVATION_DTYPE", "bf16", "Process")
+        $env:AEROMESH_ACTIVATION_DTYPE = "int8"
+        [System.Environment]::SetEnvironmentVariable("AEROMESH_ACTIVATION_DTYPE", "int8", "Process")
     }
 }
 
@@ -363,7 +363,7 @@ Write-Host "  [-] Detected Model:      " -NoNewline -ForegroundColor Gray
 Write-Host "$modelName" -ForegroundColor Yellow
 Write-Host "  [-] Wire Weight Transfer:" -NoNewline -ForegroundColor Gray
 Write-Host " 0.0 MB (P2P activation streaming)" -ForegroundColor Cyan
-$activeCodec = if ($env:AEROMESH_ACTIVATION_DTYPE) { $env:AEROMESH_ACTIVATION_DTYPE.ToUpper() } else { "BF16" }
+$activeCodec = if ($env:AEROMESH_ACTIVATION_DTYPE) { $env:AEROMESH_ACTIVATION_DTYPE.ToUpper() } else { "INT8" }
 Write-Host "  [-] Activation Codec:    " -NoNewline -ForegroundColor Gray
 Write-Host "$activeCodec" -ForegroundColor Yellow
 Write-Host "  [-] Control Surface Auth:" -NoNewline -ForegroundColor Gray

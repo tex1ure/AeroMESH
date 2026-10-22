@@ -14,19 +14,107 @@ use crate::shm::{SharedMemoryRingBuffer, DEFAULT_SHM_BUFFER_SIZE};
 
 pub struct TcpPipelineTransport {
     pub stream: TcpStream,
+    write_buf: bytes::BytesMut,
 }
 
 impl TcpPipelineTransport {
     pub fn new(stream: TcpStream) -> Result<Self> {
         stream.set_nodelay(true)?;
-        Ok(Self { stream })
+        Self::configure_low_latency_stream(&stream);
+        Ok(Self {
+            stream,
+            write_buf: bytes::BytesMut::with_capacity(64 * 1024),
+        })
     }
 
     pub async fn connect(addr: SocketAddr) -> Result<Self> {
         let stream =
             tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(addr)).await??;
         stream.set_nodelay(true)?;
-        Ok(Self { stream })
+        Self::configure_low_latency_stream(&stream);
+        Ok(Self {
+            stream,
+            write_buf: bytes::BytesMut::with_capacity(64 * 1024),
+        })
+    }
+
+    #[cfg(windows)]
+    fn configure_low_latency_stream(stream: &TcpStream) {
+        use std::os::windows::io::AsRawSocket;
+        const SIO_TCP_SET_ACK_FREQUENCY: u32 = 0x98000017;
+        const SIO_LOOPBACK_FAST_PATH: u32 = 0x98000010;
+        const SOL_SOCKET: i32 = 0xffff;
+        const SO_SNDBUF: i32 = 0x1001;
+        const SO_RCVBUF: i32 = 0x1002;
+        #[link(name = "ws2_32")]
+        extern "system" {
+            fn WSAIoctl(
+                s: usize,
+                io_control_code: u32,
+                in_buf: *const std::ffi::c_void,
+                in_buf_len: u32,
+                out_buf: *mut std::ffi::c_void,
+                out_buf_len: u32,
+                bytes_returned: *mut u32,
+                overlapped: *mut std::ffi::c_void,
+                completion_routine: *mut std::ffi::c_void,
+            ) -> i32;
+            fn setsockopt(
+                s: usize,
+                level: i32,
+                optname: i32,
+                optval: *const std::ffi::c_void,
+                optlen: i32,
+            ) -> i32;
+        }
+        let _ = stream.set_nodelay(true);
+        let raw = stream.as_raw_socket() as usize;
+        let enable: u32 = 1;
+        let mut bytes_returned: u32 = 0;
+        let buf_size: i32 = 512 * 1024;
+        unsafe {
+            let _ = WSAIoctl(
+                raw,
+                SIO_TCP_SET_ACK_FREQUENCY,
+                (&enable as *const u32).cast::<std::ffi::c_void>(),
+                std::mem::size_of::<u32>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut bytes_returned,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            let _ = WSAIoctl(
+                raw,
+                SIO_LOOPBACK_FAST_PATH,
+                (&enable as *const u32).cast::<std::ffi::c_void>(),
+                std::mem::size_of::<u32>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut bytes_returned,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            let _ = setsockopt(
+                raw,
+                SOL_SOCKET,
+                SO_SNDBUF,
+                (&buf_size as *const i32).cast::<std::ffi::c_void>(),
+                std::mem::size_of::<i32>() as i32,
+            );
+            let _ = setsockopt(
+                raw,
+                SOL_SOCKET,
+                SO_RCVBUF,
+                (&buf_size as *const i32).cast::<std::ffi::c_void>(),
+                std::mem::size_of::<i32>() as i32,
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn configure_low_latency_stream(stream: &TcpStream) {
+        let _ = stream.set_nodelay(true);
     }
 
     pub async fn send_activation(&mut self, frame: &ActivationFrame) -> Result<()> {

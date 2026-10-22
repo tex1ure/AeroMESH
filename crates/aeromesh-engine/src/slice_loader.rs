@@ -781,8 +781,8 @@ impl LlamaPipelineInstance {
 
         let mut cparams = llama_call!(llama_context_default_params)?;
         cparams.n_ctx = if n_ctx > 0 { n_ctx } else { DEFAULT_N_CTX };
-        cparams.n_threads = physical_threads;
-        cparams.n_threads_batch = physical_threads;
+        let _ = &physical_threads;
+        let _ = &physical_threads;
         cparams.embeddings = true;
         cparams.cb_eval = Some(llama_cb_eval_capture);
         cparams.cb_eval_user_data = capture_state.as_mut() as *mut _ as *mut c_void;

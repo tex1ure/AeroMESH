@@ -75,3 +75,7 @@ $RECYCLE.BIN/
 .env
 .env.*
 !.env.example
+
+# Fixes files
+apply_fixes.py
+
