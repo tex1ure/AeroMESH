@@ -610,7 +610,7 @@ impl SamplingParams {
         repeat_penalty: 1.15,
         freq_penalty: 0.05,
         present_penalty: 0.05,
-        penalty_last_n: 256,
+        penalty_last_n: 64,
     };
 
     /// Reasoning-tuned defaults: lower temperature and a gentler repeat penalty
@@ -729,13 +729,28 @@ impl LlamaPipelineInstance {
         // clear error instead of a null-pointer crash inside the first call.
         ensure_llama_initialized();
 
-        let path_str = model_path.to_str().context("Invalid model path string")?;
+        static IN_PLACE_LOAD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _load_lock = IN_PLACE_LOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let in_place_guard = crate::gguf_slicer::InPlaceStageGuard::try_new(model_path, &slice_config)?;
+        let path_str = in_place_guard.effective_path.to_str().context("Invalid model path string")?;
         let c_path = CString::new(path_str)?;
 
         let mut mparams = llama_call!(llama_model_default_params)?;
         mparams.n_gpu_layers = n_gpu_layers.max(0);
+        unsafe {
+            let raw_bytes = std::slice::from_raw_parts_mut(
+                (&mut mparams as *mut crate::llama_ffi::LlamaModelParams).cast::<u8>(),
+                std::mem::size_of::<crate::llama_ffi::LlamaModelParams>(),
+            );
+            for b in &mut raw_bytes[56..] {
+                *b = 0;
+            }
+        }
 
-        let model = llama_call!(llama_model_load_from_file, c_path.as_ptr(), mparams)?;
+        let model = llama_call!(llama_model_load_from_file, c_path.as_ptr(), mparams);
+        drop(in_place_guard);
+        drop(_load_lock);
+        let model = model?;
         if model.is_null() {
             bail!(
                 "Failed to load GGUF model via llama.cpp from {:?}",
@@ -783,9 +798,11 @@ impl LlamaPipelineInstance {
         cparams.n_ctx = if n_ctx > 0 { n_ctx } else { DEFAULT_N_CTX };
         let _ = &physical_threads;
         let _ = &physical_threads;
-        cparams.embeddings = true;
-        cparams.cb_eval = Some(llama_cb_eval_capture);
-        cparams.cb_eval_user_data = capture_state.as_mut() as *mut _ as *mut c_void;
+        if !slice_config.is_last_stage {
+            cparams.embeddings = true;
+            cparams.cb_eval = Some(llama_cb_eval_capture);
+            cparams.cb_eval_user_data = capture_state.as_mut() as *mut _ as *mut c_void;
+        }
 
         let ctx = llama_call!(llama_init_from_model, model, cparams)?;
         if ctx.is_null() {
@@ -1183,7 +1200,7 @@ impl LlamaPipelineInstance {
                 *batch.pos.add(i) = (start_pos as i32) + (i as i32);
                 *batch.n_seq_id.add(i) = 1;
                 *(*batch.seq_id.add(i)) = 0;
-                *batch.logits.add(i) = 1;
+                *batch.logits.add(i) = if i + 1 == tokens.len() { 1 } else { 0 };
             }
         }
 

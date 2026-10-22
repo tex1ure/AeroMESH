@@ -686,14 +686,8 @@ async fn main() -> Result<()> {
                         .map(|m| m.len() / (1024 * 1024))
                         .unwrap_or(0);
 
-                    let (coord_ngl, worker_ngl) = if file_size_mb <= 4500 {
-                        (DEFAULT_GPU_OFFLOAD_LAYERS, DEFAULT_GPU_OFFLOAD_LAYERS)
-                    } else {
-                        (
-                            coord_slice.layer_count() as i32,
-                            worker_slice.layer_count() as i32,
-                        )
-                    };
+                    let (coord_ngl, worker_ngl) =
+                        (DEFAULT_GPU_OFFLOAD_LAYERS, DEFAULT_GPU_OFFLOAD_LAYERS);
 
                     println!("\n========================================================");
                     println!("   AEROMESH FULL LOCAL MESH INITIALIZING");

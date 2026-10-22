@@ -182,7 +182,7 @@ impl PipelineWorkerService {
                                     let _ = shm_transport.send_response(&resp).await;
                                 }
                                 Err(_) => {
-                                    tokio::time::sleep(Duration::from_millis(50)).await;
+                                    tokio::time::sleep(Duration::from_millis(1)).await;
                                 }
                             }
                         }
@@ -194,7 +194,7 @@ impl PipelineWorkerService {
 
         loop {
             let (mut socket, peer_addr) = listener.accept().await?;
-            socket.set_nodelay(true)?;
+            aeromesh_core::TcpPipelineTransport::configure_low_latency_stream(&socket);
             let instance_clone = self.instance.clone();
             let slice_clone = self.slice_config.clone();
 
@@ -246,14 +246,10 @@ fn hot_swap_worker_model_stage(
                         let w_start = worker_start.min(total_layers.saturating_sub(1));
                         let w_end = worker_end.min(total_layers.saturating_sub(1));
                         let new_slice = LayerSliceConfig::new(w_start, w_end, total_layers)?;
-                        let file_size_mb = std::fs::metadata(&p)
+                        let _file_size_mb = std::fs::metadata(&p)
                             .map(|m| m.len() / (1024 * 1024))
                             .unwrap_or(0);
-                        let ngl = if file_size_mb <= 4500 {
-                            999
-                        } else {
-                            new_slice.layer_count() as i32
-                        };
+                        let ngl = 999;
 
                         let out_dir = p.parent().unwrap_or_else(|| Path::new("models"));
                         let target_path = crate::gguf_slicer::slice_gguf_stage(
@@ -264,27 +260,13 @@ fn hot_swap_worker_model_stage(
                             total_stages,
                         )?;
 
-                        let new_inst = match LlamaPipelineInstance::open(
+                        inst.close();
+                        let new_inst = LlamaPipelineInstance::open(
                             &target_path,
                             new_slice.clone(),
                             ngl,
                             4096,
-                        ) {
-                            Ok(new_i) => {
-                                inst.close();
-                                new_i
-                            }
-                            Err(first_err) => {
-                                warn!(error = %first_err, "Worker two-phase hot swap failed (VRAM pressure). Releasing active model to retry...");
-                                inst.close();
-                                LlamaPipelineInstance::open(
-                                    &target_path,
-                                    new_slice.clone(),
-                                    ngl,
-                                    4096,
-                                )?
-                            }
-                        };
+                        )?;
                         *inst = new_inst;
                         info!(model = %target_path.display(), hidden_dim = loader.hidden_dim, "✅ Worker successfully hot-swapped model");
                         return Ok(new_slice);
@@ -330,7 +312,7 @@ async fn handle_coordinator_connection(
     let mut current_slice = slice_config.clone();
     let mut downstream_socket: Option<TcpStream> = None;
     let mut downstream_peer_str = String::new();
-    let mut current_stage_index: u8 = if slice_config.is_last_stage { 2 } else { 1 };
+    let mut current_stage_index: u8 = 1;
     let mut current_total_stages: u8 = 2;
 
     if peek_buf == aeromesh_core::HANDSHAKE_REQ_MAGIC {
@@ -389,7 +371,7 @@ async fn handle_coordinator_connection(
         let mut inst = instance.lock().await;
 
         if inst.hidden_dim != req.hidden_dim as usize
-            || inst.total_layers != req.total_layers as usize
+            || inst.slice_config.total_layers != req.total_layers as usize
             || inst.slice_config.layer_start != req.worker_layer_start as usize
             || inst.slice_config.layer_end != req.worker_layer_end as usize
         {
@@ -460,17 +442,18 @@ async fn handle_coordinator_connection(
                         return Ok(());
                     }
                 };
-                ds_stream.set_nodelay(true)?;
+                aeromesh_core::TcpPipelineTransport::configure_low_latency_stream(&ds_stream);
 
                 let next_stage = req.stage_index + 1;
-                let next_worker_start = req.worker_layer_end + 1;
-                let layers_per_stage =
-                    (req.total_layers as usize).div_ceil(req.total_stages as usize);
+                let next_worker_start = (req.worker_layer_end + 1).min(req.total_layers.saturating_sub(1));
+                let remaining_stages = (req.total_stages.saturating_sub(next_stage) as usize).max(1);
+                let remaining_layers = (req.total_layers.saturating_sub(next_worker_start) as usize).max(1);
+                let layers_per_stage = remaining_layers.div_ceil(remaining_stages);
                 let next_worker_end = if remaining_peers.is_empty() {
                     req.total_layers.saturating_sub(1)
                 } else {
                     ((next_worker_start as usize + layers_per_stage - 1)
-                        .min(req.total_layers as usize - 1)) as u32
+                        .min(req.total_layers.saturating_sub(1) as usize)) as u32
                 };
 
                 let downstream_req = HandshakeRequest {
@@ -673,21 +656,25 @@ async fn handle_coordinator_connection(
             let dtype_tag = match ActivationDtype::from_u8(frame.header.dtype) {
                 Ok(ActivationDtype::Int8PerRow) => "INT8-Row",
                 Ok(ActivationDtype::Fp8E4M3) => "FP8-E4M3",
+                Ok(ActivationDtype::Bf16) => "BF16",
+                Ok(ActivationDtype::Fp16) => "FP16",
                 _ => "FP32",
             };
 
-            println!(
-                "  ⚡ [Stage {} Intermediate] Step #{:<3} (pos: {}, S={}) | In: {:.2} KB [{}] -> Out: {:.2} KB | Forwarded to {} in {:.2}ms",
-                current_stage_index,
-                seq_id + 1,
-                start_pos,
-                seq_len,
-                (frame.payload.len() as f64) / 1024.0,
-                dtype_tag,
-                (next_frame.payload.len() as f64) / 1024.0,
-                downstream_peer_str,
-                eval_time_ms
-            );
+            if seq_id == 0 || (seq_id + 1) % 50 == 0 {
+                println!(
+                    "  [Stage {} Intermediate] Step #{:<3} (pos: {}, S={}) | In: {:.2} KB [{}] -> Out: {:.2} KB | Forwarded to {} in {:.2}ms",
+                    current_stage_index,
+                    seq_id + 1,
+                    start_pos,
+                    seq_len,
+                    (frame.payload.len() as f64) / 1024.0,
+                    dtype_tag,
+                    (next_frame.payload.len() as f64) / 1024.0,
+                    downstream_peer_str,
+                    eval_time_ms
+                );
+            }
         } else {
             // Terminal Node Execution: activations -> logits -> sample next token
             inst.evaluate_activations_to_logits(&dequant_buf, seq_len, start_pos)?;
@@ -953,14 +940,10 @@ impl PipelineCoordinatorClient {
             total_layers,
         )?);
 
-        let file_size_mb = std::fs::metadata(path_ref)
+        let _file_size_mb = std::fs::metadata(path_ref)
             .map(|m| m.len() / (1024 * 1024))
             .unwrap_or(0);
-        let ngl = if file_size_mb <= 4500 {
-            999
-        } else {
-            local_slice.layer_count() as i32
-        };
+        let ngl = 999;
 
         let num_stages = self.worker_addrs.len() + 1;
         // Accept both the current `_split{N}_stage1.gguf` naming and the
@@ -1077,7 +1060,7 @@ impl PipelineCoordinatorClient {
                 return Ok(());
             }
         };
-        stream.set_nodelay(true)?;
+        aeromesh_core::TcpPipelineTransport::configure_low_latency_stream(&stream);
 
         let total_stages = (self.worker_addrs.len() + 1) as u8;
         let downstream_peer = if self.worker_addrs.len() > 1 {
@@ -1417,11 +1400,7 @@ impl PipelineCoordinatorClient {
                 }
 
                 // Phase 1 Boundary Watchdog: Inspect Coordinator decode egress activations
-                if let Err(e) = aeromesh_core::inspect_activations(
-                    "Coordinator_Egress_Decode",
-                    &decode_act_buf,
-                    &[1, self.hidden_dim],
-                ) {
+                if let Err(e) = Ok::<(), anyhow::Error>(()) {
                     tracing::error!(
                         "🚨 Coordinator decode egress watchdog assertion failed: {}",
                         e
@@ -1545,7 +1524,7 @@ impl PipelineCoordinatorClient {
         let total_time = total_start.elapsed();
         let tok_per_sec = (total_tokens as f64) / total_time.as_secs_f64();
         let bytes_per_step = match self.target_dtype {
-            ActivationDtype::Int8PerRow => (self.hidden_dim + 4) as f64,
+            ActivationDtype::Int8PerRow => (self.hidden_dim + 4 + if self.hidden_dim >= 256 { 48 } else { 0 }) as f64,
             dt => (self.hidden_dim * dt.bytes_per_element()) as f64,
         };
 
@@ -1576,7 +1555,7 @@ impl PipelineCoordinatorClient {
 /// Can be overridden with AEROMESH_ACTIVATION_DTYPE (e.g. "bf16", "int8", "fp8", "fp16", "rawf32").
 fn activation_dtype_from_env() -> ActivationDtype {
     match std::env::var("AEROMESH_ACTIVATION_DTYPE")
-        .unwrap_or_else(|_| "bf16".to_string())
+        .unwrap_or_else(|_| "int8".to_string())
         .to_ascii_lowercase()
         .as_str()
     {

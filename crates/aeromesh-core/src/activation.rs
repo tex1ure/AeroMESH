@@ -123,8 +123,9 @@ impl ActivationHeader {
                 anyhow::anyhow!("FP8 payload size overflow (seq_len={}, dim={})", seq_len, d)
             })?,
             ActivationDtype::Int8PerRow => {
+                let k_outliers: u64 = if d >= 256 { 8 } else { 0 };
                 let row_bytes = d
-                    .checked_add(4)
+                    .checked_add(4 + k_outliers * 6)
                     .ok_or_else(|| anyhow::anyhow!("Int8PerRow row size overflow (dim={})", d))?;
                 seq_len.checked_mul(row_bytes).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -410,36 +411,68 @@ impl ActivationFrame {
 
         match dtype {
             ActivationDtype::Int8PerRow => {
-                // Per-row layout: For each token s in [0, S): [scale_s: f32 (4B, LE)][quant_data: i8 * d]
-                let row_bytes = 4 + d;
+                // Outlier-Preserving Per-Row INT8 for LLM hidden dims (d >= 256):
+                // Extracts top-8 outlier channels per row as exact (u16 idx, f32 val) pairs
+                // so Qwen2/DeepSeek/Llama residual outliers never crush small channel resolution.
+                let k_outliers = if d >= 256 { 8usize } else { 0usize };
+                let row_bytes = 4 + k_outliers * 6 + d;
                 let mut payload = BytesMut::with_capacity(seq_len * row_bytes);
 
-                for s in 0..seq_len {
-                    let row = &matrix[s * d..(s + 1) * d];
-                    let mut max_abs = 0.0f32;
-                    for &val in row {
-                        let abs = val.abs();
-                        if abs > max_abs && !abs.is_nan() {
-                            max_abs = abs;
+                for row in matrix.chunks_exact(d) {
+                    let mut outlier_idx = [usize::MAX; 8];
+                    if k_outliers > 0 {
+                        let mut top_vals = [0.0f32; 8];
+                        for (idx, &val) in row.iter().enumerate() {
+                            let a = val.abs();
+                            if a > top_vals[7] {
+                                let mut pos = 7;
+                                while pos > 0 && a > top_vals[pos - 1] {
+                                    top_vals[pos] = top_vals[pos - 1];
+                                    outlier_idx[pos] = outlier_idx[pos - 1];
+                                    pos -= 1;
+                                }
+                                top_vals[pos] = a;
+                                outlier_idx[pos] = idx;
+                            }
                         }
                     }
 
-                    // Strict protection against underflow and divide-by-zero
-                    let scale = if max_abs > 1e-12 {
-                        max_abs / 127.0
-                    } else {
-                        1.0
-                    };
-                    let inv_scale = 1.0 / scale;
+                    let mut max_abs = 0.0f32;
+                    for (idx, &val) in row.iter().enumerate() {
+                        if k_outliers > 0 && outlier_idx.contains(&idx) {
+                            continue;
+                        }
+                        let a = val.abs();
+                        if a > max_abs {
+                            max_abs = a;
+                        }
+                    }
 
+                    let scale = if max_abs > 1e-12 { max_abs / 127.0 } else { 1.0 };
+                    let inv_scale = if max_abs > 1e-12 { 127.0 / max_abs } else { 0.0 };
                     payload.extend_from_slice(&scale.to_le_bytes());
-                    for &val in row {
-                        let q = if max_abs > 1e-12 {
-                            (val * inv_scale).round().clamp(-127.0, 127.0) as i8
+
+                    for i in 0..k_outliers {
+                        let idx = outlier_idx[i];
+                        let (u_idx, exact_val) = if idx < d {
+                            (idx as u16, row[idx])
                         } else {
-                            0i8
+                            (0u16, 0.0f32)
                         };
-                        payload.extend_from_slice(&(q as u8).to_le_bytes());
+                        payload.extend_from_slice(&u_idx.to_le_bytes());
+                        payload.extend_from_slice(&exact_val.to_le_bytes());
+                    }
+
+                    let base = payload.len();
+                    payload.resize(base + d, 0);
+                    for (dst, &val) in payload[base..base + d].iter_mut().zip(row.iter()) {
+                        let scaled = (val * inv_scale).clamp(-127.0, 127.0);
+                        let q = if scaled >= 0.0 {
+                            (scaled + 0.5) as i8
+                        } else {
+                            (scaled - 0.5) as i8
+                        };
+                        *dst = q as u8;
                     }
                 }
 
@@ -589,26 +622,40 @@ impl ActivationFrame {
 
         match ActivationDtype::from_u8(self.header.dtype)? {
             ActivationDtype::Int8PerRow => {
-                let row_bytes = 4 + d;
+                let k_outliers = if d >= 256 { 8usize } else { 0usize };
+                let expected_row_bytes = 4 + k_outliers * 6 + d;
                 ensure!(
-                    self.payload.len() == seq_len * row_bytes,
+                    self.payload.len() == seq_len * expected_row_bytes,
                     "Invalid INT8-per-row payload length (got {}, expected {})",
                     self.payload.len(),
-                    seq_len * row_bytes
+                    seq_len * expected_row_bytes
                 );
 
-                let mut offset = 0;
-                for s in 0..seq_len {
-                    let scale_bytes: [u8; 4] = self.payload[offset..offset + 4].try_into()?;
-                    let scale = f32::from_le_bytes(scale_bytes);
-                    offset += 4;
-
-                    let row_quant = &self.payload[offset..offset + d];
-                    offset += d;
-
+                for (s, row_bytes) in self.payload.chunks_exact(expected_row_bytes).enumerate() {
+                    let scale = f32::from_le_bytes([
+                        row_bytes[0],
+                        row_bytes[1],
+                        row_bytes[2],
+                        row_bytes[3],
+                    ]);
+                    let q_offset = 4 + k_outliers * 6;
+                    let row_quant = &row_bytes[q_offset..q_offset + d];
                     let out_row = &mut out[s * d..(s + 1) * d];
-                    for i in 0..d {
-                        out_row[i] = (row_quant[i] as i8 as f32) * scale;
+                    for (dst, &qb) in out_row.iter_mut().zip(row_quant.iter()) {
+                        *dst = (qb as i8 as f32) * scale;
+                    }
+                    for i in 0..k_outliers {
+                        let off = 4 + i * 6;
+                        let u_idx = u16::from_le_bytes([row_bytes[off], row_bytes[off + 1]]) as usize;
+                        let exact_val = f32::from_le_bytes([
+                            row_bytes[off + 2],
+                            row_bytes[off + 3],
+                            row_bytes[off + 4],
+                            row_bytes[off + 5],
+                        ]);
+                        if u_idx < d {
+                            out_row[u_idx] = exact_val;
+                        }
                     }
                 }
             }
@@ -854,28 +901,27 @@ impl TokenResponseFrame {
     }
 
     pub async fn decode_async<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Self> {
-        let mut magic = [0u8; 4];
-        reader.read_exact(&mut magic).await?;
+        let mut hdr = [0u8; Self::HEADER_SIZE];
+        reader.read_exact(&mut hdr).await?;
         ensure!(
-            magic == TOKEN_RESP_MAGIC,
+            &hdr[0..4] == &TOKEN_RESP_MAGIC,
             "Invalid token response magic: {:?}",
-            magic
+            &hdr[0..4]
         );
 
-        let version = reader.read_u16().await?;
+        let version = u16::from_be_bytes([hdr[4], hdr[5]]);
         ensure!(
             version == PROTOCOL_VERSION,
             "Unsupported token response protocol version: {}",
             version
         );
 
-        let session_id = reader.read_u64().await?;
-        let sequence_id = reader.read_u64().await?;
-        let token_id = reader.read_i32().await?;
-        let is_eos = reader.read_u8().await? != 0;
-        let eval_time_bits = reader.read_u32().await?;
-        let eval_time_ms = f32::from_bits(eval_time_bits);
-        let text_len = reader.read_u32().await? as usize;
+        let session_id = u64::from_be_bytes(hdr[6..14].try_into().unwrap());
+        let sequence_id = u64::from_be_bytes(hdr[14..22].try_into().unwrap());
+        let token_id = i32::from_be_bytes(hdr[22..26].try_into().unwrap());
+        let is_eos = hdr[26] != 0;
+        let eval_time_ms = f32::from_bits(u32::from_be_bytes(hdr[27..31].try_into().unwrap()));
+        let text_len = u32::from_be_bytes(hdr[31..35].try_into().unwrap()) as usize;
 
         ensure!(
             text_len <= (MAX_TOKEN_TEXT_BYTES as usize),

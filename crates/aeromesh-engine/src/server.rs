@@ -763,7 +763,7 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
         "SHM Ring Buffer (Loopback)"
     };
     let (codec_name, bytes_per_elem) = match std::env::var("AEROMESH_ACTIVATION_DTYPE")
-        .unwrap_or_else(|_| "bf16".to_string())
+        .unwrap_or_else(|_| "int8".to_string())
         .to_ascii_lowercase()
         .as_str()
     {
@@ -773,7 +773,8 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
         "int8" => ("Per-Row INT8 Dynamic Scaling (75% Wire Reduction)", 1.0),
         _ => ("Raw FP32 Uncompressed", 4.0),
     };
-    let per_token_kb = (meta.hidden_dim as f64 * bytes_per_elem + 44.0) / 1024.0;
+    let extra_overhead = if bytes_per_elem == 1.0 && meta.hidden_dim >= 256 { 52.0 } else { 0.0 };
+    let per_token_kb = (meta.hidden_dim as f64 * bytes_per_elem + extra_overhead + 44.0) / 1024.0;
 
     let cluster_status = if !has_workers {
         "STANDALONE"
@@ -1040,7 +1041,7 @@ async fn handle_chat_completions(
         || active_model.to_lowercase().contains("r1")
         || chat_format == ChatTemplateFormat::DeepSeek;
 
-    let is_reasoning = req.reasoning.unwrap_or(is_reasoning_default);
+    let is_reasoning = req.reasoning.unwrap_or(is_reasoning_default) && is_reasoning_default;
     let is_streaming = req.stream.unwrap_or(true);
     let prompt = format_chat_prompt(&req.messages, chat_format, is_reasoning);
 

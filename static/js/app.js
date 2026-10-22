@@ -567,17 +567,24 @@
         ${
           workers.length > 0
             ? workers
-                .map(
-                  (w, idx) => `
+                .map((w, idx) => {
+                  const remStart = localStage.layer_end !== undefined ? Number(localStage.layer_end) + 1 : 0;
+                  const numTotal = Number(totalLayers) || (remStart + workers.length);
+                  const remLayers = Math.max(1, numTotal - remStart);
+                  const perWorker = Math.ceil(remLayers / workers.length);
+                  const wStart = Math.min(numTotal - 1, remStart + idx * perWorker);
+                  const wEnd = idx === workers.length - 1 ? numTotal - 1 : Math.min(numTotal - 1, wStart + perWorker - 1);
+                  const roleDesc = idx === workers.length - 1 ? 'LM head &bull; activation sink' : 'Intermediate stage &bull; activation relay';
+                  return `
           <div class="node-box">
             <div>
               <div style="font-weight: 700; color: var(--text-main); font-size: 13.5px;">Worker Stage ${idx + 2} (${escapeHtml(w)})</div>
-              <div style="font-size: 11.5px; color: var(--text-dim);">Layers ${escapeHtml(localStage.layer_end !== undefined ? Number(localStage.layer_end) + 1 : 0)}..${escapeHtml(totalLayers - 1)} • LM head • activation sink</div>
+              <div style="font-size: 11.5px; color: var(--text-dim);">Layers ${escapeHtml(wStart)}..${escapeHtml(wEnd)} &bull; ${roleDesc}</div>
             </div>
             <div class="stat-highlight direct-badge" style="font-size: 12px;">${isDirectWg ? 'Direct WireGuard' : 'Connected'}</div>
           </div>
-        `
-                )
+        `;
+                })
                 .join('')
             : `
           <div class="node-box">

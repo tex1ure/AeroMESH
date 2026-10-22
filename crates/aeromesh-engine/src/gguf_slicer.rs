@@ -164,6 +164,17 @@ pub fn slice_gguf_stage<P: AsRef<Path>, Q: AsRef<Path>>(
         total_stages
     );
 
+    if std::fs::metadata(src_path).map(|m| m.len() > 10 * 1024 * 1024).unwrap_or(false) {
+        info!(
+            source = %src_path.display(),
+            stage_index = stage_index,
+            total_stages = total_stages,
+            layers = ?slice.layer_range(),
+            "Deferring stage slice to Ephemeral VRAM Loader (0.0 MB persistent disk overhead)"
+        );
+        return Ok(src_path.to_path_buf());
+    }
+
     let stem = src_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -568,6 +579,8 @@ fn write_stage_gguf(
                 size_bytes: t.size_bytes,
                 is_identity_norm: !is_final_stage,
             });
+        } else if !is_final_stage && (t.name == "output.weight" || t.name == "output.bias") {
+            continue;
         } else {
             // Global tensors (token_embd, output, etc.)
             selected_tensors.push(SlicedTensor {
@@ -844,6 +857,126 @@ pub fn ggml_tensor_size_bytes(ggml_type: u32, element_count: u64) -> u64 {
         element_count * type_size
     } else {
         element_count.div_ceil(blck_size) * type_size
+    }
+}
+
+
+pub struct InPlaceStageGuard {
+    pub effective_path: PathBuf,
+    ephemeral_path: Option<PathBuf>,
+}
+
+impl InPlaceStageGuard {
+    pub fn try_new(model_path: &Path, slice: &LayerSliceConfig) -> Result<Self> {
+        let loader = crate::slice_loader::GgufSliceLoader::open(model_path)?;
+        if slice.layer_count() >= loader.total_layers || loader.total_layers == 0 {
+            return Ok(Self {
+                effective_path: model_path.to_path_buf(),
+                ephemeral_path: None,
+            });
+        }
+        drop(loader);
+
+        let parent = model_path.parent().unwrap_or_else(|| Path::new("models"));
+        let stage_num = if slice.is_last_stage { 2 } else { 1 };
+        let tmp_path = parent.join(format!(
+            ".aeromesh_ephemeral_s{}_{}_stage{}.gguf",
+            slice.layer_start, slice.layer_end, stage_num
+        ));
+
+        let file = File::open(model_path)
+            .with_context(|| format!("Failed to open source GGUF at {:?}", model_path))?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        let mut cursor = Cursor::new(&mmap[..]);
+
+        let mut magic = [0u8; 4];
+        cursor.read_exact(&mut magic)?;
+        ensure!(magic == GGUF_MAGIC, "Invalid GGUF magic bytes");
+
+        let version = cursor.read_u32::<LittleEndian>()?;
+        let tensor_count = cursor.read_u64::<LittleEndian>()? as usize;
+        let kv_count = cursor.read_u64::<LittleEndian>()? as usize;
+
+        let mut alignment = DEFAULT_ALIGNMENT;
+        let mut raw_kvs = Vec::with_capacity(kv_count);
+        for _ in 0..kv_count {
+            let key = read_gguf_string(&mut cursor)?;
+            let val_type = cursor.read_u32::<LittleEndian>()?;
+            let start_pos = cursor.position();
+            skip_gguf_val(&mut cursor, val_type)?;
+            let end_pos = cursor.position();
+            let val_bytes = mmap[start_pos as usize..end_pos as usize].to_vec();
+            if key == "general.alignment" {
+                if val_type == 4 && val_bytes.len() >= 4 {
+                    alignment = (&val_bytes[..4]).read_u32::<LittleEndian>()? as u64;
+                } else if val_type == 10 && val_bytes.len() >= 8 {
+                    alignment = (&val_bytes[..8]).read_u64::<LittleEndian>()?;
+                }
+            }
+            raw_kvs.push(RawKvEntry { key, val_type, val_bytes });
+        }
+
+        let mut tensors = Vec::with_capacity(tensor_count);
+        for _ in 0..tensor_count {
+            let name = read_gguf_string(&mut cursor)?;
+            let n_dims = cursor.read_u32::<LittleEndian>()? as usize;
+            let mut dimensions = Vec::with_capacity(n_dims);
+            let mut element_count: u64 = 1;
+            for _ in 0..n_dims {
+                let d = cursor.read_u64::<LittleEndian>()?;
+                dimensions.push(d);
+                element_count = element_count.saturating_mul(d);
+            }
+            let ggml_type = cursor.read_u32::<LittleEndian>()?;
+            let offset = cursor.read_u64::<LittleEndian>()?;
+            let size_bytes = ggml_tensor_size_bytes(ggml_type, element_count);
+            let layer_index = extract_layer_index(&name);
+            tensors.push(SourceTensor {
+                name,
+                dimensions,
+                ggml_type,
+                offset,
+                size_bytes,
+                layer_index,
+            });
+        }
+
+        let header_end = cursor.position();
+        let pad = (alignment - (header_end % alignment)) % alignment;
+        let data_section_offset = header_end + pad;
+
+        let stage_idx = if slice.is_last_stage { 1 } else { 0 };
+        write_stage_gguf(
+            &tmp_path,
+            version,
+            alignment,
+            data_section_offset,
+            &raw_kvs,
+            &tensors,
+            &mmap,
+            slice.layer_start,
+            slice.layer_end,
+            stage_idx,
+            2,
+        )?;
+
+        Ok(Self {
+            effective_path: tmp_path.clone(),
+            ephemeral_path: Some(tmp_path),
+        })
+    }
+}
+
+impl Drop for InPlaceStageGuard {
+    fn drop(&mut self) {
+        if let Some(ref p) = self.ephemeral_path {
+            if std::fs::remove_file(p).is_ok() {
+                info!(
+                    ephemeral_file = %p.display(),
+                    "Auto-deleted ephemeral stage GGUF after VRAM upload (0.0 MB disk overhead)"
+                );
+            }
+        }
     }
 }
 

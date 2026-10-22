@@ -39,7 +39,7 @@ impl TcpPipelineTransport {
     }
 
     #[cfg(windows)]
-    fn configure_low_latency_stream(stream: &TcpStream) {
+    pub fn configure_low_latency_stream(stream: &TcpStream) {
         use std::os::windows::io::AsRawSocket;
         const SIO_TCP_SET_ACK_FREQUENCY: u32 = 0x98000017;
         const SIO_LOOPBACK_FAST_PATH: u32 = 0x98000010;
@@ -113,14 +113,19 @@ impl TcpPipelineTransport {
     }
 
     #[cfg(not(windows))]
-    fn configure_low_latency_stream(stream: &TcpStream) {
+    pub fn configure_low_latency_stream(stream: &TcpStream) {
         let _ = stream.set_nodelay(true);
     }
 
     pub async fn send_activation(&mut self, frame: &ActivationFrame) -> Result<()> {
         self.write_buf.clear();
-        self.write_buf.reserve(crate::activation::ActivationHeader::SIZE + frame.payload.len());
-        frame.header.encode(&mut self.write_buf);
+        self.write_buf
+            .reserve(crate::activation::ActivationHeader::SIZE + frame.payload.len());
+        self.write_buf
+            .resize(crate::activation::ActivationHeader::SIZE, 0);
+        frame
+            .header
+            .encode(&mut self.write_buf[..crate::activation::ActivationHeader::SIZE]);
         self.write_buf.extend_from_slice(&frame.payload);
         self.stream.write_all(&self.write_buf).await?;
         Ok(())
@@ -186,10 +191,16 @@ impl ShmPipelineTransport {
 
     pub async fn recv_activation(&mut self) -> Result<ActivationFrame> {
         let start = std::time::Instant::now();
+        let mut spins = 0u32;
         loop {
             if let Some(bytes) = self.recv_rb.read_slice()? {
                 let mut cursor = Cursor::new(bytes);
                 return ActivationFrame::decode_sync(&mut cursor);
+            }
+            if spins < 64 {
+                spins += 1;
+                tokio::task::yield_now().await;
+                continue;
             }
             if start.elapsed() > Duration::from_secs(60) {
                 bail!("SHM activation receive timeout");
@@ -206,10 +217,16 @@ impl ShmPipelineTransport {
 
     pub async fn recv_response(&mut self) -> Result<TokenResponseFrame> {
         let start = std::time::Instant::now();
+        let mut spins = 0u32;
         loop {
             if let Some(bytes) = self.recv_rb.read_slice()? {
                 let mut cursor = Cursor::new(bytes);
                 return TokenResponseFrame::decode_sync(&mut cursor);
+            }
+            if spins < 64 {
+                spins += 1;
+                tokio::task::yield_now().await;
+                continue;
             }
             if start.elapsed() > Duration::from_secs(60) {
                 bail!("SHM response receive timeout");
