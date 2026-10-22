@@ -1,7 +1,7 @@
+use anyhow::{Context, Result};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use anyhow::{Context, Result};
 use tracing::info;
 
 use crate::slice_loader::GgufSliceLoader;
@@ -32,7 +32,10 @@ pub fn get_rpc_cache_dir() -> PathBuf {
         #[cfg(not(target_os = "windows"))]
         {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".cache").join("llama.cpp").join("rpc")
+            PathBuf::from(home)
+                .join(".cache")
+                .join("llama.cpp")
+                .join("rpc")
         }
     }
 }

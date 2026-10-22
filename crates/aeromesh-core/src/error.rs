@@ -8,7 +8,9 @@ pub enum AeroMeshError {
     #[error("Network connection failed to {target}: {reason}")]
     Network { target: String, reason: String },
 
-    #[error("Tailscale DERP relay detected for node {node_id} (RTT {rtt_ms:.1}ms > 150ms threshold)")]
+    #[error(
+        "Tailscale DERP relay detected for node {node_id} (RTT {rtt_ms:.1}ms > 150ms threshold)"
+    )]
     TailscaleDerpRelay { node_id: String, rtt_ms: f64 },
 
     #[error("Invalid GGUF file: {0}")]

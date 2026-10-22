@@ -1,7 +1,7 @@
-use std::io::Read;
 use anyhow::{bail, ensure, Result};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Bytes, BytesMut};
+use std::io::Read;
 use tokio::io::AsyncReadExt;
 
 pub const ACTIVATION_MAGIC: [u8; 4] = *b"AERO";
@@ -12,11 +12,11 @@ pub const PROTOCOL_VERSION: u16 = 4;
 
 // Hard Resource Ceilings to Prevent Unbounded Network Memory Allocations & DoS
 pub const MAX_ACTIVATION_PAYLOAD_BYTES: u32 = 128 * 1024 * 1024; // 128 MB max per activation frame
-pub const MAX_SEQUENCE_LENGTH: u32 = 131_072;                   // 128k max sequence length
-pub const MAX_HIDDEN_DIM: u32 = 65_536;                         // 64k max hidden dimension
-pub const MAX_TOKEN_TEXT_BYTES: u32 = 64 * 1024;                // 64 KB max token text piece
-pub const MAX_HANDSHAKE_STR_LEN: usize = 512;                   // 512 B max architecture or checksum string
-pub const MAX_HANDSHAKE_ERR_LEN: usize = 8192;                  // 8 KB max error message length
+pub const MAX_SEQUENCE_LENGTH: u32 = 131_072; // 128k max sequence length
+pub const MAX_HIDDEN_DIM: u32 = 65_536; // 64k max hidden dimension
+pub const MAX_TOKEN_TEXT_BYTES: u32 = 64 * 1024; // 64 KB max token text piece
+pub const MAX_HANDSHAKE_STR_LEN: usize = 512; // 512 B max architecture or checksum string
+pub const MAX_HANDSHAKE_ERR_LEN: usize = 8192; // 8 KB max error message length
 
 // Flags for ActivationHeader
 pub const FLAG_CLEAR_KV: u8 = 0x01;
@@ -55,22 +55,33 @@ impl ActivationDtype {
 }
 
 /// Binary frame header for high-speed P2P activation vector streaming with multi-stage session & KV tracking.
+///
 /// Fixed size: 44 bytes (explicit BigEndian serialization, independent of compiler padding).
+///
+/// # Sampling configuration
+///
+/// Per-request `temperature` / `top_p` are **not** carried on the wire: the
+/// 44-byte header is fully allocated (offsets 40..44 hold `payload_bytes`, which
+/// is required to frame the payload). In distributed mode the terminal stage
+/// samples with the parameters baked in when it loaded the model; in the
+/// single-node path (`start --role all` / no peers) the coordinator applies the
+/// request's values directly. Extending the frame with a trailer is tracked as
+/// future work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActivationHeader {
-    pub magic: [u8; 4],          // b"AERO"
-    pub version: u16,           // 4
-    pub session_id: u64,        // Unique multi-turn chat session ID
-    pub sequence_id: u64,       // Token generation sequence counter
-    pub sequence_length: u32,   // S: Number of tokens in sequence (1 for decode, >1 for prefill)
-    pub token_position: u32,    // Context position offset in KV-cache (pos)
-    pub stage_index: u8,        // Current stage index in cluster (0 .. total_stages - 1)
-    pub total_stages: u8,       // Total stages in pipeline (N >= 2)
-    pub layer_index: u16,       // Boundary layer index (e.g. 24)
-    pub hidden_dim: u32,        // Hidden dimension (e.g. 1536 / 4096 / 5120)
-    pub dtype: u8,              // 0 = RawF32, 1 = FP16, 2 = BF16, 3 = INT8-Row, 4 = FP8-E4M3
-    pub flags: u8,              // Bitmask: FLAG_CLEAR_KV (0x01), FLAG_IS_PROMPT (0x02), etc.
-    pub payload_bytes: u32,     // Length of payload following header
+    pub magic: [u8; 4],       // b"AERO"
+    pub version: u16,         // 4
+    pub session_id: u64,      // Unique multi-turn chat session ID
+    pub sequence_id: u64,     // Token generation sequence counter
+    pub sequence_length: u32, // S: Number of tokens in sequence (1 for decode, >1 for prefill)
+    pub token_position: u32,  // Context position offset in KV-cache (pos)
+    pub stage_index: u8,      // Current stage index in cluster (0 .. total_stages - 1)
+    pub total_stages: u8,     // Total stages in pipeline (N >= 2)
+    pub layer_index: u16,     // Boundary layer index (e.g. 24)
+    pub hidden_dim: u32,      // Hidden dimension (e.g. 1536 / 4096 / 5120)
+    pub dtype: u8,            // 0 = RawF32, 1 = FP16, 2 = BF16, 3 = INT8-Row, 4 = FP8-E4M3
+    pub flags: u8,            // Bitmask: FLAG_CLEAR_KV (0x01), FLAG_IS_PROMPT (0x02), etc.
+    pub payload_bytes: u32,   // Length of payload following header
 }
 
 impl ActivationHeader {
@@ -78,7 +89,11 @@ impl ActivationHeader {
 
     /// Calculates mathematically expected payload size for given sequence length, hidden dimension, and dtype.
     /// Returns an error on integer overflow or unsupported dtype.
-    pub fn calculate_expected_payload_bytes(sequence_length: u32, hidden_dim: u32, dtype: u8) -> Result<u32> {
+    pub fn calculate_expected_payload_bytes(
+        sequence_length: u32,
+        hidden_dim: u32,
+        dtype: u8,
+    ) -> Result<u32> {
         let seq_len = sequence_length as u64;
         let d = hidden_dim as u64;
         let activation_dtype = ActivationDtype::from_u8(dtype)?;
@@ -87,20 +102,38 @@ impl ActivationHeader {
             ActivationDtype::RawF32 => seq_len
                 .checked_mul(d)
                 .and_then(|elems| elems.checked_mul(4))
-                .ok_or_else(|| anyhow::anyhow!("RawF32 payload size overflow (seq_len={}, dim={})", seq_len, d))?,
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "RawF32 payload size overflow (seq_len={}, dim={})",
+                        seq_len,
+                        d
+                    )
+                })?,
             ActivationDtype::Fp16 | ActivationDtype::Bf16 => seq_len
                 .checked_mul(d)
                 .and_then(|elems| elems.checked_mul(2))
-                .ok_or_else(|| anyhow::anyhow!("FP16/BF16 payload size overflow (seq_len={}, dim={})", seq_len, d))?,
-            ActivationDtype::Fp8E4M3 => seq_len
-                .checked_mul(d)
-                .ok_or_else(|| anyhow::anyhow!("FP8 payload size overflow (seq_len={}, dim={})", seq_len, d))?,
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "FP16/BF16 payload size overflow (seq_len={}, dim={})",
+                        seq_len,
+                        d
+                    )
+                })?,
+            ActivationDtype::Fp8E4M3 => seq_len.checked_mul(d).ok_or_else(|| {
+                anyhow::anyhow!("FP8 payload size overflow (seq_len={}, dim={})", seq_len, d)
+            })?,
             ActivationDtype::Int8PerRow => {
-                let row_bytes = d.checked_add(4)
+                let k_outliers: u64 = if d >= 256 { 8 } else { 0 };
+                let row_bytes = d
+                    .checked_add(4 + k_outliers * 6)
                     .ok_or_else(|| anyhow::anyhow!("Int8PerRow row size overflow (dim={})", d))?;
-                seq_len
-                    .checked_mul(row_bytes)
-                    .ok_or_else(|| anyhow::anyhow!("Int8PerRow payload size overflow (seq_len={}, dim={})", seq_len, d))?
+                seq_len.checked_mul(row_bytes).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Int8PerRow payload size overflow (seq_len={}, dim={})",
+                        seq_len,
+                        d
+                    )
+                })?
             }
         };
 
@@ -129,13 +162,26 @@ impl ActivationHeader {
     }
 
     pub fn decode(src: &[u8]) -> Result<Self> {
-        ensure!(src.len() >= Self::SIZE, "Buffer too short for ActivationHeader (got {}, expected {})", src.len(), Self::SIZE);
+        ensure!(
+            src.len() >= Self::SIZE,
+            "Buffer too short for ActivationHeader (got {}, expected {})",
+            src.len(),
+            Self::SIZE
+        );
         let mut magic = [0u8; 4];
         magic.copy_from_slice(&src[0..4]);
-        ensure!(magic == ACTIVATION_MAGIC, "Invalid activation magic: {:?}", magic);
+        ensure!(
+            magic == ACTIVATION_MAGIC,
+            "Invalid activation magic: {:?}",
+            magic
+        );
 
         let version = BigEndian::read_u16(&src[4..6]);
-        ensure!(version == PROTOCOL_VERSION, "Unsupported activation protocol version: {}", version);
+        ensure!(
+            version == PROTOCOL_VERSION,
+            "Unsupported activation protocol version: {}",
+            version
+        );
 
         let session_id = BigEndian::read_u64(&src[6..14]);
         let sequence_id = BigEndian::read_u64(&src[14..22]);
@@ -149,8 +195,17 @@ impl ActivationHeader {
         let flags = src[39];
         let payload_bytes = BigEndian::read_u32(&src[40..44]);
 
-        ensure!(total_stages >= 2, "Activation total_stages must be >= 2 (got {})", total_stages);
-        ensure!(stage_index < total_stages, "Activation stage_index ({}) out of bounds (total_stages={})", stage_index, total_stages);
+        ensure!(
+            total_stages >= 2,
+            "Activation total_stages must be >= 2 (got {})",
+            total_stages
+        );
+        ensure!(
+            stage_index < total_stages,
+            "Activation stage_index ({}) out of bounds (total_stages={})",
+            stage_index,
+            total_stages
+        );
 
         // Validate protocol boundaries against malicious inputs before accepting
         ensure!(
@@ -173,7 +228,8 @@ impl ActivationHeader {
         );
 
         // Mathematical consistency guard: payload_bytes must match tensor dimensions and dtype
-        let expected_bytes = Self::calculate_expected_payload_bytes(sequence_length, hidden_dim, dtype)?;
+        let expected_bytes =
+            Self::calculate_expected_payload_bytes(sequence_length, hidden_dim, dtype)?;
         ensure!(
             payload_bytes == expected_bytes,
             "Mismatched activation payload size in header: header claims {} bytes, expected {} bytes (seq_len={}, dim={}, dtype={})",
@@ -215,6 +271,7 @@ pub struct ActivationFrame {
 }
 
 impl ActivationFrame {
+    #[allow(clippy::too_many_arguments)]
     pub fn new_stage(
         session_id: u64,
         sequence_id: u64,
@@ -248,6 +305,7 @@ impl ActivationFrame {
         Ok(Self { header, payload })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: u64,
         sequence_id: u64,
@@ -300,6 +358,7 @@ impl ActivationFrame {
         self.dequantize_into(out)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn from_f32_matrix_quantized(
         session_id: u64,
         sequence_id: u64,
@@ -326,6 +385,7 @@ impl ActivationFrame {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn from_f32_matrix_quantized_stage(
         session_id: u64,
         sequence_id: u64,
@@ -341,40 +401,85 @@ impl ActivationFrame {
     ) -> Self {
         let seq_len = sequence_length as usize;
         let d = hidden_dim as usize;
-        assert_eq!(matrix.len(), seq_len * d, "Matrix size mismatch: expected {}, got {}", seq_len * d, matrix.len());
+        assert_eq!(
+            matrix.len(),
+            seq_len * d,
+            "Matrix size mismatch: expected {}, got {}",
+            seq_len * d,
+            matrix.len()
+        );
 
         match dtype {
             ActivationDtype::Int8PerRow => {
-                // Per-row layout: For each token s in [0, S): [scale_s: f32 (4B, LE)][quant_data: i8 * d]
-                let row_bytes = 4 + d;
+                // Outlier-Preserving Per-Row INT8 for LLM hidden dims (d >= 256):
+                // Extracts top-8 outlier channels per row as exact (u16 idx, f32 val) pairs
+                // so Qwen2/DeepSeek/Llama residual outliers never crush small channel resolution.
+                let k_outliers = if d >= 256 { 8usize } else { 0usize };
+                let row_bytes = 4 + k_outliers * 6 + d;
                 let mut payload = BytesMut::with_capacity(seq_len * row_bytes);
 
-                for s in 0..seq_len {
-                    let row = &matrix[s * d..(s + 1) * d];
-                    let mut max_abs = 0.0f32;
-                    for &val in row {
-                        let abs = val.abs();
-                        if abs > max_abs && !abs.is_nan() {
-                            max_abs = abs;
+                for row in matrix.chunks_exact(d) {
+                    let mut outlier_idx = [usize::MAX; 8];
+                    if k_outliers > 0 {
+                        let mut top_vals = [0.0f32; 8];
+                        for (idx, &val) in row.iter().enumerate() {
+                            let a = val.abs();
+                            if a > top_vals[7] {
+                                let mut pos = 7;
+                                while pos > 0 && a > top_vals[pos - 1] {
+                                    top_vals[pos] = top_vals[pos - 1];
+                                    outlier_idx[pos] = outlier_idx[pos - 1];
+                                    pos -= 1;
+                                }
+                                top_vals[pos] = a;
+                                outlier_idx[pos] = idx;
+                            }
                         }
                     }
 
-                    // Strict protection against underflow and divide-by-zero
+                    let mut max_abs = 0.0f32;
+                    for (idx, &val) in row.iter().enumerate() {
+                        if k_outliers > 0 && outlier_idx.contains(&idx) {
+                            continue;
+                        }
+                        let a = val.abs();
+                        if a > max_abs {
+                            max_abs = a;
+                        }
+                    }
+
                     let scale = if max_abs > 1e-12 {
                         max_abs / 127.0
                     } else {
                         1.0
                     };
-                    let inv_scale = 1.0 / scale;
-
+                    let inv_scale = if max_abs > 1e-12 {
+                        127.0 / max_abs
+                    } else {
+                        0.0
+                    };
                     payload.extend_from_slice(&scale.to_le_bytes());
-                    for &val in row {
-                        let q = if max_abs > 1e-12 {
-                            (val * inv_scale).round().clamp(-127.0, 127.0) as i8
+
+                    for &idx in outlier_idx.iter().take(k_outliers) {
+                        let (u_idx, exact_val) = if idx < d {
+                            (idx as u16, row[idx])
                         } else {
-                            0i8
+                            (0u16, 0.0f32)
                         };
-                        payload.extend_from_slice(&(q as u8).to_le_bytes());
+                        payload.extend_from_slice(&u_idx.to_le_bytes());
+                        payload.extend_from_slice(&exact_val.to_le_bytes());
+                    }
+
+                    let base = payload.len();
+                    payload.resize(base + d, 0);
+                    for (dst, &val) in payload[base..base + d].iter_mut().zip(row.iter()) {
+                        let scaled = (val * inv_scale).clamp(-127.0, 127.0);
+                        let q = if scaled >= 0.0 {
+                            (scaled + 0.5) as i8
+                        } else {
+                            (scaled - 0.5) as i8
+                        };
+                        *dst = q as u8;
                     }
                 }
 
@@ -457,6 +562,32 @@ impl ActivationFrame {
 
                 Self { header, payload }
             }
+            ActivationDtype::Fp16 => {
+                let mut payload = BytesMut::with_capacity(seq_len * d * 2);
+                for &val in matrix {
+                    let half = float_to_half(val);
+                    payload.extend_from_slice(&half.to_le_bytes());
+                }
+
+                let payload = payload.freeze();
+                let header = ActivationHeader {
+                    magic: ACTIVATION_MAGIC,
+                    version: PROTOCOL_VERSION,
+                    session_id,
+                    sequence_id,
+                    sequence_length,
+                    token_position,
+                    stage_index,
+                    total_stages,
+                    layer_index,
+                    hidden_dim,
+                    dtype: ActivationDtype::Fp16 as u8,
+                    flags,
+                    payload_bytes: payload.len() as u32,
+                };
+
+                Self { header, payload }
+            }
             _ => {
                 // Raw uncompressed FP32 (endian-safe LittleEndian serialization)
                 let mut payload = BytesMut::with_capacity(matrix.len() * 4);
@@ -484,47 +615,82 @@ impl ActivationFrame {
         }
     }
 
+    #[allow(clippy::needless_range_loop)]
     pub fn dequantize_into(&self, out: &mut [f32]) -> Result<()> {
         let seq_len = self.header.sequence_length as usize;
         let d = self.header.hidden_dim as usize;
         let total_elements = seq_len * d;
-        ensure!(out.len() >= total_elements, "Output buffer too small for dequantization (got {}, required {})", out.len(), total_elements);
+        ensure!(
+            out.len() >= total_elements,
+            "Output buffer too small for dequantization (got {}, required {})",
+            out.len(),
+            total_elements
+        );
 
         match ActivationDtype::from_u8(self.header.dtype)? {
             ActivationDtype::Int8PerRow => {
-                let row_bytes = 4 + d;
-                ensure!(self.payload.len() == seq_len * row_bytes, "Invalid INT8-per-row payload length (got {}, expected {})", self.payload.len(), seq_len * row_bytes);
+                let k_outliers = if d >= 256 { 8usize } else { 0usize };
+                let expected_row_bytes = 4 + k_outliers * 6 + d;
+                ensure!(
+                    self.payload.len() == seq_len * expected_row_bytes,
+                    "Invalid INT8-per-row payload length (got {}, expected {})",
+                    self.payload.len(),
+                    seq_len * expected_row_bytes
+                );
 
-                let mut offset = 0;
-                for s in 0..seq_len {
-                    let scale_bytes: [u8; 4] = self.payload[offset..offset + 4].try_into()?;
-                    let scale = f32::from_le_bytes(scale_bytes);
-                    offset += 4;
-
-                    let row_quant = &self.payload[offset..offset + d];
-                    offset += d;
-
+                for (s, row_bytes) in self.payload.chunks_exact(expected_row_bytes).enumerate() {
+                    let scale = f32::from_le_bytes([
+                        row_bytes[0],
+                        row_bytes[1],
+                        row_bytes[2],
+                        row_bytes[3],
+                    ]);
+                    let q_offset = 4 + k_outliers * 6;
+                    let row_quant = &row_bytes[q_offset..q_offset + d];
                     let out_row = &mut out[s * d..(s + 1) * d];
-                    for i in 0..d {
-                        out_row[i] = (row_quant[i] as i8 as f32) * scale;
+                    for (dst, &qb) in out_row.iter_mut().zip(row_quant.iter()) {
+                        *dst = (qb as i8 as f32) * scale;
+                    }
+                    for i in 0..k_outliers {
+                        let off = 4 + i * 6;
+                        let u_idx =
+                            u16::from_le_bytes([row_bytes[off], row_bytes[off + 1]]) as usize;
+                        let exact_val = f32::from_le_bytes([
+                            row_bytes[off + 2],
+                            row_bytes[off + 3],
+                            row_bytes[off + 4],
+                            row_bytes[off + 5],
+                        ]);
+                        if u_idx < d {
+                            out_row[u_idx] = exact_val;
+                        }
                     }
                 }
             }
             ActivationDtype::Fp8E4M3 => {
-                ensure!(self.payload.len() == total_elements, "Invalid FP8 payload length");
+                ensure!(
+                    self.payload.len() == total_elements,
+                    "Invalid FP8 payload length"
+                );
                 for i in 0..total_elements {
                     out[i] = fp8_e4m3_to_f32(self.payload[i]);
                 }
             }
             ActivationDtype::RawF32 => {
-                ensure!(self.payload.len() == total_elements * 4, "Invalid FP32 payload length");
+                ensure!(
+                    self.payload.len() == total_elements * 4,
+                    "Invalid FP32 payload length"
+                );
                 for i in 0..total_elements {
                     let chunk: [u8; 4] = self.payload[i * 4..(i + 1) * 4].try_into()?;
                     out[i] = f32::from_le_bytes(chunk);
                 }
             }
             ActivationDtype::Fp16 => {
-                ensure!(self.payload.len() == total_elements * 2, "Invalid FP16 payload length");
+                ensure!(
+                    self.payload.len() == total_elements * 2,
+                    "Invalid FP16 payload length"
+                );
                 for i in 0..total_elements {
                     let chunk: [u8; 2] = self.payload[i * 2..(i + 1) * 2].try_into()?;
                     let half = u16::from_le_bytes(chunk);
@@ -532,7 +698,10 @@ impl ActivationFrame {
                 }
             }
             ActivationDtype::Bf16 => {
-                ensure!(self.payload.len() == total_elements * 2, "Invalid BF16 payload length");
+                ensure!(
+                    self.payload.len() == total_elements * 2,
+                    "Invalid BF16 payload length"
+                );
                 for i in 0..total_elements {
                     let chunk: [u8; 2] = self.payload[i * 2..(i + 1) * 2].try_into()?;
                     let bits = (u16::from_le_bytes(chunk) as u32) << 16;
@@ -546,11 +715,19 @@ impl ActivationFrame {
     pub fn to_f32_vec(&self) -> Result<Vec<f32>> {
         let total_elements = (self.header.sequence_length as usize)
             .checked_mul(self.header.hidden_dim as usize)
-            .ok_or_else(|| anyhow::anyhow!("Integer overflow calculating total f32 elements (seq_len={}, dim={})", self.header.sequence_length, self.header.hidden_dim))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Integer overflow calculating total f32 elements (seq_len={}, dim={})",
+                    self.header.sequence_length,
+                    self.header.hidden_dim
+                )
+            })?;
+        let max_f32_elements = (MAX_ACTIVATION_PAYLOAD_BYTES as usize) / std::mem::size_of::<f32>();
         ensure!(
-            total_elements <= (MAX_ACTIVATION_PAYLOAD_BYTES as usize),
-            "Total elements ({}) exceeds safety limit ({})",
+            total_elements <= max_f32_elements,
+            "Total elements ({}) exceeds safety limit ({} elements / {} bytes)",
             total_elements,
+            max_f32_elements,
             MAX_ACTIVATION_PAYLOAD_BYTES
         );
         let mut out = vec![0.0f32; total_elements];
@@ -695,7 +872,11 @@ pub fn fp8_e4m3_to_f32(byte: u8) -> f32 {
     let mant_f = 1.0 + (mant as f32) / 8.0;
     let exp_f = 2.0f32.powi(exp as i32 - 7);
     let val = mant_f * exp_f;
-    if sign == 1 { -val } else { val }
+    if sign == 1 {
+        -val
+    } else {
+        val
+    }
 }
 
 /// Token response frame streamed from final stage worker back to coordinator.
@@ -728,20 +909,27 @@ impl TokenResponseFrame {
     }
 
     pub async fn decode_async<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Self> {
-        let mut magic = [0u8; 4];
-        reader.read_exact(&mut magic).await?;
-        ensure!(magic == TOKEN_RESP_MAGIC, "Invalid token response magic: {:?}", magic);
+        let mut hdr = [0u8; Self::HEADER_SIZE];
+        reader.read_exact(&mut hdr).await?;
+        ensure!(
+            hdr[0..4] == TOKEN_RESP_MAGIC,
+            "Invalid token response magic: {:?}",
+            &hdr[0..4]
+        );
 
-        let version = reader.read_u16().await?;
-        ensure!(version == PROTOCOL_VERSION, "Unsupported token response protocol version: {}", version);
+        let version = u16::from_be_bytes([hdr[4], hdr[5]]);
+        ensure!(
+            version == PROTOCOL_VERSION,
+            "Unsupported token response protocol version: {}",
+            version
+        );
 
-        let session_id = reader.read_u64().await?;
-        let sequence_id = reader.read_u64().await?;
-        let token_id = reader.read_i32().await?;
-        let is_eos = reader.read_u8().await? != 0;
-        let eval_time_bits = reader.read_u32().await?;
-        let eval_time_ms = f32::from_bits(eval_time_bits);
-        let text_len = reader.read_u32().await? as usize;
+        let session_id = u64::from_be_bytes(hdr[6..14].try_into().unwrap());
+        let sequence_id = u64::from_be_bytes(hdr[14..22].try_into().unwrap());
+        let token_id = i32::from_be_bytes(hdr[22..26].try_into().unwrap());
+        let is_eos = hdr[26] != 0;
+        let eval_time_ms = f32::from_bits(u32::from_be_bytes(hdr[27..31].try_into().unwrap()));
+        let text_len = u32::from_be_bytes(hdr[31..35].try_into().unwrap()) as usize;
 
         ensure!(
             text_len <= (MAX_TOKEN_TEXT_BYTES as usize),
@@ -767,12 +955,20 @@ impl TokenResponseFrame {
     pub fn decode_sync<R: Read>(reader: &mut R) -> Result<Self> {
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
-        ensure!(magic == TOKEN_RESP_MAGIC, "Invalid token response magic: {:?}", magic);
+        ensure!(
+            magic == TOKEN_RESP_MAGIC,
+            "Invalid token response magic: {:?}",
+            magic
+        );
 
         let mut ver_buf = [0u8; 2];
         reader.read_exact(&mut ver_buf)?;
         let version = u16::from_be_bytes(ver_buf);
-        ensure!(version == PROTOCOL_VERSION, "Unsupported token response protocol version: {}", version);
+        ensure!(
+            version == PROTOCOL_VERSION,
+            "Unsupported token response protocol version: {}",
+            version
+        );
 
         let mut u64_buf = [0u8; 8];
         reader.read_exact(&mut u64_buf)?;
@@ -838,7 +1034,26 @@ impl HandshakeRequest {
         let arch_bytes = self.model_architecture.as_bytes();
         let csum_bytes = self.checksum_prefix.as_bytes();
         let peer_bytes = self.downstream_peer.as_bytes();
-        let mut buf = BytesMut::with_capacity(64 + arch_bytes.len() + csum_bytes.len() + peer_bytes.len());
+        assert!(
+            peer_bytes.len() <= MAX_HANDSHAKE_STR_LEN,
+            "downstream_peer length {} exceeds limit {}",
+            peer_bytes.len(),
+            MAX_HANDSHAKE_STR_LEN
+        );
+        assert!(
+            arch_bytes.len() <= MAX_HANDSHAKE_STR_LEN,
+            "model_architecture length {} exceeds limit {}",
+            arch_bytes.len(),
+            MAX_HANDSHAKE_STR_LEN
+        );
+        assert!(
+            csum_bytes.len() <= MAX_HANDSHAKE_STR_LEN,
+            "checksum_prefix length {} exceeds limit {}",
+            csum_bytes.len(),
+            MAX_HANDSHAKE_STR_LEN
+        );
+        let mut buf =
+            BytesMut::with_capacity(64 + arch_bytes.len() + csum_bytes.len() + peer_bytes.len());
 
         buf.extend_from_slice(&HANDSHAKE_REQ_MAGIC);
         buf.extend_from_slice(&self.version.to_be_bytes());
@@ -865,13 +1080,21 @@ impl HandshakeRequest {
     pub async fn decode_async<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Self> {
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic).await?;
-        ensure!(magic == HANDSHAKE_REQ_MAGIC, "Invalid handshake request magic: {:?}", magic);
+        ensure!(
+            magic == HANDSHAKE_REQ_MAGIC,
+            "Invalid handshake request magic: {:?}",
+            magic
+        );
 
         let version = reader.read_u16().await?;
         if version < 4 {
             bail!("Handshake rejected: received legacy protocol version {} (< 4). AeroMesh requires PROTOCOL_VERSION 4 for multi-node pipeline support.", version);
         }
-        ensure!(version == PROTOCOL_VERSION, "Unsupported handshake protocol version: {}", version);
+        ensure!(
+            version == PROTOCOL_VERSION,
+            "Unsupported handshake protocol version: {}",
+            version
+        );
 
         let mut auth_token = [0u8; 32];
         reader.read_exact(&mut auth_token).await?;
@@ -917,8 +1140,17 @@ impl HandshakeRequest {
         reader.read_exact(&mut csum_buf).await?;
         let checksum_prefix = String::from_utf8(csum_buf)?;
 
-        ensure!(total_stages >= 2, "Invalid total_stages in handshake request: {}", total_stages);
-        ensure!(stage_index < total_stages, "Invalid stage_index {} >= total_stages {}", stage_index, total_stages);
+        ensure!(
+            total_stages >= 2,
+            "Invalid total_stages in handshake request: {}",
+            total_stages
+        );
+        ensure!(
+            stage_index < total_stages,
+            "Invalid stage_index {} >= total_stages {}",
+            stage_index,
+            total_stages
+        );
 
         Ok(Self {
             version,
@@ -948,11 +1180,15 @@ pub struct HandshakeResponse {
 
 impl HandshakeResponse {
     pub fn ok(auth_token: [u8; 32]) -> Self {
+        Self::ok_with_layers(auth_token, 0)
+    }
+
+    pub fn ok_with_layers(auth_token: [u8; 32], worker_layer_count: u32) -> Self {
         Self {
             version: PROTOCOL_VERSION,
             auth_token,
             accepted: true,
-            worker_layer_count: 0,
+            worker_layer_count,
             error_message: String::new(),
         }
     }
@@ -986,13 +1222,21 @@ impl HandshakeResponse {
     pub async fn decode_async<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Self> {
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic).await?;
-        ensure!(magic == HANDSHAKE_RESP_MAGIC, "Invalid handshake response magic: {:?}", magic);
+        ensure!(
+            magic == HANDSHAKE_RESP_MAGIC,
+            "Invalid handshake response magic: {:?}",
+            magic
+        );
 
         let version = reader.read_u16().await?;
         if version < 4 {
             bail!("Handshake response rejected: received legacy protocol version {} (< 4). AeroMesh requires PROTOCOL_VERSION 4.", version);
         }
-        ensure!(version == PROTOCOL_VERSION, "Unsupported handshake response protocol version: {}", version);
+        ensure!(
+            version == PROTOCOL_VERSION,
+            "Unsupported handshake response protocol version: {}",
+            version
+        );
 
         let mut auth_token = [0u8; 32];
         reader.read_exact(&mut auth_token).await?;
@@ -1047,9 +1291,42 @@ fn half_to_float(h: u16) -> f32 {
             f32::from_bits((sign << 31) | 0x7f800000 | (mant << 13))
         }
     } else {
-        let exp_f = (exp + 127 - 15) as u32;
+        let exp_f = exp + 127 - 15;
         let mant_f = mant << 13;
         f32::from_bits((sign << 31) | (exp_f << 23) | mant_f)
+    }
+}
+
+pub fn float_to_half(val: f32) -> u16 {
+    let bits = val.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xFF) as i32;
+    let mant = bits & 0x007FFFFF;
+
+    if exp == 255 {
+        if mant != 0 {
+            0x7E00 | ((mant >> 13) as u16)
+        } else {
+            sign | 0x7C00
+        }
+    } else {
+        let new_exp = exp - 127 + 15;
+        if new_exp >= 31 {
+            sign | 0x7C00
+        } else if new_exp <= 0 {
+            if 10 - new_exp > 24 {
+                sign
+            } else {
+                let m = mant | 0x00800000;
+                let shift = (14 - new_exp) as u32;
+                let half_mant = (m >> shift) as u16;
+                sign | half_mant
+            }
+        } else {
+            let half_exp = (new_exp as u16) << 10;
+            let half_mant = (mant >> 13) as u16;
+            sign | half_exp | half_mant
+        }
     }
 }
 
@@ -1071,7 +1348,11 @@ pub struct ActivationStats {
 /// Boundary Watchdog: Inspects intermediate activation tensors at node egress/ingress boundaries.
 pub fn inspect_activations(tag: &str, tensor: &[f32], shape: &[usize]) -> Result<ActivationStats> {
     if tensor.is_empty() {
-        bail!("🚨 ActivationWatchdog [{}]: tensor buffer is empty! Shape: {:?}", tag, shape);
+        bail!(
+            "🚨 ActivationWatchdog [{}]: tensor buffer is empty! Shape: {:?}",
+            tag,
+            shape
+        );
     }
 
     let mut sum = 0.0f64;
@@ -1089,8 +1370,12 @@ pub fn inspect_activations(tag: &str, tensor: &[f32], shape: &[usize]) -> Result
         } else {
             sum += v as f64;
             sum_sq += (v as f64) * (v as f64);
-            if v < min { min = v; }
-            if v > max { max = v; }
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
         }
     }
 
@@ -1101,16 +1386,33 @@ pub fn inspect_activations(tag: &str, tensor: &[f32], shape: &[usize]) -> Result
     let l2_norm = sum_sq.sqrt() as f32;
 
     if has_nan {
-        bail!("🚨 ActivationWatchdog [{}]: NaN detected in activation tensor! Shape: {:?}", tag, shape);
+        bail!(
+            "🚨 ActivationWatchdog [{}]: NaN detected in activation tensor! Shape: {:?}",
+            tag,
+            shape
+        );
     }
     if has_inf {
-        bail!("🚨 ActivationWatchdog [{}]: Inf detected in activation tensor! Shape: {:?}", tag, shape);
+        bail!(
+            "🚨 ActivationWatchdog [{}]: Inf detected in activation tensor! Shape: {:?}",
+            tag,
+            shape
+        );
     }
     if l2_norm == 0.0 {
-        tracing::warn!("⚠️ ActivationWatchdog [{}]: L2 norm is 0.0 (all-zero tensor)! Shape: {:?}", tag, shape);
+        tracing::warn!(
+            "⚠️ ActivationWatchdog [{}]: L2 norm is 0.0 (all-zero tensor)! Shape: {:?}",
+            tag,
+            shape
+        );
     }
     if max.abs() > 500.0 || min.abs() > 500.0 {
-        tracing::warn!("⚠️ ActivationWatchdog [{}]: High activation magnitude detected: min={:.3}, max={:.3}", tag, min, max);
+        tracing::warn!(
+            "⚠️ ActivationWatchdog [{}]: High activation magnitude detected: min={:.3}, max={:.3}",
+            tag,
+            min,
+            max
+        );
     }
 
     tracing::debug!(
@@ -1150,8 +1452,15 @@ mod tests {
         let data = vec![1.2345f32; seq_len * hidden_dim];
 
         let frame = ActivationFrame::from_f32_matrix_quantized(
-            123, 1, seq_len as u32, 0, 13, hidden_dim as u32,
-            &data, ActivationDtype::RawF32, 0,
+            123,
+            1,
+            seq_len as u32,
+            0,
+            13,
+            hidden_dim as u32,
+            &data,
+            ActivationDtype::RawF32,
+            0,
         );
 
         let mut recovered = vec![0.0f32; data.len()];
@@ -1166,14 +1475,21 @@ mod tests {
         let mut data = vec![0.0f32; seq_len * hidden_dim];
 
         // Fill with synthetic activations + deliberate outlier at row 2, col 50
-        for i in 0..data.len() {
-            data[i] = ((i % 100) as f32 - 50.0) / 50.0; // [-1.0, 1.0]
+        for (i, item) in data.iter_mut().enumerate() {
+            *item = ((i % 100) as f32 - 50.0) / 50.0; // [-1.0, 1.0]
         }
         data[2 * hidden_dim + 50] = 42.5; // Outlier
 
         let frame = ActivationFrame::from_f32_matrix_quantized(
-            1234, 1, seq_len as u32, 0, 13, hidden_dim as u32,
-            &data, ActivationDtype::Int8PerRow, 0,
+            1234,
+            1,
+            seq_len as u32,
+            0,
+            13,
+            hidden_dim as u32,
+            &data,
+            ActivationDtype::Int8PerRow,
+            0,
         );
 
         let mut recovered = vec![0.0f32; data.len()];
@@ -1182,7 +1498,10 @@ mod tests {
         // Check outlier recovery accuracy
         let outlier_orig = data[2 * hidden_dim + 50];
         let outlier_rec = recovered[2 * hidden_dim + 50];
-        assert!((outlier_orig - outlier_rec).abs() < 0.5, "Outlier should be preserved accurately");
+        assert!(
+            (outlier_orig - outlier_rec).abs() < 0.5,
+            "Outlier should be preserved accurately"
+        );
 
         // Check average row error
         let mut max_err = 0.0f32;
@@ -1192,7 +1511,10 @@ mod tests {
                 max_err = diff;
             }
         }
-        assert!(max_err < 0.6, "Max error under INT8 scaling should be minimal");
+        assert!(
+            max_err < 0.6,
+            "Max error under INT8 scaling should be minimal"
+        );
     }
 
     #[test]
@@ -1202,7 +1524,11 @@ mod tests {
             let fp8 = f32_to_fp8_e4m3(v);
             let rec = fp8_e4m3_to_f32(fp8);
             let diff = (v - rec).abs();
-            assert!(diff <= 0.5 * v.abs().max(0.1), "FP8 roundtrip error too large for {}", v);
+            assert!(
+                diff <= 0.5 * v.abs().max(0.1),
+                "FP8 roundtrip error too large for {}",
+                v
+            );
         }
     }
 
@@ -1213,17 +1539,46 @@ mod tests {
         let mut data: Vec<f32> = (0..d).map(|i| ((i as f32) * 0.37).sin() * 2.0).collect();
         data[7] = 4000.0;
 
-        let int8 = ActivationFrame::from_f32_matrix_quantized(1, 0, 1, 0, 23, d as u32, &data, ActivationDtype::Int8PerRow, 0);
+        let int8 = ActivationFrame::from_f32_matrix_quantized(
+            1,
+            0,
+            1,
+            0,
+            23,
+            d as u32,
+            &data,
+            ActivationDtype::Int8PerRow,
+            0,
+        );
         let int8_rec = int8.to_f32_vec().unwrap();
         let int8_zeroed = (0..d).filter(|&i| i != 7 && int8_rec[i] == 0.0).count();
-        assert!(int8_zeroed > d / 2, "INT8 per-row is expected to destroy small channels next to outliers");
+        assert!(
+            int8_zeroed > d / 2,
+            "INT8 per-row is expected to destroy small channels next to outliers"
+        );
 
-        let bf16 = ActivationFrame::from_f32_matrix_quantized(1, 0, 1, 0, 23, d as u32, &data, ActivationDtype::Bf16, 0);
+        let bf16 = ActivationFrame::from_f32_matrix_quantized(
+            1,
+            0,
+            1,
+            0,
+            23,
+            d as u32,
+            &data,
+            ActivationDtype::Bf16,
+            0,
+        );
         assert_eq!(bf16.header.dtype, ActivationDtype::Bf16 as u8);
         let bf16_rec = bf16.to_f32_vec().unwrap();
         for i in 0..d {
             let tol = data[i].abs() * 0.01 + 1e-3;
-            assert!((data[i] - bf16_rec[i]).abs() <= tol, "BF16 error too large at {}: {} vs {}", i, data[i], bf16_rec[i]);
+            assert!(
+                (data[i] - bf16_rec[i]).abs() <= tol,
+                "BF16 error too large at {}: {} vs {}",
+                i,
+                data[i],
+                bf16_rec[i]
+            );
         }
     }
 
@@ -1259,8 +1614,14 @@ mod tests {
         BigEndian::write_u32(&mut buf[40..44], MAX_ACTIVATION_PAYLOAD_BYTES + 1);
 
         let res = ActivationHeader::decode(&buf);
-        assert!(res.is_err(), "Must reject payload exceeding MAX_ACTIVATION_PAYLOAD_BYTES");
-        assert!(res.unwrap_err().to_string().contains("exceeds maximum safety ceiling"));
+        assert!(
+            res.is_err(),
+            "Must reject payload exceeding MAX_ACTIVATION_PAYLOAD_BYTES"
+        );
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds maximum safety ceiling"));
 
         // Inject payload_bytes = 0xFFFFFFFF
         BigEndian::write_u32(&mut buf[40..44], u32::MAX);
@@ -1283,8 +1644,14 @@ mod tests {
         BigEndian::write_u32(&mut buf[40..44], 128); // malicious/corrupted claim: 128 bytes
 
         let res = ActivationHeader::decode(&buf);
-        assert!(res.is_err(), "Must reject mathematically mismatched payload length");
-        assert!(res.unwrap_err().to_string().contains("Mismatched activation payload size"));
+        assert!(
+            res.is_err(),
+            "Must reject mathematically mismatched payload length"
+        );
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Mismatched activation payload size"));
     }
 
     #[test]
@@ -1302,7 +1669,10 @@ mod tests {
         BigEndian::write_u32(&mut buf[40..44], 4096);
 
         let res = ActivationHeader::decode(&buf);
-        assert!(res.is_err(), "Must reject sequence_length > MAX_SEQUENCE_LENGTH");
+        assert!(
+            res.is_err(),
+            "Must reject sequence_length > MAX_SEQUENCE_LENGTH"
+        );
 
         // Now test hidden_dim > MAX_HIDDEN_DIM
         BigEndian::write_u32(&mut buf[22..26], 1);
@@ -1318,8 +1688,15 @@ mod tests {
 
     #[test]
     fn test_activation_header_rejects_integer_overflow() {
-        let res = ActivationHeader::calculate_expected_payload_bytes(u32::MAX, u32::MAX, ActivationDtype::RawF32 as u8);
-        assert!(res.is_err(), "Must fail on integer overflow in dimensions calculation");
+        let res = ActivationHeader::calculate_expected_payload_bytes(
+            u32::MAX,
+            u32::MAX,
+            ActivationDtype::RawF32 as u8,
+        );
+        assert!(
+            res.is_err(),
+            "Must fail on integer overflow in dimensions calculation"
+        );
     }
 
     #[tokio::test]
@@ -1332,13 +1709,16 @@ mod tests {
         stream.extend_from_slice(&42i32.to_be_bytes()); // token_id
         stream.push(0); // is_eos = false
         stream.extend_from_slice(&1.5f32.to_bits().to_be_bytes()); // eval_time_ms
-        // Malicious length: 1 MB text (> MAX_TOKEN_TEXT_BYTES = 64 KB)
+                                                                   // Malicious length: 1 MB text (> MAX_TOKEN_TEXT_BYTES = 64 KB)
         stream.extend_from_slice(&(1024 * 1024u32).to_be_bytes());
 
         let mut cursor = std::io::Cursor::new(stream);
         let res = TokenResponseFrame::decode_async(&mut cursor).await;
         assert!(res.is_err(), "Must reject token text exceeding ceiling");
-        assert!(res.unwrap_err().to_string().contains("exceeds maximum safety ceiling"));
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds maximum safety ceiling"));
     }
 
     #[test]
@@ -1357,7 +1737,10 @@ mod tests {
         let mut cursor = std::io::Cursor::new(stream);
         let res = TokenResponseFrame::decode_sync(&mut cursor);
         assert!(res.is_err(), "Must reject token text exceeding ceiling");
-        assert!(res.unwrap_err().to_string().contains("exceeds maximum safety ceiling"));
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds maximum safety ceiling"));
     }
 
     #[tokio::test]
@@ -1369,16 +1752,19 @@ mod tests {
         stream.push(0); // stage_index
         stream.push(2); // total_stages
         stream.extend_from_slice(&4096u32.to_be_bytes()); // hidden_dim
-        stream.extend_from_slice(&32u32.to_be_bytes());   // total_layers
-        stream.extend_from_slice(&0u32.to_be_bytes());    // worker_layer_start
-        stream.extend_from_slice(&16u32.to_be_bytes());   // worker_layer_end
-        stream.extend_from_slice(&0u16.to_be_bytes());    // downstream_peer len = 0
-        // Malicious arch length: 1000 bytes (> MAX_HANDSHAKE_STR_LEN = 512)
+        stream.extend_from_slice(&32u32.to_be_bytes()); // total_layers
+        stream.extend_from_slice(&0u32.to_be_bytes()); // worker_layer_start
+        stream.extend_from_slice(&16u32.to_be_bytes()); // worker_layer_end
+        stream.extend_from_slice(&0u16.to_be_bytes()); // downstream_peer len = 0
+                                                       // Malicious arch length: 1000 bytes (> MAX_HANDSHAKE_STR_LEN = 512)
         stream.extend_from_slice(&1000u16.to_be_bytes());
 
         let mut cursor = std::io::Cursor::new(stream);
         let res = HandshakeRequest::decode_async(&mut cursor).await;
-        assert!(res.is_err(), "Must reject architecture string exceeding limit");
+        assert!(
+            res.is_err(),
+            "Must reject architecture string exceeding limit"
+        );
         assert!(res.unwrap_err().to_string().contains("exceeds limit"));
     }
 
@@ -1390,12 +1776,15 @@ mod tests {
         stream.extend_from_slice(&[0u8; 32]); // auth_token
         stream.push(0); // accepted = false
         stream.extend_from_slice(&0u32.to_be_bytes()); // worker_layer_count
-        // Malicious error string length: 10000 bytes (> MAX_HANDSHAKE_ERR_LEN = 8192)
+                                                       // Malicious error string length: 10000 bytes (> MAX_HANDSHAKE_ERR_LEN = 8192)
         stream.extend_from_slice(&10000u16.to_be_bytes());
 
         let mut cursor = std::io::Cursor::new(stream);
         let res = HandshakeResponse::decode_async(&mut cursor).await;
-        assert!(res.is_err(), "Must reject handshake error string exceeding limit");
+        assert!(
+            res.is_err(),
+            "Must reject handshake error string exceeding limit"
+        );
         assert!(res.unwrap_err().to_string().contains("exceeds limit"));
     }
 
@@ -1451,7 +1840,9 @@ mod tests {
         let resp = HandshakeResponse::ok(auth_token);
         let resp_encoded = resp.encode();
         let mut resp_cursor = std::io::Cursor::new(resp_encoded.to_vec());
-        let resp_decoded = HandshakeResponse::decode_async(&mut resp_cursor).await.unwrap();
+        let resp_decoded = HandshakeResponse::decode_async(&mut resp_cursor)
+            .await
+            .unwrap();
         assert_eq!(resp, resp_decoded);
         assert_eq!(resp_decoded.auth_token, auth_token);
 
@@ -1462,9 +1853,16 @@ mod tests {
         legacy_v3_bytes.extend_from_slice(&[0u8; 64]);
         let mut legacy_cursor = std::io::Cursor::new(legacy_v3_bytes);
         let legacy_res = HandshakeRequest::decode_async(&mut legacy_cursor).await;
-        assert!(legacy_res.is_err(), "Legacy protocol v3 must be explicitly rejected");
+        assert!(
+            legacy_res.is_err(),
+            "Legacy protocol v3 must be explicitly rejected"
+        );
         let err_str = legacy_res.unwrap_err().to_string();
-        assert!(err_str.contains("legacy protocol version 3"), "Error message should mention legacy version: {}", err_str);
+        assert!(
+            err_str.contains("legacy protocol version 3"),
+            "Error message should mention legacy version: {}",
+            err_str
+        );
     }
 
     #[tokio::test]
@@ -1474,8 +1872,17 @@ mod tests {
         let data = vec![0.5f32; seq_len * hidden_dim];
 
         let frame = ActivationFrame::from_f32_matrix_quantized_stage(
-            999, 42, seq_len as u32, 10, 1, 3, 16, hidden_dim as u32,
-            &data, ActivationDtype::RawF32, 0,
+            999,
+            42,
+            seq_len as u32,
+            10,
+            1,
+            3,
+            16,
+            hidden_dim as u32,
+            &data,
+            ActivationDtype::RawF32,
+            0,
         );
 
         assert_eq!(frame.header.stage_index, 1);
@@ -1494,5 +1901,40 @@ mod tests {
         let recovered = decoded.to_f32_vec().unwrap();
         assert_eq!(data, recovered);
     }
-}
 
+    #[test]
+    fn test_fp16_roundtrip() {
+        let hidden_dim = 64;
+        let seq_len = 1;
+        let data = vec![1.0f32, -2.5f32, 0.125f32, 65504.0f32];
+        let mut full_data = vec![0.0f32; hidden_dim];
+        full_data[..data.len()].copy_from_slice(&data);
+
+        let frame = ActivationFrame::from_f32_matrix_quantized_stage(
+            123,
+            1,
+            seq_len as u32,
+            0,
+            0,
+            2,
+            8,
+            hidden_dim as u32,
+            &full_data,
+            ActivationDtype::Fp16,
+            0,
+        );
+
+        assert_eq!(frame.header.dtype, ActivationDtype::Fp16 as u8);
+        assert_eq!(frame.payload.len(), hidden_dim * 2);
+
+        let recovered = frame.to_f32_vec().unwrap();
+        for (orig, rec) in full_data.iter().zip(recovered.iter()) {
+            assert!(
+                (orig - rec).abs() < 1e-3,
+                "Mismatch: orig {} vs rec {}",
+                orig,
+                rec
+            );
+        }
+    }
+}

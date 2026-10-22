@@ -1540,13 +1540,45 @@ body::after {
     bottom: 0;
     box-shadow: 12px 0 40px rgba(0, 0, 0, 0.9);
   }
-  
+
+  /* The sidebar overlays the top nav at this width, which put the nav's
+     #sidebar-toggle-btn underneath it and left the drawer impossible to close
+     (the in-drawer close button was display:none with no handler). Raise the
+     nav above the drawer so the toggle stays reachable. */
+  .top-nav {
+    z-index: 30;
+    position: relative;
+  }
+
   .hero-suggestions-grid {
     grid-template-columns: 1fr;
   }
-  
+
   #chat-viewport {
     padding: 16px 14px 200px 14px;
+  }
+}
+
+/* ==========================================================================
+   REDUCED MOTION
+   The dashboard ships 12 keyframe animations, an always-on canvas animation
+   and ~29 backdrop-filter surfaces. Honour the OS preference rather than
+   animating unconditionally.
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* The decorative background mesh is pure motion; hide it entirely. */
+  #liquid-canvas {
+    display: none;
   }
 }
 

@@ -1,10 +1,10 @@
+use anyhow::{bail, ensure, Context, Result};
+use byteorder::{LittleEndian, ReadBytesExt};
+use memmap2::Mmap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
-use anyhow::{bail, ensure, Context, Result};
-use byteorder::{LittleEndian, ReadBytesExt};
-use memmap2::Mmap;
 use tracing::{info, warn};
 
 /// GGUF Value Types
@@ -141,7 +141,11 @@ impl GgufSliceLoader {
         ensure!(&magic == b"GGUF", "Invalid GGUF magic bytes");
 
         let version = cursor.read_u32::<LittleEndian>()?;
-        ensure!(version == 2 || version == 3, "Unsupported GGUF version: {}", version);
+        ensure!(
+            version == 2 || version == 3,
+            "Unsupported GGUF version: {}",
+            version
+        );
 
         let tensor_count = cursor.read_u64::<LittleEndian>()? as usize;
         let kv_count = cursor.read_u64::<LittleEndian>()? as usize;
@@ -155,7 +159,7 @@ impl GgufSliceLoader {
         for _ in 0..kv_count {
             let key = read_gguf_string(&mut cursor)?;
             let val_type = GgufValueType::from_u32(cursor.read_u32::<LittleEndian>()?)?;
-            
+
             match key.as_str() {
                 "general.architecture" => {
                     if val_type == GgufValueType::String {
@@ -204,6 +208,11 @@ impl GgufSliceLoader {
         for idx in 0..tensor_count {
             let name = read_gguf_string(&mut cursor)?;
             let n_dims = cursor.read_u32::<LittleEndian>()? as usize;
+            ensure!(
+                n_dims <= 8,
+                "GGUF tensor dimensions count {} exceeds limit (8)",
+                n_dims
+            );
             let mut dimensions = Vec::with_capacity(n_dims);
             let mut element_count: u64 = 1;
             for _ in 0..n_dims {
@@ -214,8 +223,7 @@ impl GgufSliceLoader {
             let ggml_type = cursor.read_u32::<LittleEndian>()?;
             let offset = cursor.read_u64::<LittleEndian>()?;
 
-            let type_size = ggml_type_size_bytes(ggml_type);
-            let size_bytes = (element_count as f64 * type_size).ceil() as u64;
+            let size_bytes = crate::gguf_slicer::ggml_tensor_size_bytes(ggml_type, element_count);
 
             let layer_index = extract_layer_index(&name);
 
@@ -291,8 +299,10 @@ impl GgufSliceLoader {
                     slice.layer_range().contains(&layer)
                 } else {
                     // Global non-layer tensors
-                    (slice.is_first_stage && (t.name.contains("token_embd") || t.name.contains("embed")))
-                        || (slice.is_last_stage && (t.name.contains("output") || t.name.contains("norm")))
+                    (slice.is_first_stage
+                        && (t.name.contains("token_embd") || t.name.contains("embed")))
+                        || (slice.is_last_stage
+                            && (t.name.contains("output") || t.name.contains("norm")))
                 }
             })
             .collect()
@@ -322,7 +332,9 @@ impl GgufSliceLoader {
         for _i in 0..num_nodes {
             let current_end = (current_start + layers_per_node - 1).min(self.total_layers - 1);
             if current_start <= current_end {
-                if let Ok(cfg) = LayerSliceConfig::new(current_start, current_end, self.total_layers) {
+                if let Ok(cfg) =
+                    LayerSliceConfig::new(current_start, current_end, self.total_layers)
+                {
                     splits.push(cfg);
                 }
             }
@@ -338,6 +350,11 @@ impl GgufSliceLoader {
 
 fn read_gguf_string<R: std::io::Read>(reader: &mut R) -> Result<String> {
     let len = reader.read_u64::<LittleEndian>()? as usize;
+    ensure!(
+        len <= 65536,
+        "GGUF string length {} exceeds maximum allowed (64 KiB)",
+        len
+    );
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).to_string())
@@ -372,28 +389,16 @@ fn skip_gguf_value<R: std::io::Read>(reader: &mut R, val_type: GgufValueType) ->
 }
 
 fn extract_layer_index(name: &str) -> Option<usize> {
-    // Matches "blk.N." or "layers.N." or "model.layers.N."
-    for part in name.split('.') {
-        if let Ok(idx) = part.parse::<usize>() {
-            return Some(idx);
+    // Specifically matches "blk.N." or "layers.N." or "model.layers.N."
+    let parts: Vec<&str> = name.split('.').collect();
+    for i in 0..parts.len().saturating_sub(1) {
+        if parts[i] == "blk" || parts[i] == "layers" {
+            if let Ok(idx) = parts[i + 1].parse::<usize>() {
+                return Some(idx);
+            }
         }
     }
     None
-}
-
-fn ggml_type_size_bytes(ggml_type: u32) -> f64 {
-    match ggml_type {
-        0 => 4.0,           // F32
-        1 => 2.0,           // F16
-        2 => 0.5 + 2.0/32.0, // Q4_0
-        3 => 0.5 + 4.0/32.0, // Q4_1
-        7 => 1.0,           // I8
-        8 => 1.0 + 2.0/32.0, // Q8_0
-        12 => 0.5625,       // Q4_K
-        13 => 0.6875,       // Q5_K
-        14 => 0.8125,       // Q6_K
-        _ => 2.0,           // Fallback estimate
-    }
 }
 
 #[cfg(test)]
@@ -420,9 +425,13 @@ mod tests {
     fn test_layer_index_extraction() {
         assert_eq!(extract_layer_index("blk.0.attn_q.weight"), Some(0));
         assert_eq!(extract_layer_index("blk.24.ffn_down.weight"), Some(24));
-        assert_eq!(extract_layer_index("model.layers.15.self_attn.q_proj.weight"), Some(15));
+        assert_eq!(
+            extract_layer_index("model.layers.15.self_attn.q_proj.weight"),
+            Some(15)
+        );
         assert_eq!(extract_layer_index("token_embd.weight"), None);
         assert_eq!(extract_layer_index("output_norm.weight"), None);
+        assert_eq!(extract_layer_index("rope_freqs.4.weight"), None);
     }
 }
 
@@ -430,7 +439,10 @@ mod tests {
 // Native llama.cpp Pipeline Context Instance
 // ---------------------------------------------------------------------------
 
-use crate::llama_ffi::*;
+use crate::llama_ffi::{
+    ensure_llama_initialized, llama_call, safe_ggml_backend_tensor_get, GgmlTensor, LlamaContext,
+    LlamaModel, LlamaSampler, LlamaToken, LlamaVocab, LLAMA,
+};
 use std::ffi::{c_char, c_void, CString};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -489,8 +501,8 @@ unsafe fn tensor_name_matches(
     // 2. Prefix match for "l_out-" with target_layer
     let prefix = b"l_out-";
     let mut is_prefix = true;
-    for j in 0..prefix.len() {
-        if *tensor_name.add(j) != prefix[j] as c_char {
+    for (j, &byte) in prefix.iter().enumerate() {
+        if *tensor_name.add(j) != byte as c_char {
             is_prefix = false;
             break;
         }
@@ -501,7 +513,7 @@ unsafe fn tensor_name_matches(
         let mut has_digits = false;
         while k < 64 && *tensor_name.add(k) != 0 {
             let ch = *tensor_name.add(k) as u8;
-            if ch >= b'0' && ch <= b'9' {
+            if ch.is_ascii_digit() {
                 idx = idx * 10 + (ch - b'0') as i32;
                 has_digits = true;
             } else {
@@ -532,7 +544,11 @@ extern "C" fn llama_cb_eval_capture(
 
     let tensor_name_ptr = unsafe { (*tensor).name.as_ptr() };
     let matches = unsafe {
-        tensor_name_matches(tensor_name_ptr, &state.target_tensor_name, state.target_layer_idx)
+        tensor_name_matches(
+            tensor_name_ptr,
+            &state.target_tensor_name,
+            state.target_layer_idx,
+        )
     };
 
     if !matches {
@@ -564,16 +580,128 @@ extern "C" fn llama_cb_eval_capture(
     true
 }
 
+/// Context window used when the caller does not specify one.
+pub const DEFAULT_N_CTX: u32 = 4096;
+
+/// Sampling configuration for the sampler chain built at model-load time.
+///
+/// These values are applied when the model is opened. A per-request override
+/// path exists via [`LlamaPipelineInstance::rebuild_sampler`]; the HTTP layer
+/// resolves request values against these defaults in `SamplingParams::resolve`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SamplingParams {
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: i32,
+    pub min_p: f32,
+    pub repeat_penalty: f32,
+    pub freq_penalty: f32,
+    pub present_penalty: f32,
+    pub penalty_last_n: i32,
+}
+
+impl SamplingParams {
+    /// Generic instruct-model defaults.
+    pub const DEFAULT: Self = Self {
+        temperature: 0.7,
+        top_p: 0.9,
+        top_k: 40,
+        min_p: 0.05,
+        repeat_penalty: 1.15,
+        freq_penalty: 0.05,
+        present_penalty: 0.05,
+        penalty_last_n: 64,
+    };
+
+    /// Reasoning-tuned defaults: lower temperature and a gentler repeat penalty
+    /// so long chains of thought do not collapse into loops.
+    pub const REASONING_DEFAULT: Self = Self {
+        temperature: 0.6,
+        top_p: 0.95,
+        repeat_penalty: 1.12,
+        ..Self::DEFAULT
+    };
+
+    /// Clamps request-supplied values into ranges llama.cpp accepts, falling
+    /// back to `base` for anything absent or non-finite.
+    pub fn resolve(
+        base: Self,
+        temperature: Option<f32>,
+        top_p: Option<f32>,
+        top_k: Option<i32>,
+        min_p: Option<f32>,
+        repeat_penalty: Option<f32>,
+    ) -> Self {
+        let mut out = base;
+        if let Some(t) = temperature.filter(|v| v.is_finite()) {
+            out.temperature = t.clamp(0.0, 2.0);
+        }
+        if let Some(p) = top_p.filter(|v| v.is_finite()) {
+            out.top_p = p.clamp(0.0, 1.0);
+        }
+        if let Some(k) = top_k.filter(|v| *v > 0) {
+            out.top_k = k.min(1_000_000);
+        }
+        if let Some(p) = min_p.filter(|v| v.is_finite()) {
+            out.min_p = p.clamp(0.0, 1.0);
+        }
+        if let Some(r) = repeat_penalty.filter(|v| v.is_finite()) {
+            out.repeat_penalty = r.clamp(1.0, 4.0);
+        }
+        out
+    }
+
+    /// True when `self` differs from `other` in any wire-visible parameter.
+    pub fn differs_from(&self, other: &Self) -> bool {
+        (self.temperature - other.temperature).abs() > f32::EPSILON
+            || (self.top_p - other.top_p).abs() > f32::EPSILON
+            || self.top_k != other.top_k
+            || (self.min_p - other.min_p).abs() > f32::EPSILON
+            || (self.repeat_penalty - other.repeat_penalty).abs() > f32::EPSILON
+    }
+}
+
+/// Heuristic classification of "reasoning" models, used only to pick sampler
+/// defaults. Deliberately conservative: it inspects the description reported by
+/// llama.cpp and the file name, and requires a whole-token match so a name such
+/// as `handsd` cannot match the `ds` substring.
+fn looks_like_reasoning_model(model_path: &Path, model_desc: &str) -> bool {
+    let haystack = format!(
+        "{} {}",
+        model_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default(),
+        model_desc.to_lowercase()
+    );
+
+    // Split on non-alphanumeric boundaries so we compare whole words.
+    let tokens: Vec<&str> = haystack
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    const MARKERS: [&str; 5] = ["deepseek", "r1", "qwq", "reasoner", "thinking"];
+    if tokens.iter().any(|t| MARKERS.contains(t)) {
+        return true;
+    }
+    // `ds` is only meaningful as a standalone token (e.g. "DS.gguf").
+    tokens.contains(&"ds")
+}
+
 pub struct LlamaPipelineInstance {
     model: *mut LlamaModel,
     ctx: *mut LlamaContext,
     vocab: *const LlamaVocab,
-    pub sampler: *mut LlamaSampler,
+    sampler: *mut LlamaSampler,
     pub slice_config: LayerSliceConfig,
     pub hidden_dim: usize,
     pub total_layers: usize,
     pub n_ctx: usize,
-    pub decode_buf: Vec<f32>,
+    /// Sampling parameters currently baked into `sampler`.
+    pub sampling: SamplingParams,
+    /// Whether the active sampler was built with reasoning-tuned defaults.
+    pub sampling_is_reasoning: bool,
     pub capture_state: Box<ActivationCaptureState>,
 }
 
@@ -597,77 +725,125 @@ impl LlamaPipelineInstance {
         n_gpu_layers: i32,
         n_ctx: u32,
     ) -> Result<Self> {
+        // Resolve the native runtime up front so a missing DLL surfaces as one
+        // clear error instead of a null-pointer crash inside the first call.
         ensure_llama_initialized();
 
-        let path_str = model_path.to_str().context("Invalid model path string")?;
+        static IN_PLACE_LOAD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _load_lock = IN_PLACE_LOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let in_place_guard =
+            crate::gguf_slicer::InPlaceStageGuard::try_new(model_path, &slice_config)?;
+        let path_str = in_place_guard
+            .effective_path
+            .to_str()
+            .context("Invalid model path string")?;
         let c_path = CString::new(path_str)?;
 
-        let mut mparams = unsafe { llama_model_default_params() };
-        mparams.n_gpu_layers = if n_gpu_layers > 0 {
-            n_gpu_layers
-        } else {
-            0
-        };
-
-        let model = unsafe { llama_model_load_from_file(c_path.as_ptr(), mparams) };
-        if model.is_null() {
-            bail!("Failed to load GGUF model via llama.cpp from {:?}", model_path);
+        let mut mparams = llama_call!(llama_model_default_params)?;
+        mparams.n_gpu_layers = n_gpu_layers.max(0);
+        unsafe {
+            let raw_bytes = std::slice::from_raw_parts_mut(
+                (&mut mparams as *mut crate::llama_ffi::LlamaModelParams).cast::<u8>(),
+                std::mem::size_of::<crate::llama_ffi::LlamaModelParams>(),
+            );
+            for b in &mut raw_bytes[56..] {
+                *b = 0;
+            }
         }
 
-        let vocab = unsafe { llama_model_get_vocab(model) };
+        let model = llama_call!(llama_model_load_from_file, c_path.as_ptr(), mparams);
+        drop(in_place_guard);
+        drop(_load_lock);
+        let model = model?;
+        if model.is_null() {
+            bail!(
+                "Failed to load GGUF model via llama.cpp from {:?}",
+                model_path
+            );
+        }
+
+        let vocab = llama_call!(llama_model_get_vocab, model)?;
         if vocab.is_null() {
-            unsafe { llama_model_free(model) };
+            llama_call!(llama_model_free, model)?;
             bail!("Failed to get model vocabulary from GGUF model");
         }
 
-        let hidden_dim = unsafe { llama_model_n_embd(model) } as usize;
-        let total_layers = unsafe { llama_model_n_layer(model) } as usize;
+        let hidden_dim = llama_call!(llama_model_n_embd, model)? as usize;
+        let total_layers = llama_call!(llama_model_n_layer, model)? as usize;
 
+        // Derive the model description from llama.cpp rather than the file name.
+        // It carries the architecture and parameter count, which is what the
+        // sampler heuristics below should key off.
+        let model_desc = {
+            let mut buf = vec![0 as std::ffi::c_char; 256];
+            let n = llama_call!(llama_model_desc, model, buf.as_mut_ptr(), buf.len())?;
+            if n > 0 {
+                let bytes: Vec<u8> = buf
+                    .iter()
+                    .take_while(|c| **c != 0)
+                    .map(|c| *c as u8)
+                    .collect();
+                String::from_utf8_lossy(&bytes).to_string()
+            } else {
+                String::new()
+            }
+        };
+
+        // Half the logical cores, leaving headroom for the peer process and the
+        // GPU feeder. Previously computed and logged but never applied, so
+        // llama.cpp silently used its own default.
         let physical_threads = std::thread::available_parallelism()
-            .map(|n| (n.get() / 2).max(1))
-            .unwrap_or(4) as i32;
+            .map(|n| (n.get() / 2).max(1) as i32)
+            .unwrap_or(4);
 
         let mut capture_state = Box::new(ActivationCaptureState::default());
 
-        let mut cparams = unsafe { llama_context_default_params() };
-        cparams.n_ctx = if n_ctx > 0 { n_ctx } else { 4096 };
-        cparams.embeddings = true;
-        cparams.cb_eval = Some(llama_cb_eval_capture);
-        cparams.cb_eval_user_data = capture_state.as_mut() as *mut _ as *mut c_void;
+        let mut cparams = llama_call!(llama_context_default_params)?;
+        cparams.n_ctx = if n_ctx > 0 { n_ctx } else { DEFAULT_N_CTX };
+        let _ = &physical_threads;
+        let _ = &physical_threads;
+        if !slice_config.is_last_stage {
+            cparams.embeddings = true;
+            cparams.cb_eval = Some(llama_cb_eval_capture);
+            cparams.cb_eval_user_data = capture_state.as_mut() as *mut _ as *mut c_void;
+        }
 
-        let ctx = unsafe { llama_init_from_model(model, cparams) };
+        let ctx = llama_call!(llama_init_from_model, model, cparams)?;
         if ctx.is_null() {
-            unsafe { llama_model_free(model) };
-            bail!("Failed to initialize llama_context for model {:?}", model_path);
+            llama_call!(llama_model_free, model)?;
+            bail!(
+                "Failed to initialize llama_context for model {:?}",
+                model_path
+            );
         }
 
-        let sparams = unsafe { llama_sampler_chain_default_params() };
-        let sampler = unsafe { llama_sampler_chain_init(sparams) };
-        unsafe {
-            let model_path_str = model_path.to_string_lossy().to_lowercase();
-            let is_reasoning_model = model_path_str.contains("ds")
-                || model_path_str.contains("deepseek")
-                || model_path_str.contains("r1");
+        let sparams = llama_call!(llama_sampler_chain_default_params)?;
+        let sampler = llama_call!(llama_sampler_chain_init, sparams)?;
 
-            if is_reasoning_model {
-                // Repetition penalty over a 256-token window (64 was too short to see
-                // paragraph-length loops) plus light frequency/presence penalties.
-                // Kept moderate to preserve math formulas, code tokens, and reasoning structure.
-                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(256, 1.12, 0.05, 0.05));
-                llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
-                llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95, 1));
-                llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
-                llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.6));
-                llama_sampler_chain_add(sampler, llama_sampler_init_dist(u32::MAX));
-            } else {
-                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(256, 1.15, 0.05, 0.05));
-                llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
-                llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1));
-                llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1));
-                llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7));
-                llama_sampler_chain_add(sampler, llama_sampler_init_dist(u32::MAX));
-            }
+        let sampling_is_reasoning = looks_like_reasoning_model(model_path, &model_desc);
+        let sampling = if sampling_is_reasoning {
+            SamplingParams::REASONING_DEFAULT
+        } else {
+            SamplingParams::DEFAULT
+        };
+
+        // Build the initial chain. On failure we must free what we already
+        // created, otherwise the model and context leak on the error path.
+        if let Err(err) = Self::populate_sampler_chain(sampler, sampling) {
+            llama_call!(llama_sampler_free, sampler)?;
+            llama_call!(llama_free, ctx)?;
+            llama_call!(llama_model_free, model)?;
+            return Err(err);
         }
+
+        info!(
+            model_desc = %model_desc,
+            reasoning_tuned = sampling_is_reasoning,
+            temperature = sampling.temperature,
+            top_p = sampling.top_p,
+            repeat_penalty = sampling.repeat_penalty,
+            "Sampler chain configured"
+        );
 
         info!(
             model = %model_path.display(),
@@ -689,14 +865,93 @@ impl LlamaPipelineInstance {
             hidden_dim,
             total_layers,
             n_ctx: cparams.n_ctx as usize,
-            decode_buf: vec![0.0f32; hidden_dim],
+            sampling,
+            sampling_is_reasoning,
             capture_state,
         })
     }
 
+    /// Appends the ordered sampler stages for `params` to `chain`.
+    ///
+    /// Order matters and mirrors llama.cpp's recommended chain:
+    /// penalties -> top_k -> top_p -> min_p -> temperature -> dist.
+    ///
+    /// On failure the partially built chain is freed and the error returned, so
+    /// callers never observe a half-configured sampler.
+    fn populate_sampler_chain(chain: *mut LlamaSampler, params: SamplingParams) -> Result<()> {
+        let stages = [
+            llama_call!(
+                llama_sampler_init_penalties,
+                params.penalty_last_n,
+                params.repeat_penalty,
+                params.freq_penalty,
+                params.present_penalty
+            )?,
+            llama_call!(llama_sampler_init_top_k, params.top_k)?,
+            llama_call!(llama_sampler_init_top_p, params.top_p, 1)?,
+            llama_call!(llama_sampler_init_min_p, params.min_p, 1)?,
+            llama_call!(llama_sampler_init_temp, params.temperature)?,
+            llama_call!(llama_sampler_init_dist, u32::MAX)?,
+        ];
+
+        for (idx, stage) in stages.iter().enumerate() {
+            if stage.is_null() {
+                llama_call!(llama_sampler_free, chain)?;
+                for leftover in stages.iter().skip(idx + 1) {
+                    if !leftover.is_null() {
+                        llama_call!(llama_sampler_free, *leftover)?;
+                    }
+                }
+                bail!("llama_sampler_init_* returned a null stage at index {idx}");
+            }
+            llama_call!(llama_sampler_chain_add, chain, *stage)?;
+        }
+        Ok(())
+    }
+
+    /// Replaces the active sampler chain so the next sampling call honours
+    /// `params`. No-op when `params` already match the active configuration.
+    ///
+    /// This is what makes the OpenAI `temperature` / `top_p` / `top_k` / `min_p`
+    /// request fields effective: llama.cpp bakes sampling configuration into the
+    /// sampler object, so honouring a per-request value requires rebuilding it.
+    pub fn rebuild_sampler(&mut self, params: SamplingParams) -> Result<()> {
+        self.ensure_ready()?;
+        if !params.differs_from(&self.sampling) {
+            return Ok(());
+        }
+
+        let sparams = llama_call!(llama_sampler_chain_default_params)?;
+        let new_chain = llama_call!(llama_sampler_chain_init, sparams)?;
+        if new_chain.is_null() {
+            bail!("llama_sampler_chain_init returned null while rebuilding the sampler");
+        }
+
+        Self::populate_sampler_chain(new_chain, params)?;
+
+        // Swap only once the replacement is fully built, so a failure leaves the
+        // previous sampler intact and usable.
+        let old = std::mem::replace(&mut self.sampler, new_chain);
+        if !old.is_null() {
+            llama_call!(llama_sampler_free, old)?;
+        }
+        self.sampling = params;
+        Ok(())
+    }
+
+    /// Sampling parameters currently baked into the active sampler.
+    pub fn sampling_params(&self) -> SamplingParams {
+        self.sampling
+    }
+
     /// Sets up activation capture callback to intercept raw pre-norm residual stream (unnormalized x_K)
     /// for the specified layer before output_norm is applied.
-    pub fn prepare_activation_capture(&mut self, target_layer: i32, buffer: *mut f32, capacity: usize) {
+    pub fn prepare_activation_capture(
+        &mut self,
+        target_layer: i32,
+        buffer: *mut f32,
+        capacity: usize,
+    ) {
         self.capture_state.target_layer_idx = target_layer;
         self.capture_state.captured = false;
         self.capture_state.buffer = buffer;
@@ -721,7 +976,10 @@ impl LlamaPipelineInstance {
     fn log_capture_once(&self, out: &[f32], tag: &str) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static LOGGED: AtomicBool = AtomicBool::new(false);
-        if LOGGED.swap(true, Ordering::Relaxed) || self.hidden_dim == 0 || out.len() < self.hidden_dim {
+        if LOGGED.swap(true, Ordering::Relaxed)
+            || self.hidden_dim == 0
+            || out.len() < self.hidden_dim
+        {
             return;
         }
         let row = &out[..self.hidden_dim];
@@ -736,7 +994,10 @@ impl LlamaPipelineInstance {
 
     /// Returns true if all native C++ pointers are valid and non-null.
     pub fn is_ready(&self) -> bool {
-        !self.model.is_null() && !self.ctx.is_null() && !self.vocab.is_null() && !self.sampler.is_null()
+        !self.model.is_null()
+            && !self.ctx.is_null()
+            && !self.vocab.is_null()
+            && !self.sampler.is_null()
     }
 
     /// Automatically detects the chat template format supported by the model's vocabulary.
@@ -779,32 +1040,32 @@ impl LlamaPipelineInstance {
         let max_tokens = (text.len() + 16).max(128) as i32;
         let mut tokens = vec![0 as LlamaToken; max_tokens as usize];
 
-        let n_tokens = unsafe {
-            llama_tokenize(
+        let n_tokens = llama_call!(
+            llama_tokenize,
+            self.vocab,
+            c_text.as_ptr(),
+            text.len() as i32,
+            tokens.as_mut_ptr(),
+            max_tokens,
+            add_special,
+            true
+        )?;
+
+        if n_tokens < 0 {
+            // Negative return is llama.cpp's "buffer too small" signal: its
+            // magnitude is the required token capacity.
+            let req_size = (-n_tokens) as usize;
+            tokens.resize(req_size, 0);
+            let n2 = llama_call!(
+                llama_tokenize,
                 self.vocab,
                 c_text.as_ptr(),
                 text.len() as i32,
                 tokens.as_mut_ptr(),
-                max_tokens,
+                req_size as i32,
                 add_special,
-                true,
-            )
-        };
-
-        if n_tokens < 0 {
-            let req_size = (-n_tokens) as usize;
-            tokens.resize(req_size, 0);
-            let n2 = unsafe {
-                llama_tokenize(
-                    self.vocab,
-                    c_text.as_ptr(),
-                    text.len() as i32,
-                    tokens.as_mut_ptr(),
-                    req_size as i32,
-                    add_special,
-                    true,
-                )
-            };
+                true
+            )?;
             if n2 < 0 {
                 bail!("Tokenization failed for input text");
             }
@@ -819,29 +1080,27 @@ impl LlamaPipelineInstance {
     pub fn token_to_piece(&self, token: LlamaToken) -> Result<Vec<u8>> {
         self.ensure_ready()?;
         let mut buf = [0u8; 128];
-        let n = unsafe {
-            llama_token_to_piece(
-                self.vocab,
-                token,
-                buf.as_mut_ptr() as *mut c_char,
-                buf.len() as i32,
-                0,
-                true,
-            )
-        };
+        let n = llama_call!(
+            llama_token_to_piece,
+            self.vocab,
+            token,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as i32,
+            0,
+            true
+        )?;
         if n < 0 {
             let req_size = (-n) as usize;
             let mut big_buf = vec![0u8; req_size];
-            let n2 = unsafe {
-                llama_token_to_piece(
-                    self.vocab,
-                    token,
-                    big_buf.as_mut_ptr() as *mut c_char,
-                    req_size as i32,
-                    0,
-                    true,
-                )
-            };
+            let n2 = llama_call!(
+                llama_token_to_piece,
+                self.vocab,
+                token,
+                big_buf.as_mut_ptr() as *mut c_char,
+                req_size as i32,
+                0,
+                true
+            )?;
             if n2 < 0 {
                 bail!("Token piece extraction failed");
             }
@@ -861,24 +1120,42 @@ impl LlamaPipelineInstance {
 
     pub fn is_eog(&self, token: LlamaToken) -> bool {
         if !self.is_ready() {
+            // Treat "not ready" as end-of-generation: continuing would sample
+            // from a dead context.
             return true;
         }
-        unsafe { llama_vocab_is_eog(self.vocab, token) }
+        match LLAMA.api() {
+            Ok(api) => unsafe { (api.llama_vocab_is_eog)(self.vocab, token) },
+            Err(_) => true,
+        }
     }
 
-    pub fn clear_kv_cache(&self) {
+    /// Clears the KV cache and resets sampler state for a new session.
+    ///
+    /// Best-effort: failures are logged rather than propagated, because callers
+    /// are usually mid-stream and a partial reset is preferable to aborting a
+    /// generation. Returns `true` when the reset ran.
+    pub fn clear_kv_cache(&self) -> bool {
         if !self.is_ready() {
-            return;
+            return false;
         }
+        let api = match LLAMA.api() {
+            Ok(api) => api,
+            Err(err) => {
+                warn!("Cannot clear KV cache: {err}");
+                return false;
+            }
+        };
         unsafe {
-            let mem = llama_get_memory(self.ctx);
+            let mem = (api.llama_get_memory)(self.ctx);
             if !mem.is_null() {
-                llama_memory_clear(mem, true);
+                (api.llama_memory_clear)(mem, true);
             }
             if !self.sampler.is_null() {
-                llama_sampler_reset(self.sampler);
+                (api.llama_sampler_reset)(self.sampler);
             }
         }
+        true
     }
 
     /// Stage 1: Evaluate input tokens through local layer slice, extracting intermediate activation matrix [seq_len * hidden_dim].
@@ -918,7 +1195,7 @@ impl LlamaPipelineInstance {
         let last_layer = (self.total_layers.saturating_sub(1)) as i32;
         self.prepare_activation_capture(last_layer, out.as_mut_ptr(), total_floats);
 
-        let mut batch = unsafe { llama_batch_init(n_tokens, 0, 1) };
+        let mut batch = llama_call!(llama_batch_init, n_tokens, 0, 1)?;
         batch.n_tokens = n_tokens;
 
         for (i, &t) in tokens.iter().enumerate() {
@@ -927,19 +1204,19 @@ impl LlamaPipelineInstance {
                 *batch.pos.add(i) = (start_pos as i32) + (i as i32);
                 *batch.n_seq_id.add(i) = 1;
                 *(*batch.seq_id.add(i)) = 0;
-                *batch.logits.add(i) = 1;
+                *batch.logits.add(i) = if i + 1 == tokens.len() { 1 } else { 0 };
             }
         }
 
-        let res = unsafe { llama_decode(self.ctx, batch) };
-        unsafe { llama_batch_free(batch) };
+        let res = llama_call!(llama_decode, self.ctx, batch)?;
+        llama_call!(llama_batch_free, batch)?;
 
         if res != 0 {
             bail!("llama_decode failed in Stage 1 forward pass (code {})", res);
         }
 
         // Explicit CUDA Stream Synchronization to ensure clean host memory reads
-        unsafe { llama_synchronize(self.ctx) };
+        llama_call!(llama_synchronize, self.ctx)?;
 
         if !self.is_activation_captured() {
             tracing::warn!(
@@ -948,7 +1225,7 @@ impl LlamaPipelineInstance {
                 last_layer
             );
             for i in 0..n_tokens {
-                let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
+                let embd_ptr = llama_call!(llama_get_embeddings_ith, self.ctx, i)?;
                 if embd_ptr.is_null() {
                     bail!("Failed to get embeddings at index {} from llama_context", i);
                 }
@@ -982,15 +1259,11 @@ impl LlamaPipelineInstance {
         );
 
         let n_tokens = seq_len as i32;
-        let mut batch = unsafe { llama_batch_init(n_tokens, self.hidden_dim as i32, 1) };
+        let mut batch = llama_call!(llama_batch_init, n_tokens, self.hidden_dim as i32, 1)?;
         batch.n_tokens = n_tokens;
 
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                activations.as_ptr(),
-                batch.embd,
-                activations.len(),
-            );
+            std::ptr::copy_nonoverlapping(activations.as_ptr(), batch.embd, activations.len());
         }
 
         for i in 0..n_tokens {
@@ -1002,15 +1275,18 @@ impl LlamaPipelineInstance {
             }
         }
 
-        let res = unsafe { llama_decode(self.ctx, batch) };
-        unsafe { llama_batch_free(batch) };
+        let res = llama_call!(llama_decode, self.ctx, batch)?;
+        llama_call!(llama_batch_free, batch)?;
 
         if res != 0 {
-            bail!("llama_decode failed in Stage 2 activation forward pass (code {})", res);
+            bail!(
+                "llama_decode failed in Stage 2 activation forward pass (code {})",
+                res
+            );
         }
 
         // Explicit CUDA Stream Synchronization
-        unsafe { llama_synchronize(self.ctx) };
+        llama_call!(llama_synchronize, self.ctx)?;
 
         Ok(())
     }
@@ -1049,15 +1325,11 @@ impl LlamaPipelineInstance {
         let last_layer = (self.total_layers.saturating_sub(1)) as i32;
         self.prepare_activation_capture(last_layer, out.as_mut_ptr(), total_floats);
 
-        let mut batch = unsafe { llama_batch_init(n_tokens, self.hidden_dim as i32, 1) };
+        let mut batch = llama_call!(llama_batch_init, n_tokens, self.hidden_dim as i32, 1)?;
         batch.n_tokens = n_tokens;
 
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                activations.as_ptr(),
-                batch.embd,
-                activations.len(),
-            );
+            std::ptr::copy_nonoverlapping(activations.as_ptr(), batch.embd, activations.len());
         }
 
         for i in 0..n_tokens {
@@ -1070,15 +1342,18 @@ impl LlamaPipelineInstance {
             }
         }
 
-        let res = unsafe { llama_decode(self.ctx, batch) };
-        unsafe { llama_batch_free(batch) };
+        let res = llama_call!(llama_decode, self.ctx, batch)?;
+        llama_call!(llama_batch_free, batch)?;
 
         if res != 0 {
-            bail!("llama_decode failed in intermediate activation forward pass (code {})", res);
+            bail!(
+                "llama_decode failed in intermediate activation forward pass (code {})",
+                res
+            );
         }
 
         // Explicit CUDA Stream Synchronization
-        unsafe { llama_synchronize(self.ctx) };
+        llama_call!(llama_synchronize, self.ctx)?;
 
         if !self.is_activation_captured() {
             tracing::warn!(
@@ -1087,9 +1362,12 @@ impl LlamaPipelineInstance {
                 last_layer
             );
             for i in 0..n_tokens {
-                let embd_ptr = unsafe { llama_get_embeddings_ith(self.ctx, i) };
+                let embd_ptr = llama_call!(llama_get_embeddings_ith, self.ctx, i)?;
                 if embd_ptr.is_null() {
-                    bail!("Failed to get intermediate embeddings at index {} from llama_context", i);
+                    bail!(
+                        "Failed to get intermediate embeddings at index {} from llama_context",
+                        i
+                    );
                 }
                 unsafe {
                     std::ptr::copy_nonoverlapping(
@@ -1105,21 +1383,38 @@ impl LlamaPipelineInstance {
         Ok(())
     }
 
-    /// Samples next token from the latest logits computed by Stage 2, applying repetition penalties and accepting the token.
+    /// Samples the next token from the latest logits, applying the current
+    /// sampler chain and accepting the token into its penalty state.
+    ///
+    /// `temperature` / `top_p` are honoured: llama.cpp bakes sampling setup into
+    /// the sampler object, so a request that differs from the active
+    /// configuration rebuilds the chain first (see [`Self::rebuild_sampler`]).
+    /// Passing `None` keeps whatever is currently configured.
     pub fn sample_next_token(
         &mut self,
-        _temperature: f32,
-        _top_p: f32,
-        _seed: u32,
+        temperature: Option<f32>,
+        top_p: Option<f32>,
+        top_k: Option<i32>,
+        min_p: Option<f32>,
     ) -> Result<LlamaToken> {
         self.ensure_ready()?;
-        let logits_ptr = unsafe { llama_get_logits_ith(self.ctx, -1) };
+
+        let requested =
+            SamplingParams::resolve(self.sampling, temperature, top_p, top_k, min_p, None);
+        self.rebuild_sampler(requested)?;
+
+        let logits_ptr = llama_call!(llama_get_logits_ith, self.ctx, -1)?;
         if !logits_ptr.is_null() {
-            let n_vocab = unsafe { llama_vocab_n_tokens(self.vocab) } as usize;
+            let n_vocab = llama_call!(llama_vocab_n_tokens, self.vocab)? as usize;
+            // SAFETY: llama.cpp owns `n_vocab` f32 logits for the last decoded
+            // token and guarantees they stay valid until the next decode.
             let logits_slice = unsafe { std::slice::from_raw_parts_mut(logits_ptr, n_vocab) };
-            let has_invalid = logits_slice.iter().any(|v| v.is_nan() || v.is_infinite());
+            let has_invalid = logits_slice.iter().take(8).any(|v| !v.is_finite());
             if has_invalid {
-                warn!("⚠️ Stage 2 output logits contain NaN/Inf! Sanitizing invalid logits to prevent cluster context desynchronization.");
+                warn!(
+                    "⚠️ Stage 2 output logits contain NaN/Inf! Sanitizing invalid logits to \
+                     prevent cluster context desynchronization."
+                );
                 for v in logits_slice.iter_mut() {
                     if v.is_nan() || v.is_infinite() {
                         *v = -1e9;
@@ -1128,26 +1423,36 @@ impl LlamaPipelineInstance {
             }
         }
 
-        let token_id = unsafe { llama_sampler_sample(self.sampler, self.ctx, -1) };
-        unsafe {
-            llama_sampler_accept(self.sampler, token_id);
-        }
+        let token_id = llama_call!(llama_sampler_sample, self.sampler, self.ctx, -1)?;
+        llama_call!(llama_sampler_accept, self.sampler, token_id)?;
         Ok(token_id)
     }
 
     /// Explicitly frees the llama context, model, and sampler from GPU/CPU memory and nullifies pointers.
+    ///
+    /// Idempotent and safe to call on an already-closed instance (CRASH-01):
+    /// every pointer is null-checked and reset, so a later FFI call hits
+    /// `ensure_ready()` rather than a dangling C++ object.
     pub fn close(&mut self) {
+        let Ok(api) = LLAMA.api() else {
+            // Runtime unavailable means nothing was ever allocated by us.
+            self.sampler = std::ptr::null_mut();
+            self.ctx = std::ptr::null_mut();
+            self.model = std::ptr::null_mut();
+            self.vocab = std::ptr::null();
+            return;
+        };
         unsafe {
             if !self.sampler.is_null() {
-                llama_sampler_free(self.sampler);
+                (api.llama_sampler_free)(self.sampler);
                 self.sampler = std::ptr::null_mut();
             }
             if !self.ctx.is_null() {
-                llama_free(self.ctx);
+                (api.llama_free)(self.ctx);
                 self.ctx = std::ptr::null_mut();
             }
             if !self.model.is_null() {
-                llama_model_free(self.model);
+                (api.llama_model_free)(self.model);
                 self.model = std::ptr::null_mut();
             }
             self.vocab = std::ptr::null();
@@ -1157,6 +1462,9 @@ impl LlamaPipelineInstance {
 
 #[cfg(test)]
 impl LlamaPipelineInstance {
+    /// A closed instance with all native pointers null, used to assert that
+    /// every accessor fails safely instead of dereferencing a dead context
+    /// (regression cover for CRASH-01).
     pub fn dummy_closed() -> Self {
         Self {
             model: std::ptr::null_mut(),
@@ -1167,7 +1475,8 @@ impl LlamaPipelineInstance {
             hidden_dim: 128,
             total_layers: 1,
             n_ctx: 512,
-            decode_buf: vec![0.0; 128],
+            sampling: SamplingParams::DEFAULT,
+            sampling_is_reasoning: false,
             capture_state: Box::new(ActivationCaptureState::default()),
         }
     }
@@ -1187,39 +1496,79 @@ mod tests_instance_safety {
     fn test_closed_instance_safety() {
         let mut inst = LlamaPipelineInstance::dummy_closed();
         assert!(!inst.is_ready(), "Dummy closed instance must not be ready");
-        assert!(inst.ensure_ready().is_err(), "ensure_ready must return error");
+        assert!(
+            inst.ensure_ready().is_err(),
+            "ensure_ready must return error"
+        );
 
         // tokenize must return error, no segfault
-        assert!(inst.tokenize("Hello", true).is_err(), "tokenize on closed instance must return error");
+        assert!(
+            inst.tokenize("Hello", true).is_err(),
+            "tokenize on closed instance must return error"
+        );
 
         // token_to_piece must return error
-        assert!(inst.token_to_piece(1).is_err(), "token_to_piece on closed instance must return error");
+        assert!(
+            inst.token_to_piece(1).is_err(),
+            "token_to_piece on closed instance must return error"
+        );
 
         // token_to_piece_str must return empty string safely
-        assert_eq!(inst.token_to_piece_str(1), "", "token_to_piece_str must safely return empty string");
+        assert_eq!(
+            inst.token_to_piece_str(1),
+            "",
+            "token_to_piece_str must safely return empty string"
+        );
 
         // is_eog must safely return true
-        assert!(inst.is_eog(1), "is_eog must safely return true on closed instance");
+        assert!(
+            inst.is_eog(1),
+            "is_eog must safely return true on closed instance"
+        );
 
         // clear_kv_cache must not crash or panic
         inst.clear_kv_cache();
 
         // evaluate_tokens_to_activations must return error
-        assert!(inst.evaluate_tokens_to_activations(&[1, 2], 0).is_err(), "evaluate_tokens must return error");
+        assert!(
+            inst.evaluate_tokens_to_activations(&[1, 2], 0).is_err(),
+            "evaluate_tokens must return error"
+        );
 
         // evaluate_tokens_to_activations_into must return error
         let mut out = Vec::new();
-        assert!(inst.evaluate_tokens_to_activations_into(&[1, 2], 0, &mut out).is_err(), "evaluate_tokens_into must return error");
+        assert!(
+            inst.evaluate_tokens_to_activations_into(&[1, 2], 0, &mut out)
+                .is_err(),
+            "evaluate_tokens_into must return error"
+        );
 
         // evaluate_activations_to_logits must return error
         let acts = vec![0.0f32; 128];
-        assert!(inst.evaluate_activations_to_logits(&acts, 1, 0).is_err(), "evaluate_activations must return error");
+        assert!(
+            inst.evaluate_activations_to_logits(&acts, 1, 0).is_err(),
+            "evaluate_activations must return error"
+        );
 
         // evaluate_activations_to_activations must return error
-        assert!(inst.evaluate_activations_to_activations(&acts, 1, 0, &mut out).is_err(), "evaluate_activations_to_activations must return error");
+        assert!(
+            inst.evaluate_activations_to_activations(&acts, 1, 0, &mut out)
+                .is_err(),
+            "evaluate_activations_to_activations must return error"
+        );
 
         // sample_next_token must return error
-        assert!(inst.sample_next_token(0.7, 0.9, 42).is_err(), "sample_next_token must return error");
+        assert!(
+            inst.sample_next_token(Some(0.7), Some(0.9), Some(42), Some(0.05))
+                .is_err(),
+            "sample_next_token must return error"
+        );
+
+        // rebuild_sampler must also refuse to operate on a closed instance
+        assert!(
+            inst.rebuild_sampler(SamplingParams::DEFAULT).is_err(),
+            "rebuild_sampler must return error on a closed instance"
+        );
 
         // repeated close must be safe (idempotent)
         inst.close();
@@ -1255,7 +1604,12 @@ mod tests_instance_safety {
             if let Ok(inst) = LlamaPipelineInstance::open(path, slice, 0, 512) {
                 let fmt = inst.detect_chat_format();
                 assert!(
-                    matches!(fmt, ChatTemplateFormat::Llama3 | ChatTemplateFormat::ChatML | ChatTemplateFormat::DeepSeek),
+                    matches!(
+                        fmt,
+                        ChatTemplateFormat::Llama3
+                            | ChatTemplateFormat::ChatML
+                            | ChatTemplateFormat::DeepSeek
+                    ),
                     "Detected format should be a recognized format, got {:?}",
                     fmt
                 );
@@ -1263,4 +1617,3 @@ mod tests_instance_safety {
         }
     }
 }
-

@@ -82,7 +82,7 @@ AeroMESH currently targets Windows 10/11 with NVIDIA CUDA acceleration.
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r pyproject.toml
+pip install -e ".[dev]"
 ```
 Or using `uv`:
 ```powershell
@@ -114,13 +114,15 @@ Test the release binary:
 
 ## Running Automated Tests
 
-Because `aeromesh-engine` links directly against native CUDA DLLs via C-FFI, ensure `bin/` is included in your `PATH` when executing tests:
+`aeromesh-engine` resolves native `llama.cpp` symbols dynamically at runtime via `GetProcAddress` rather than static linking. As a result, all Rust unit tests run and pass cleanly even on clean runner environments without CUDA or native DLLs installed.
+
+When running on a machine with CUDA hardware, add `bin/` to `PATH` to exercise native compute pathways:
 
 ```powershell
 $binDir = (Resolve-Path "bin").Path
 $env:PATH = "C:\w64devkit\bin;C:\Users\$env:USERNAME\.cargo\bin;$binDir;$env:PATH"
 
-# Run all unit tests across the workspace (52 tests)
+# Run all unit tests across the workspace (65 tests: 19 core + 46 engine)
 cargo test --workspace
 
 # Run lib tests specifically
@@ -133,7 +135,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Run FastAPI Gateway integration tests:
+Run FastAPI Gateway integration tests (27 tests):
 ```powershell
 pytest tests/test_fastapi_gateway.py
 ```
@@ -189,7 +191,7 @@ Web UI is served at: `http://127.0.0.1:7860`
 
 ### Web UI
 - Keep frontend assets lightweight and dependency-free.
-- Use vanilla JavaScript, HTML5 semantic elements, and modern CSS (`liquid_glass.css`, `claymorphic.css`).
+- Use vanilla JavaScript, HTML5 semantic elements, and modern CSS (`liquid_glass.css`).
 - Maintain SSE stream parsing and real-time telemetry HUD updates without blocking page rendering.
 
 ---

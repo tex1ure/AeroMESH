@@ -2,7 +2,7 @@
 
 AeroMesh is a distributed LLM inference engine written in Rust that aggregates heterogeneous consumer GPUs across a Tailscale mesh network or local area network.
 
-Unlike conventional distributed inference frameworks (such as default GGML RPC) that stream gigabytes of model weights over the network on startup or during layer offloading, **AeroMesh achieves 0.0 MB network weight transfers**. Both coordinator and worker nodes retain the model file on local storage; inference is executed by partitioning transformer layers and streaming intermediate activation vectors (~1.5 KB to 16 KB per token step) over low-latency TCP sockets or zero-kernel-copy shared memory.
+Unlike conventional distributed inference frameworks (such as default GGML RPC or weight-streaming engines) that transfer gigabytes of model weights over the network or duplicate gigabytes of split model files on disk, **AeroMesh achieves 0.0 MB network weight transfers and 0.0 MB persistent disk duplication**. Every node retains only the base `.gguf` file on local storage; inference is executed by loading assigned transformer layers directly into GPU VRAM via an ephemeral slicer and streaming compressed intermediate activation vectors (~3.0 KB to 5.1 KB per token step) over low-latency TCP sockets or zero-kernel-copy shared memory.
 
 ---
 
@@ -12,9 +12,10 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 - [Screenshots](#screenshots)
 - [How Zero-Weight Pipeline Inference Works](#how-zero-weight-pipeline-inference-works)
 - [Core Engineering Deep Dives](#core-engineering-deep-dives)
-  - [GGUF Layer Partitioning & The Identity RMSNorm Solution](#gguf-layer-partitioning--the-identity-rmsnorm-solution)
-  - [Binary Wire Protocol Specification](#binary-wire-protocol-specification)
-  - [Quantized Activation Streaming](#quantized-activation-streaming)
+  - [Ephemeral VRAM Stage Loading & The Identity RMSNorm Solution](#ephemeral-vram-stage-loading--the-identity-rmsnorm-solution)
+  - [Binary Wire Protocol Specification (Protocol v4)](#binary-wire-protocol-specification-protocol-v4)
+  - [Outlier-Preserving Quantized Activation Streaming](#outlier-preserving-quantized-activation-streaming)
+  - [Sub-Millisecond Windows TCP Socket Tuning (Delayed-ACK Bypass)](#sub-millisecond-windows-tcp-socket-tuning-delayed-ack-bypass)
   - [Intra-Host Shared Memory (SHM) Transport](#intra-host-shared-memory-shm-transport)
   - [Tailscale WireGuard Quality Inspection](#tailscale-wireguard-quality-inspection)
   - [Windows Job Object Lifecycle Management](#windows-job-object-lifecycle-management)
@@ -46,17 +47,18 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 ┌─────────────────────────────────┐                       ┌─────────────────────────────────┐
 │ Coordinator Node (Laptop A)     │                       │ Remote Worker Node (Laptop B)   │
 │ ─────────────────────────────── │                       │ ─────────────────────────────── │
-│ Local GGUF: Stage 1 (0..24)     │                       │ Local GGUF: Stage 2 (25..48)    │
+│ Local GGUF: Stage 1 (0..K)      │                       │ Local GGUF: Stage 2 (K+1..N-1)  │
+│ Ephemeral VRAM Upload (0MB SSD) │                       │ Ephemeral VRAM Upload (0MB SSD) │
 │ Identity RMSNorm (weights=1.0)  │                       │ True Output Norm + LM Head      │
 │                                 │                       │                                 │
 │ 1. Tokenize Prompt              │                       │                                 │
-│ 2. Embeddings & Layers 0..24    │  ActivationFrame      │                                 │
-│ 3. Quantize Activation Vector   │  [S x hidden_dim]     │ 4. Dequantize Activations       │
-│    (Per-Row INT8 / FP8 / FP32)  │ ────────────────────> │ 5. Layers 25..48 GEMM Decode    │
-│                                 │  ~1.5 KB - 16 KB      │ 6. LM Head Logits Evaluation    │
+│ 2. Embeddings & Layers 0..K     │  ActivationFrame (v4) │                                 │
+│ 3. Outlier-Preserving INT8      │  [S x hidden_dim]     │ 4. Dequantize INT8 + Outliers   │
+│    (Top-8 FP32 + INT8 Row)      │ ────────────────────> │ 5. Layers K+1..N-1 GEMM Decode  │
+│    SIO_TCP_SET_ACK_FREQUENCY=1  │  ~3.05 KB - 5.16 KB   │ 6. LM Head Logits Evaluation    │
 │                                 │                       │ 7. Penalty Sampler (T_next)     │
 │ 9. Yield Token to Client (SSE)  │  TokenResponseFrame   │                                 │
-│ 10. Seed T_next into Next Step  │  (Token ID, Text)     │ 8. Send Token Back to Host      │
+│ 10. Seed T_next into Next Step  │  (1-Hop Direct ATOK)  │ 8. Send Token Back to Host      │
 │     (Autoregressive Loopback)   │ <──────────────────── │                                 │
 └─────────────────────────────────┘                       └─────────────────────────────────┘
      ▲
@@ -65,8 +67,8 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 ┌─────────────────────────────────┐
 │ Client Interface                │
 │ ─────────────────────────────── │
-│ • FastAPI Proxy (app.py :7860)  │
-│ • Dark Claymorphic SPA          │
+│ • FastAPI Gateway (app.py :7860)│
+│ • Liquid Glass SPA              │
 │ • KaTeX Math + Highlight.js     │
 │ • DeepSeek-R1 <think> Accordion │
 │ • Live Cluster Topology HUD     │
@@ -77,7 +79,7 @@ Unlike conventional distributed inference frameworks (such as default GGML RPC) 
 
 ## Screenshots
 
-AeroMESH includes a dependency-free claymorphic web dashboard for chat, model slicing, cluster telemetry, and live pipeline monitoring.
+AeroMESH includes a dependency-free web dashboard for chat, model slicing, cluster telemetry, and live pipeline monitoring.
 
 <table>
   <tr>
@@ -118,177 +120,148 @@ AeroMESH includes a dependency-free claymorphic web dashboard for chat, model sl
 
 ## How Zero-Weight Pipeline Inference Works
 
-In conventional distributed model execution, model tensors are dispatched across network links during initialization or dynamically paged when layers are executed remotely. Over standard Wi-Fi connections, VPN tunnels, or metered mobile uplinks, transferring 8 GB to 30 GB of weights creates multi-minute cold starts and introduces frequent packet-drop bottlenecks.
+In conventional distributed model execution, model tensors are dispatched across network links during initialization or dynamically paged when layers are executed remotely. Over standard Wi-Fi connections, VPN tunnels, or metered mobile uplinks, transferring 8 GB to 30 GB of weights creates multi-minute cold starts and frequent packet-drop bottlenecks.
 
 AeroMesh changes the distribution boundary:
 
-1. **Symmetric Local Storage**: Every node in the cluster stores an identical base GGUF model on its local NVMe SSD.
-2. **Deterministic Layer Partitioning**: The model is sliced along transformer block boundaries. For an $N$-layer model distributed across two nodes, Node A runs layers $0 \dots K$, and Node B runs layers $K+1 \dots N-1$.
+1. **Symmetric Local Storage with Zero Disk Bloat**: Every node in the cluster stores an identical base GGUF model on its local NVMe SSD. No permanent duplicate `_stage1.gguf` or `_stage2.gguf` files are left on disk.
+2. **Deterministic Layer Partitioning**: The model is sliced along transformer block boundaries. For an $N$-layer model distributed across $M$ nodes, Stage 0 runs layers $0 \dots K_0$, Stage 1 runs $K_0+1 \dots K_1$, through Stage $M-1$ ($K_{M-2}+1 \dots N-1$).
 3. **Prefill Phase**:
    - Coordinator tokenizes the prompt sequence of length $S$.
-   - Coordinator evaluates token embeddings and layers $0 \dots K$, producing an activation tensor of shape $[S, d_{\text{model}}]$.
-   - Activations are quantized (e.g., Per-Row INT8) and transmitted via an `ActivationFrame` with `FLAG_IS_PROMPT` and `FLAG_CLEAR_KV`.
-   - Worker evaluates layers $K+1 \dots N-1$ across the sequence, applies the final layer norm and LM head, and samples the first generated token $T_1$.
-   - Worker returns $T_1$ via a `TokenResponseFrame`.
+   - Coordinator evaluates token embeddings and layers $0 \dots K_0$, producing an activation tensor of shape $[S, d_{\text{model}}]$.
+   - Activations are quantized using Outlier-Preserving Per-Row INT8 and transmitted via an `ActivationFrame` with `FLAG_IS_PROMPT` and `FLAG_CLEAR_KV`.
+   - Downstream worker(s) evaluate their assigned layers across the sequence; the terminal worker applies the final layer norm and LM head, sampling the first generated token $T_1$.
+   - The terminal worker returns $T_1$ directly to the coordinator via a 1-hop `TokenResponseFrame`.
 4. **Autoregressive Decoding Loop**:
-   - Coordinator receives $T_1$, pushes it to the client stream, and uses $T_1$ as the single input token for position $P$.
-   - Coordinator computes layers $0 \dots K$ for $[1, d_{\text{model}}]$.
-   - The activation vector (~1.5 KB for a 1536-dim model, ~5.1 KB for a 5120-dim model under INT8) is transmitted to the worker.
-   - Worker advances position $P$, evaluates layers $K+1 \dots N-1$, samples $T_2$, and streams it back.
-   - The process repeats until EOS or maximum token length is reached.
-5. **KV-Cache Synchronization**: Both nodes advance their internal KV caches in lockstep using synchronized sequence positions and explicit session flags.
+   - Coordinator receives $T_1$, pushes it to the client SSE stream, and feeds $T_1$ as the single input token for position $P$.
+   - Coordinator computes layers $0 \dots K_0$ for $[1, d_{\text{model}}]$.
+   - The compressed activation vector (~3.05 KB for a 3072-dim 3B model, ~5.16 KB for a 5120-dim 14B model) is transmitted over the wire.
+   - Worker advances position $P$, evaluates its layers, samples $T_2$, and streams it back.
+   - The process repeats until EOS, user abort, or maximum token length is reached.
+5. **KV-Cache Synchronization**: All nodes advance their internal KV caches in lockstep using synchronized sequence positions (`token_position`) and explicit session flags.
 
 ---
 
 ## Core Engineering Deep Dives
 
-### GGUF Layer Partitioning & The Identity RMSNorm Solution
+### Ephemeral VRAM Stage Loading & The Identity RMSNorm Solution
 
-Naive splitting of a GGUF model into two halves causes corrupted output logits due to the **Double Normalization** problem.
+Naive splitting of a GGUF model into two halves causes two problems:
+1. **The Double Normalization Problem**: In standard LLaMA/Qwen architectures, the computation graph terminates with a final Root Mean Square Normalization (`output_norm.weight`) immediately prior to the language model head (`output.weight`):
 
-In standard LLaMA-style architectures, the computation graph terminates with a final Root Mean Square Normalization (`output_norm.weight`) immediately prior to the language model head (`output.weight`):
+$$\mathbf{x}_{\text{final}} = \text{RMSNorm}(\mathbf{x}_L, \mathbf{w}_{\text{norm}}), \qquad \mathbf{z} = \mathbf{x}_{\text{final}} \cdot \mathbf{W}_{\text{head}}$$
 
-$$\mathbf{x}_{\text{final}} = \text{RMSNorm}(\mathbf{x}_L, \mathbf{w}_{\text{norm}})$$
-$$\mathbf{z} = \mathbf{x}_{\text{final}} \cdot \mathbf{W}_{\text{head}}$$
+If Stage 1 is run as an isolated `llama.cpp` instance, the runtime applies `output_norm` to the intermediate hidden state $\mathbf{x}_K$ before emitting activations, distorting variance for Stage 2.
+2. **SSD Storage Duplication**: Writing permanent `_stage1.gguf` and `_stage2.gguf` files duplicates the entire model size on disk (e.g., an 8.5 GB model consumes ~17 GB of SSD storage).
 
-If Stage 1 is run as an isolated llama.cpp instance, the runtime attempts to apply `output_norm` to the intermediate hidden state $\mathbf{x}_K$ before emitting activations. If Stage 2 then receives normalized inputs and executes downstream transformer blocks, the inputs have already been normalized incorrectly, destroying scale variance.
+AeroMesh's GGUF slicer (`aeromesh_engine::gguf_slicer`) solves both problems:
 
-AeroMesh's GGUF slicer (`aeromesh_engine::gguf_slicer`) partitions monolithic GGUF files with exact graph semantics:
+- **Ephemeral VRAM Upload (`InPlaceStageGuard`)**:
+  - At startup, `InPlaceStageGuard` constructs a temporary stage GGUF (`.aeromesh_ephemeral_*`), disables memory-map file locking (`use_mmap = false`), uploads the stage tensors directly into CUDA GPU VRAM, and **automatically deletes the temporary file from disk the instant VRAM initialization completes**.
+  - Persistent disk overhead is strictly **0.0 MB**.
+- **Stage 1 Partition (Non-Terminal Stages)**:
+  - Retains `token_embd.weight` and assigned transformer layers $0 \dots K$, while stripping the unused `output.weight` LM head to save VRAM and load time.
+  - Replaces `output_norm.weight` with an **Identity RMSNorm tensor** ($\mathbf{w} = [1.0, 1.0, \dots, 1.0]$) and captures the unnormalized residual tensor `l_out-K` via `cb_eval`.
+- **Terminal Stage Partition**:
+  - Extracts upper transformer layers and re-indexes them contiguously starting from `blk.0.*`.
+  - Retains the genuine `output_norm.weight` and `output.weight` (LM head) with 32-byte tensor alignment.
 
-- **Stage 1 Partition (`model_stage1.gguf`)**:
-  - Retains `token_embd.weight` and transformer layers $0 \dots \text{split}-1$.
-  - Replaces `output_norm.weight` with an **Identity RMSNorm tensor** where all values are set to $1.0$.
-  - When llama.cpp finishes evaluating Stage 1, the hidden states pass through the identity transform unscaled, ensuring uncorrupted hidden states flow into Stage 2.
-  - Keeps metadata block counts aligned to Stage 1 layer count.
-- **Stage 2 Partition (`model_stage2.gguf`)**:
-  - Extracts transformer layers $\text{split} \dots N-1$ and re-indexes them starting from index 0 (`blk.0.*` through `blk.M.*`).
-  - Retains the genuine `output_norm.weight` and `output.weight` (LM head).
-  - Adjusts GGUF metadata block count to $N - \text{split}$.
-  - Computes exact 32-byte data alignment offsets for zero-copy memory mapping (`mmap`).
+### Binary Wire Protocol Specification (Protocol v4)
 
-Slice partitions are generated on-the-fly or in advance via the `aeromesh slice` command:
-```powershell
-cargo run --bin aeromesh -- slice --model "models/model.gguf" --split 14
-```
+Network transport uses fixed-header binary frames over low-latency TCP sockets with `TCP_NODELAY` and `SIO_TCP_SET_ACK_FREQUENCY = 1` forced on all endpoints. All header integers are encoded in Big-Endian format.
 
-### Binary Wire Protocol Specification
-
-Network transport uses custom fixed-header binary frames over low-latency TCP sockets with `TCP_NODELAY` forced on both endpoints. All integers are encoded in Big-Endian format.
-
-#### 1. ActivationHeader (42 Bytes Fixed Size)
+#### 1. ActivationHeader (44 Bytes Fixed Size)
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | `0..4` | `magic` | `[u8; 4]` | Protocol magic identifier: `b"AERO"` (`0x41 0x45 0x52 0x4F`) |
-| `4..6` | `version` | `u16` | Protocol version (current: `2`) |
+| `4..6` | `version` | `u16` | Protocol version (current: `4`) |
 | `6..14` | `session_id` | `u64` | Multi-turn chat session identifier |
 | `14..22` | `sequence_id` | `u64` | Monotonic token generation sequence counter |
 | `22..26` | `sequence_length` | `u32` | Sequence length $S$ ($S = 1$ for decode, $S > 1$ for prefill) |
 | `26..30` | `token_position` | `u32` | Absolute offset position within KV cache |
-| `30..32` | `layer_index` | `u16` | Boundary split layer index (e.g., `14` or `24`) |
-| `32..36` | `hidden_dim` | `u32` | Hidden dimension size $d_{\text{model}}$ (e.g., `1536`, `4096`, `5120`) |
-| `36..37` | `dtype` | `u8` | Data type encoding (`0`=FP32, `1`=FP16, `2`=BF16, `3`=INT8-Row, `4`=FP8) |
-| `37..38` | `flags` | `u8` | Bitmask: `0x01`=Clear KV, `0x02`=Prompt prefill, `0x04`=EOS |
-| `38..42` | `payload_bytes` | `u32` | Byte length of activation payload immediately following |
+| `30..31` | `stage_index` | `u8` | Current pipeline stage index (0-indexed) |
+| `31..32` | `total_stages` | `u8` | Total pipeline stages in cluster ($\ge 2$) |
+| `32..34` | `layer_index` | `u16` | Boundary split layer index (e.g., `13` or `23`) |
+| `34..38` | `hidden_dim` | `u32` | Hidden dimension size $d_{\text{model}}$ (e.g., `3072`, `4096`, `5120`) |
+| `38..39` | `dtype` | `u8` | Data type encoding (`0`=FP32, `1`=FP16, `2`=BF16, `3`=Outlier-INT8, `4`=FP8) |
+| `39..40` | `flags` | `u8` | Bitmask: `0x01`=Clear KV, `0x02`=Prompt prefill, `0x04`=EOS |
+| `40..44` | `payload_bytes` | `u32` | Byte length of activation payload immediately following |
 
 #### 2. TokenResponseFrame (35 Bytes Fixed Header + Variable Text Payload)
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | `0..4` | `magic` | `[u8; 4]` | Magic identifier: `b"ATOK"` (`0x41 0x54 0x4F 0x4B`) |
-| `4..6` | `version` | `u16` | Protocol version (`2`) |
+| `4..6` | `version` | `u16` | Protocol version (`4`) |
 | `6..14` | `session_id` | `u64` | Session ID |
 | `14..22` | `sequence_id` | `u64` | Sequence ID matching corresponding `ActivationHeader` |
 | `22..26` | `token_id` | `i32` | Sampled vocabulary token ID |
 | `26..27` | `is_eos` | `u8` | End of generation signal (`1` if EOS, `0` otherwise) |
-| `27..31` | `eval_time_ms` | `f32` | Stage 2 GPU evaluation duration in milliseconds |
+| `27..31` | `eval_time_ms` | `f32` | Worker GPU evaluation duration in milliseconds |
 | `31..35` | `text_len` | `u32` | Length of token UTF-8 text piece |
 | `35..end` | `token_text` | `[u8]` | UTF-8 decoded token text piece |
 
 #### 3. Handshake Frames
 
-Before streaming begins, nodes exchange `HandshakeRequest` (`b"AHSK"`) and `HandshakeResponse` (`b"AHSR"`) frames to validate model architecture, hidden dimension, layer slice range, and checksums.
+Before streaming begins, nodes exchange `HandshakeRequest` (`b"AHSK"`) and `HandshakeResponse` (`b"AHSR"`) frames with constant-time SHA-256 mutual authentication (`AEROMESH_WORKER_SECRET`) to validate model architecture, hidden dimension, layer slice assignment, and downstream chain routing.
 
-### Quantized Activation Streaming
+### Outlier-Preserving Quantized Activation Streaming
 
-To minimize Wi-Fi and VPN serialization latency, AeroMesh implements multiple wire quantization formats:
+Modern LLMs (Qwen-2.5, DeepSeek-R1, Llama-3) exhibit high-magnitude residual outlier channels ($|x_j| > 50.0$) that crush the dynamic range of normal channels under naive INT8 quantization. AeroMesh implements **Outlier-Preserving Per-Row INT8 (`Int8PerRow`)**:
 
-| Format | Tag | Bytes / Element | Network Payload ($d=1536$) | Network Payload ($d=5120$) | Relative Reduction |
+| Format | Tag | Bytes / Element | Wire Payload ($d=3072$) | Wire Payload ($d=5120$) | Relative Reduction |
 |---|---|---|---|---|---|
-| **Raw FP32** | `RawF32` | 4 bytes | 6,144 bytes | 20,480 bytes | Baseline |
-| **FP16 / BF16** | `Fp16` / `Bf16` | 2 bytes | 3,072 bytes | 10,240 bytes | 50.0% |
-| **FP8 (E4M3)** | `Fp8E4M3` | 1 byte | 1,536 bytes | 5,120 bytes | 75.0% |
-| **Per-Row INT8** | `Int8PerRow` | ~1 byte + scale | 1,540 bytes | 5,124 bytes | **74.9% (Preserves Outliers)** |
+| **Raw FP32** | `RawF32` | 4 bytes | 12,288 bytes | 20,480 bytes | Baseline |
+| **FP16 / BF16** | `Fp16` / `Bf16` | 2 bytes | 6,144 bytes | 10,240 bytes | 50.0% |
+| **FP8 (E4M3)** | `Fp8E4M3` | 1 byte | 3,072 bytes | 5,120 bytes | 75.0% |
+| **Outlier-INT8** | `Int8PerRow` | 1 B + Top-8 FP32 | **3,124 bytes (3.05 KB)** | **5,172 bytes (5.05 KB)** | **~74.8% (Zero Quality Loss)** |
 
-#### Per-Row INT8 Dynamic Scaling
-Unlike global tensor quantization, Per-Row INT8 normalizes each sequence row $s \in [0, S)$ independently:
+#### Outlier-Preserving Per-Row INT8 Algorithm
+For each token row $s \in [0, S)$ with hidden dimension $d \ge 256$:
+1. **Top-8 Outlier Extraction**: Identifies the 8 largest-magnitude channels $O_s = \{j_1, \dots, j_8\}$ and stores their exact `(u16 index, f32 value)` pairs ($8 \times 6 = 48\text{ bytes}$).
+2. **Residual Dynamic Scaling**: Computes the INT8 scale factor exclusively across the remaining non-outlier channels:
 
-$$\text{scale}_s = \frac{\max_{j} |x_{s, j}|}{127.0}$$
-$$q_{s, j} = \text{clamp}\left(\left\lfloor \frac{x_{s, j}}{\text{scale}_s} + 0.5 \right\rfloor, -127, 127\right)$$
+$$\text{scale}_s = \frac{\max_{j \notin O_s} |x_{s, j}|}{127.0}, \qquad q_{s, j} = \text{clamp}\left(\text{round}\left(\frac{x_{s, j}}{\text{scale}_s}\right), -127, 127\right)$$
 
-Wire payload layout: For each row, a 4-byte little-endian IEEE-754 float `scale_s` precedes the $d_{\text{model}}$ bytes of signed 8-bit quantized values. This layout isolates large activation outliers to single token rows without polluting the dynamic range of surrounding tokens.
+3. **Dequantization**: Reconstructs $x_{s, j} = q_{s, j} \times \text{scale}_s$ and overwrites the 8 outlier indices with their exact FP32 values.
+
+### Sub-Millisecond Windows TCP Socket Tuning (Delayed-ACK Bypass)
+
+Over Tailscale WireGuard tunnels (MTU `1280` bytes, TCP MSS `1240` bytes), a ~5.1 KB activation frame splits into **5 TCP segments** (an odd number). By default, the Windows TCP stack (`TcpAckFrequency = 2`) waits up to **200 ms** for an even-numbered segment before acknowledging the 5th segment—throttling distributed LLM inference to exactly `5.0 tok/s`.
+
+AeroMesh bypasses this OS bottleneck automatically on every cluster socket via Win32 `WSAIoctl`:
+- Sets `SIO_TCP_SET_ACK_FREQUENCY = 1` (`0x98000017`) to acknowledge every incoming segment immediately.
+- Enables `SIO_LOOPBACK_FAST_PATH = 1` (`0x98000010`) and `TCP_NODELAY = true`.
+- Configures 512 KB `SO_SNDBUF` and `SO_RCVBUF` kernel buffers, unlocking **15–30 tok/s** over Wi-Fi and Tailscale.
 
 ### Intra-Host Shared Memory (SHM) Transport
 
-When coordinator and worker instances are co-located on the same physical host (such as running multi-GPU setups or local test loops via `127.0.0.1`), AeroMesh bypasses the OS network stack via `aeromesh_core::shm::SharedMemoryRingBuffer`.
+When coordinator and worker instances are co-located on the same physical host (`.\start.ps1 all`), AeroMesh bypasses the OS network stack via `aeromesh_core::shm::SharedMemoryRingBuffer`:
 
 - **Lock-Free SPSC Ring Buffer**: Uses memory-mapped files backed by `memmap2`.
 - **Atomic Cache-Line Alignment**: Head and tail indices are managed via 64-bit atomic operations (`AtomicUsize`) placed on separate 64-byte cache lines to eliminate CPU false sharing.
-- **Bi-Directional Channels**: Channel allocations map forward and backward paths:
-  - `channel_{port}_fwd.bin`: Transports activation frames from coordinator to worker.
-  - `channel_{port}_bwd.bin`: Transports token response frames from worker to coordinator.
-- **Zero Kernel Copies**: Data is written directly to shared mapped memory pages, eliminating TCP overhead and socket buffers.
+- **Spin-Yield Polling**: Performs 64 fast cooperative task yields before falling back to microsecond sleep, achieving sub-100µs stage handoffs.
 
 ### Tailscale WireGuard Quality Inspection
 
 AeroMesh queries the local Tailscale daemon (`tailscale status --json`) to evaluate peer connectivity and route quality:
 
-1. **Direct WireGuard vs. DERP Relay**: Tailscale connections that fail NAT traversal fall back to encrypted relay servers (DERP). DERP relays introduce 50 ms to 300+ ms of jitter, which degrades autoregressive token streaming throughput.
-2. **RTT Quality Gating**: Every candidate node is probed with an active TCP connection (`TailscaleInspector::probe_socket_link`).
-3. **Cluster Admission Rule**: A peer is accepted into the active cluster topology only if:
-   - The connection is a **Direct WireGuard tunnel** (not relayed via DERP).
-   - Round-Trip Time (RTT) latency satisfies $\text{RTT} \le 150 \text{ ms}$.
-   Nodes failing these criteria are rejected during the discovery pass and reported with an explicit warning.
+1. **Direct WireGuard vs. DERP Relay**: Connections that fail NAT traversal fall back to encrypted relay servers (DERP), which introduce 50–300+ ms of jitter.
+2. **RTT Quality Gating**: Every candidate node is probed with `TailscaleInspector::probe_socket_link`.
+3. **Cluster Admission Rule**: A peer is marked eligible if it establishes a **Direct WireGuard tunnel** with $\text{RTT} \le 150 \text{ ms}$.
 
 ### Windows Job Object Lifecycle Management
 
-On Windows platforms, unexpected crashes or unhandled terminations (e.g., terminating a coordinator terminal via Ctrl+C) frequently leave background CUDA worker processes (`ggml-rpc-server.exe` or `llama-server.exe`) running as orphaned zombie processes. These processes continue holding several gigabytes of VRAM in the GPU driver until killed manually via Task Manager.
-
-AeroMesh resolves this with the Win32 Job Objects API (`aeromesh_engine::job_object::SafeProcessJob`):
-
-- Initializes a kernel Job Object with `CreateJobObjectW`.
-- Configures `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
-- Binds all spawned worker processes via `AssignProcessToJobObject`.
-- **Guarantee**: If the parent AeroMesh process terminates, crashes, or receives a panic, the Windows NT kernel terminates all associated child processes and releases their allocated GPU VRAM.
+AeroMesh wraps spawned native worker processes in a Win32 Job Object (`aeromesh_engine::job_object::SafeProcessJob`) configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. If the parent AeroMesh process terminates, crashes, or receives Ctrl+C, the Windows NT kernel immediately terminates all child processes and reclaims their GPU VRAM.
 
 ### RPC Disk Cache Pre-Priming (FNV-1a)
 
-When operating in CUDA RPC fallback mode (`--mode rpc`), standard GGML RPC caches weights on the worker node at `%LOCALAPPDATA%\llama.cpp\rpc\`. By default, weights are transferred over the wire upon first connection.
-
-AeroMesh includes an offline cache primer (`aeromesh prime-cache` or `cache_prime.rs`):
-- Reads the local `.gguf` file using `GgufSliceLoader`.
-- Scans all tensors exceeding the 10 MB threshold.
-- Computes the 64-bit FNV-1a hash matching llama.cpp's internal hash function:
-  ```rust
-  let mut hash: u64 = 0xcbf29ce484222325;
-  for &byte in data {
-      hash ^= byte as u64;
-      hash = hash.wrapping_mul(0x100000001b3);
-  }
-  ```
-- Writes pre-hashed binary blocks directly to `%LOCALAPPDATA%\llama.cpp\rpc\<hash_hex>`.
-- **Result**: Even when using GGML RPC, 0.0 MB of model weights are transmitted across the network during cluster initialization.
+When operating in CUDA RPC fallback mode (`--mode rpc`), `aeromesh prime-cache` hashes local `.gguf` tensors (>10 MB) using llama.cpp's 64-bit FNV-1a hash (`0xcbf29ce484222325`) and populates `%LOCALAPPDATA%\llama.cpp\rpc\<hash_hex>` directly from local SSD.
 
 ### Activation Boundary Watchdog
 
-To prevent numerical instabilities from silently propagating through multi-node pipeline stages, `aeromesh_core::inspect_activations` validates activation tensors at node egress and ingress points:
-
-- Computes sample count, mean, variance, standard deviation, and L2 norm:
-
-  $$\|\mathbf{x}\|_2 = \sqrt{\sum_{i=1}^M x_i^2}$$
-
-- **Hard Failures**: Traps any tensor containing `NaN` or `Inf` floating-point values and terminates execution with an explicit error.
-- **Soft Warnings**: Detects dead tensors ($\|\mathbf{x}\|_2 = 0.0$) and high activation magnitudes ($|x_i| > 100.0$) to warn about dynamic range degradation before token sampling begins.
+`aeromesh_core::inspect_activations` validates activation tensors at node boundaries, trapping `NaN` or `Inf` values and warning on zero-norm dead tensors before token sampling begins.
 
 ---
 
@@ -297,47 +270,28 @@ To prevent numerical instabilities from silently propagating through multi-node 
 ```
 AeroMESH/
 ├── .github/                      # GitHub Actions CI/CD workflows
-├── Cargo.toml                    # Cargo workspace definition (2021 edition)
+├── Cargo.toml                    # Cargo workspace definition (2021 edition, Fat LTO)
+├── API_REFERENCE.md              # Full HTTP/SSE endpoint & error envelope specification
 ├── BENCHMARKS.md                 # Latency, memory compression, and wire throughput benchmarks
+├── CHANGELOG.md                  # Release history and architectural changelog
 ├── CONTRIBUTING.md               # Development setup, testing, and contribution guidelines
 ├── LICENSE                       # Apache License (Version 2.0)
-├── LIMITATIONS.md                # Architectural boundaries, hardware scope, and operational trade-offs
+├── LIMITATIONS.md                # Architectural boundaries and operational trade-offs
+├── SECURITY.md                   # Threat model & mutual authentication specification
 ├── README.md                     # Technical architecture and user guide
+├── apply_fixes.py                # Deterministic workspace patch & stale slice cleanup utility
 ├── setup.ps1                     # 1-Click environment bootstrap script for Windows
 ├── start.ps1                     # Interactive / flag-based cluster launcher
-├── start.bat                     # Windows batch wrapper for start.ps1
-├── app.py                        # FastAPI streaming chat backend and SPA host
-├── pyproject.toml                # Python package metadata (fastapi, uvicorn, httpx)
+├── app.py                        # FastAPI streaming chat gateway and SPA host (:7860)
+├── pyproject.toml                # Python package metadata (fastapi, uvicorn, httpx, pytest)
 ├── bin/                          # Native CUDA-compiled llama.cpp DLLs and executables
-│   ├── ggml-cuda.dll             # CUDA compute backend runtime
-│   ├── llama.dll                 # Core llama library
-│   ├── llama-server.exe          # Fallback backend server
-│   └── ggml-rpc-server.exe       # RPC backend worker
 ├── crates/
-│   ├── aeromesh-core/            # Wire protocol, networking & serialization primitives
-│   │   ├── src/activation.rs     # ActivationHeader, TokenResponseFrame, INT8/FP8 codec
-│   │   ├── src/shm.rs            # Lock-free SPSC shared memory ring buffer
-│   │   ├── src/tailscale.rs      # Tailscale peer discovery, link prober & RTT benchmarking
-│   │   ├── src/transport.rs      # Unified TCP/SHM pipeline transport abstractions
-│   │   ├── src/types.rs          # Cluster telemetry and node allocation data types
-│   │   └── src/error.rs          # Error type definitions
-│   ├── aeromesh-engine/          # High-performance inference engine & server
-│   │   ├── src/gguf_slicer.rs    # GGUF partition slicer with Identity RMSNorm injection
-│   │   ├── src/slice_loader.rs   # Zero-copy GGUF mmap parser & llama context instance
-│   │   ├── src/pipeline.rs       # PipelineCoordinatorClient & PipelineWorkerService
-│   │   ├── src/server.rs         # Axum HTTP API server (/v1/chat/completions SSE)
-│   │   ├── src/llama_ffi.rs      # Direct C-FFI bindings to native llama.cpp library
-│   │   ├── src/job_object.rs     # Win32 Job Object wrapper for leak-proof process lifecycle
-│   │   ├── src/cache_prime.rs    # FNV-1a RPC cache pre-populator from local SSD
-│   │   ├── src/process.rs        # Supervised process execution and log parsing
-│   │   └── src/gguf.rs           # Fast GGUF header inspector and path resolver
+│   ├── aeromesh-core/            # Wire protocol v4, low-latency TCP, SHM & Outlier-INT8 codec
+│   ├── aeromesh-engine/          # Ephemeral GGUF slicer, FFI loader, pipeline & Axum server
 │   └── aeromesh-cli/             # Unified command-line interface
-│       └── src/main.rs           # CLI subcommands (worker, coordinator, serve, status, etc.)
-├── models/                       # Local directory for .gguf model files
-└── static/                       # Web UI assets
-    ├── index.html                # Single-page interface markup
-    ├── css/claymorphic.css       # Dark claymorphic design system
-    └── js/app.js                 # UI logic, SSE parser, KaTeX math & telemetry HUD
+├── models/                       # Local directory for base .gguf model files
+├── static/                       # Liquid Glass Web UI assets (HTML, CSS, JS)
+└── tests/                        # FastAPI gateway integration test suite (27 tests)
 ```
 
 ---
@@ -345,11 +299,10 @@ AeroMESH/
 ## Prerequisites
 
 - **Operating System**: Windows 10 / 11 (64-bit).
-- **GPU**: NVIDIA GPU with CUDA capability (Pascal, Turing, Ampere, Ada Lovelace, or Blackwell). Ensure current NVIDIA display drivers are installed.
-- **Rust Toolchain**: Rust 1.78+ (`stable-x86_64-pc-windows-msvc` or `stable-x86_64-pc-windows-gnu`).
-- **Python**: Python 3.11 or higher (for the web interface proxy).
-- **Networking**: [Tailscale](https://tailscale.com) installed and signed into your network mesh (or local LAN with static/DHCP IPs).
-- **Git**: Installed and available on `PATH`.
+- **GPU**: NVIDIA GPU with CUDA capability and current drivers installed.
+- **Rust Toolchain**: Rust 1.78+ (`stable-x86_64-pc-windows-gnu` with `w64devkit` or `msvc`).
+- **Python**: Python 3.11 or higher (for the web interface gateway).
+- **Networking**: [Tailscale](https://tailscale.com) installed for cross-machine WireGuard mesh networking (or local LAN/Wi-Fi).
 
 ---
 
@@ -363,26 +316,23 @@ Run the automated setup script from PowerShell inside the `AeroMESH` root direct
 .\setup.ps1
 ```
 
-The setup script performs the following actions:
-1. Verifies NVIDIA GPU detection via `nvidia-smi`.
-2. Inspects Tailscale daemon presence and active IPv4 assignment.
-3. Validates the Rust compiler (automatically downloads and configures `rustup` if missing).
-4. Creates necessary runtime directories (`models/`, `bin/`).
-5. Synchronizes CUDA backend libraries into the `bin/` directory.
-6. Compiles the Rust workspace (`cargo build`).
-
-### Python Virtual Environment Setup
-
-To run the web interface, initialize the Python dependencies:
+### Building the Release Binary Manually
 
 ```powershell
-# Using standard venv
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r pyproject.toml
+$env:PATH = "C:\w64devkit\bin;C:\Users\$env:USERNAME\.cargo\bin;$env:PATH"
+cargo build --release --bin aeromesh
+Copy-Item -Path "bin\*.dll" -Destination "target\release" -Force
+```
 
-# Or using uv (fast)
-uv sync
+### Running the Automated Test Suites
+
+```powershell
+# Run all 65 Rust unit tests (19 core + 46 engine)
+cargo test --workspace
+
+# Run all 27 Python FastAPI Gateway tests (ensure background coordinator is stopped first)
+Stop-Process -Name "aeromesh" -Force -ErrorAction SilentlyContinue
+.\.venv\Scripts\pytest.exe tests/test_fastapi_gateway.py
 ```
 
 ---
@@ -391,127 +341,72 @@ uv sync
 
 ### Method 1: Interactive Launcher (`start.ps1`)
 
-The repository includes an all-in-one launcher script that handles port cleanup, model discovery, dependency verification, and startup orchestration:
-
 ```powershell
 .\start.ps1
 ```
 
-Executing `.\start.ps1` without arguments displays an interactive menu:
-
+Interactive menu options:
 ```
 Select your node role for this machine:
-  [1] Coordinator Node + Web UI (Runs Layers 0..24, Hosts API + Web Interface)
-  [2] Worker Node               (Runs Layers 25..48 + LM Head on Port 50052)
-  [3] Full Local Test Mesh      (Starts Worker + Coordinator + Web UI locally)
-  [4] Cluster Status / Probe    (Scans Tailscale Mesh for active worker nodes)
+  [1] Coordinator Node + Web UI (Laptop A: runs the lower layers, hosts the API + web interface)
+  [2] Worker Node               (Laptop B: runs the upper layers + LM head)
+  [3] Full Local Mesh           (worker + coordinator + web UI on this machine, via shared memory)
+  [4] Cluster Status / Probe    (scans the mesh for reachable workers)
   [Q] Quit
 ```
 
-You can also pass arguments directly to the script:
-
+Direct flag examples:
 ```powershell
-# Start as worker node
-.\start.ps1 worker -Port 50052
+# Run full 2-stage local mesh on a single laptop (Shared Memory + Web UI)
+.\start.ps1 all -Model "models/test.gguf"
 
-# Start as coordinator targeting a remote peer
-.\start.ps1 coordinator -Peers "100.101.147.24:50052" -Port 8080
+# Start Worker Node on Laptop B
+.\start.ps1 worker -Port 50052 -Model "models/test.gguf"
 
-# Run full local benchmark mesh without opening browser
-.\start.ps1 all -NoBrowser
+# Start Coordinator Node on Laptop A connected to Laptop B
+.\start.ps1 coordinator -Peers "100.101.147.24:50052" -Model "models/test.gguf"
 ```
 
 ---
 
 ### Method 2: Multi-Node Production Setup (Manual CLI)
 
-This scenario demonstrates connecting two laptops over Tailscale:
-- **Laptop A (Coordinator)**: Tailscale IP `100.122.125.95`
-- **Laptop B (Worker)**: Tailscale IP `100.101.147.24`
-
-Ensure both machines have the same model file placed in their `models/` directory (e.g., `models/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf`).
+Ensure both machines have the same base `.gguf` file in `models/` and matching `.env` secrets (`AEROMESH_WORKER_SECRET` and `AEROMESH_ACTIVATION_DTYPE=int8`).
 
 #### Step 1: Start Worker Node on Laptop B
-
-Run the worker command, specifying the assigned upper layer range:
-
 ```powershell
-cargo run --release --bin aeromesh -- worker `
-    --model "models/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf" `
-    --layers 25..48 `
-    --port 50052
+.\target\release\aeromesh.exe worker --model "models/test.gguf" --port 50052
 ```
-
-The worker slices the model, initializes its local CUDA context for layers 25 through 48 plus the language model head, and begins listening on TCP port `50052`.
 
 #### Step 2: Verify Connectivity from Laptop A
-
-From Laptop A, verify the Tailscale link quality and RTT to Laptop B:
-
 ```powershell
-cargo run --release --bin aeromesh -- probe 100.101.147.24:50052
-```
-
-Expected output:
-```
-========================================================
-   AEROMESH TAILSCALE LINK QUALITY REPORT
-========================================================
-  Target Host:      laptop-b
-  IP Address:       100.101.147.24
-  Direct WireGuard: ✅ YES
-  TCP RTT Ping:     14.20 ms
-  Cluster Status:   ✅ ELIGIBLE (Direct / Low Latency)
-========================================================
+.\target\release\aeromesh.exe probe 100.101.147.24:50052
 ```
 
 #### Step 3: Start Coordinator & API Server on Laptop A
-
-Start the coordinator with the lower layer range and register Laptop B as a peer:
-
 ```powershell
-cargo run --release --bin aeromesh -- serve `
-    --model "models/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf" `
-    --layers 0..24 `
-    --peers "100.101.147.24:50052" `
-    --port 8080
+.\target\release\aeromesh.exe start --role coordinator --model "models/test.gguf" --peers "100.101.147.24:50052" --port 8080
 ```
 
-The coordinator slices layers 0 through 24 with Identity RMSNorm, executes the binary handshake with Laptop B, and starts an OpenAI-compatible HTTP API server on `http://0.0.0.0:8080`.
-
-#### Step 4: Launch Web Interface
-
-In a separate terminal on Laptop A:
-
+#### Step 4: Launch Web Interface on Laptop A
 ```powershell
 python app.py
 ```
-
-Open `http://127.0.0.1:7860` in your web browser. Real-time streaming responses will display in the chat window, and cluster topology metrics can be monitored via the **Cluster HUD** button.
+Open `http://127.0.0.1:7860` in your browser.
 
 ---
 
 ### Method 3: Full Local Test Mesh
 
-To validate pipeline mechanics and test the web interface on a single machine without a second laptop, run:
+To benchmark the 2-stage pipeline and web UI on a single laptop without a second machine:
 
 ```powershell
-cargo run --release --bin aeromesh -- start --role all --model "models/test.gguf"
+.\start.ps1 all -Model "models/test.gguf"
 ```
-
-This single command:
-1. Calculates the mid-point of the model layers.
-2. Spawns an in-process Stage 2 worker on port `50052` using zero-copy shared memory.
-3. Initializes the Stage 1 coordinator.
-4. Starts the API server on `http://127.0.0.1:8080`.
-
-Then run `python app.py` and open `http://127.0.0.1:7860`.
 
 ---
 
 ## CLI Command Reference
-
-All functions are unified under the `aeromesh` binary:
 
 ```
 Usage: aeromesh <COMMAND>
@@ -526,163 +421,44 @@ Commands:
   coordinator  Run multi-node cluster coordinator (single prompt test or HTTP server)
   serve        Launch persistent OpenAI-compatible HTTP API server
   start        Unified 1-click cluster launcher (worker, coordinator, or local mesh)
-  slice        Partition a monolithic GGUF into Stage 1 and Stage 2 files
-```
-
-### Command Details
-
-#### `aeromesh status`
-Scans the local Tailscale mesh, queries active compute daemons on the network, and displays node health, RTT, and link types.
-```powershell
-cargo run --bin aeromesh -- status [--port 50052]
-```
-
-#### `aeromesh model-check`
-Validates GGUF magic bytes, version, tensor count, and calculates a 64 MB chunk SHA-256 integrity hash.
-```powershell
-cargo run --bin aeromesh -- model-check models/model.gguf
-```
-
-#### `aeromesh slice-info`
-Analyzes a GGUF file and reports memory-mapping footprints, layer index distributions, and projected VRAM savings for a given slice.
-```powershell
-cargo run --bin aeromesh -- slice-info --model models/model.gguf --layers 0..24
-```
-
-#### `aeromesh probe`
-Tests a target socket address, verifies TCP RTT latency, and cross-checks with Tailscale to ensure direct WireGuard routing.
-```powershell
-cargo run --bin aeromesh -- probe 100.101.147.24:50052
-```
-
-#### `aeromesh slice`
-Pre-generates persistent Stage 1 (with Identity RMSNorm) and Stage 2 (re-indexed) GGUF slice files on disk.
-```powershell
-cargo run --bin aeromesh -- slice --model models/model.gguf --split 14 [--out-dir models/]
-```
-
-#### `aeromesh worker`
-Starts a pipeline worker service waiting for intermediate activations.
-```powershell
-cargo run --bin aeromesh -- worker `
-    --model models/model.gguf `
-    --layers 25..48 `
-    --port 50052 `
-    [--host 0.0.0.0]
-```
-
-#### `aeromesh serve`
-Starts the persistent coordinator HTTP server hosting the OpenAI-compatible API.
-```powershell
-cargo run --bin aeromesh -- serve `
-    --model models/model.gguf `
-    --layers 0..24 `
-    --peers "100.101.147.24:50052" `
-    --port 8080 `
-    [--host 0.0.0.0]
-```
-
-#### `aeromesh prime-cache`
-Pre-populates the local `%LOCALAPPDATA%\llama.cpp\rpc` cache directory from an SSD GGUF file using FNV-1a hashing.
-```powershell
-cargo run --bin aeromesh -- prime-cache --model models/model.gguf
+  slice        Manually partition a monolithic GGUF into Stage 1 and Stage 2 files on disk
 ```
 
 ---
 
 ## HTTP API & Web Interface
 
-The AeroMesh coordinator exposes an OpenAI-compatible REST and SSE streaming interface on port `8080` (or your configured `--port`):
+- **Direct Coordinator API (Axum)**: `http://127.0.0.1:8080`
+- **Web UI Gateway (FastAPI)**: `http://127.0.0.1:7860`
+- Full API documentation: [`API_REFERENCE.md`](API_REFERENCE.md)
 
-- **API Reference**: See [`API_REFERENCE.md`](API_REFERENCE.md) for full endpoint specifications, SSE streaming schemas, parameter constraints, cURL examples, and error matrices.
-
-### API Endpoints
-
-- `POST /v1/chat/completions` (or `/api/chat/stream`): Standard OpenAI chat completion format. Supports both standard JSON responses and Server-Sent Events (`stream: true`).
-- `GET /v1/models`: Discovers and enumerates active and available GGUF models on disk.
-- `POST /api/model/switch` (or `/v1/models/load`): Dynamically hot-swaps the active model on the coordinator and reinitializes pipeline contexts without restarting the server.
-- `GET /api/cluster/status`: Reports cluster health, connected worker IP addresses, local layer assignments, and hidden dimension size.
-- `GET /health`: Healthcheck endpoint (returns HTTP 200 `OK`).
-
-### FastAPI Web UI Gateway Architecture
-
-The browser connects to the claymorphic web dashboard hosted by `app.py` on `http://127.0.0.1:7860`, which proxies API traffic to the Axum engine server on `http://127.0.0.1:8080`:
-
-```
-Browser / SPA Client
-       │
-       ▼
-FastAPI Gateway / SPA Host
-app.py (http://127.0.0.1:7860)
-       │
-       ├─ Serves zero-build static assets (static/index.html, CSS, JS, KaTeX)
-       ├─ Gateway Liveness (/health) & End-to-End Readiness (/ready)
-       ├─ Enforces loopback single-origin isolation (eliminating browser CORS complexity)
-       ├─ Injects AEROMESH_API_KEY Bearer credentials for backend coordinator
-       └─ Proxies API calls & unbuffered SSE token streams to Axum
-             │
-             ▼
-      Axum Engine Server
-      aeromesh-engine (http://127.0.0.1:8080)
-             │
-             └─ Pipeline coordinator & Tailscale WireGuard mesh control plane
-```
-
-#### Why the Localhost Hop is an Intentional Architectural Choice
-- **Rapid UI Prototyping**: Modifying the dashboard, styling, or client-side orchestration requires zero Rust re-compilation (`cargo build`).
-- **Same-Origin Security**: The browser communicates with a single local origin (`:7860`), preventing cross-origin attacks from external browser tabs while Axum restricts its CORS allowlist (`FIX-11`).
-- **Credential Shielding**: The browser client does not handle raw coordinator API secrets; the gateway injects Bearer credentials directly on the loopback connection.
-- **Graceful Offline Fallback**: If the Rust engine is compiling or stopped, the gateway remains responsive, serving the UI, scanning local GGUF models on disk, and displaying guided recovery commands.
-- **Negligible Latency Overhead**: Localhost TCP loopback introduces `< 0.08 ms` of latency, which is completely imperceptible compared to GPU token inference (~50–100 ms/token).
-
-For full technical specifications, hop-by-hop header filtering rules, and SSE lifecycle mechanics, see the dedicated design document:  
-👉 [`docs/architecture/fastapi-proxy-gateway.md`](docs/architecture/fastapi-proxy-gateway.md)
-
-#### Dashboard Highlights
-- **Claymorphic Visual System**: Custom warm-dark aesthetic with zero dependencies on heavy front-end build steps (vanilla CSS + ES6 JavaScript).
-- **DeepSeek-R1 Support**: Automatically detects `<think>` and `</think>` tags in output streams and renders collapsible reasoning accordions.
-- **KaTeX Integration**: Renders inline ($...$) and display block ($$...$$) mathematical expressions dynamically as tokens stream in.
-- **Highlight.js**: Provides syntax highlighting for code blocks with one-click clipboard copying.
-- **Live Cluster Topology HUD**: Interactive modal displaying active worker nodes, RTT latencies, layer distribution, and wire transfer statistics.
-- **Context-Aware Abort Button (`FIX-19`)**: Send button toggles dynamically to a glowing red Stop button during generation, triggering immediate `AbortController` cancellation.
-- **Session Controls**: Includes manual KV cache synchronization buttons and Markdown chat export.
+### Key Endpoints
+- `POST /v1/chat/completions` (`/api/chat`, `/api/chat/stream`): OpenAI-compatible chat completions (Unary JSON & SSE streaming).
+- `POST /api/chat/abort`: Immediately halts active token generation.
+- `GET /v1/models`: Lists available `.gguf` models in `models/` (automatically filtering out internal ephemeral stage files).
+- `POST /api/model/switch`: Hot-swaps the active model across the cluster.
+- `GET /api/cluster/status`: Live cluster topology, RTT, layer splits, and wire payload telemetry.
+- `GET /health` & `GET /ready`: Liveness and readiness probes.
 
 ---
 
 ## Troubleshooting & Operational Notes
 
-### 1. Port Conflicts on Windows
-If a port is held by a terminated terminal or background process:
-```powershell
-# Find process listening on port 8080 or 50052
-Get-NetTCPConnection -LocalPort 8080 -State Listen | Select-Object OwningProcess
-
-# Terminate the process
-Stop-Process -Id <PID> -Force
-```
-*Note: The `start.ps1` script automatically runs `Stop-PortConflict` before starting services.*
-
-### 2. Tailscale Connection Degraded to DERP Relay
-If `aeromesh probe` reports `❌ NO (DERP Relay)`:
-- Ensure UPnP or NAT-PMP is enabled on your local router.
-- Configure firewall rules to allow UDP port `41641` through Windows Defender Firewall.
-- Verify node status by running `tailscale ping <peer-ip>`.
-
-### 3. Out of Memory (VRAM) Errors
-If a node runs out of GPU memory during initialization:
-- Adjust the layer boundary split. For example, shift from an equal `0..24` / `25..48` split to `0..16` on a 4 GB laptop and `17..48` on an 8 GB laptop.
-- Lower the context window length by passing `--n-ctx 2048`.
-- Ensure other GPU-intensive applications are closed before launching the cluster.
-
-### 4. Missing CUDA Backend DLLs
-If `aeromesh` fails to locate `ggml-cuda.dll` or llama dependencies:
-- Re-run `.\setup.ps1` to re-copy release binaries from `llama.cpp\build\bin\Release\` into `bin\`.
-- Confirm that your `PATH` includes the `AeroMESH\bin\` folder or run the binary from within the project root.
+1. **`Access is denied (os error 5)` during `cargo build`**:
+   An instance of `aeromesh.exe` is still running in the background. Stop it first:
+   ```powershell
+   Stop-Process -Name "aeromesh" -Force -ErrorAction SilentlyContinue
+   ```
+2. **Running `pytest` while Coordinator is Online**:
+   `tests/test_fastapi_gateway.py` includes offline fallback tests that expect port `8080` to be unreachable. Stop `aeromesh.exe` before running `pytest` so all 27/27 tests pass.
+3. **Missing `dlltool.exe` on Windows GNU Toolchain**:
+   Ensure `C:\w64devkit\bin` is on your `PATH`:
+   ```powershell
+   $env:PATH = "C:\w64devkit\bin;$env:PATH"
+   ```
 
 ---
 
 ## License
 
-AeroMESH is distributed under the terms of the Apache License (Version 2.0).
-
-See [LICENSE](LICENSE) for the full license text.
+AeroMESH is distributed under the terms of the Apache License (Version 2.0). See [LICENSE](LICENSE) for details.

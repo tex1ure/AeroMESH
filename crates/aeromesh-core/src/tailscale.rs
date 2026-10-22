@@ -1,35 +1,58 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::process::Command;
 use std::time::{Duration, Instant};
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
+/// Deserialises a field that Tailscale may emit as `null`, omits entirely, or
+/// populates with a list — treating both of the former as an empty list.
+///
+/// `tailscale status --json` sets `TailscaleIPs: null` for peers that have not
+/// been assigned an address yet (and while the daemon is in `NoState`). Without
+/// this, the whole status payload fails to parse and every cluster command dies
+/// with "invalid type: null, expected a sequence".
+fn de_string_vec_or_empty<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Vec<String>>::deserialize(deserializer)?;
+    Ok(value.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TailscalePeerInfo {
-    #[serde(rename = "HostName")]
+    #[serde(rename = "HostName", default = "unknown_host_name")]
     pub host_name: String,
-    #[serde(rename = "TailscaleIPs")]
+    #[serde(
+        rename = "TailscaleIPs",
+        default,
+        deserialize_with = "de_string_vec_or_empty"
+    )]
     pub tailscale_ips: Vec<String>,
-    #[serde(rename = "Relay")]
+    #[serde(rename = "Relay", default)]
     pub relay: Option<String>,
-    #[serde(rename = "CurAddr")]
+    #[serde(rename = "CurAddr", default)]
     pub cur_addr: Option<String>,
-    #[serde(rename = "Active")]
+    #[serde(rename = "Active", default)]
     pub active: Option<bool>,
-    #[serde(rename = "RxBytes")]
+    #[serde(rename = "RxBytes", default)]
     pub rx_bytes: Option<u64>,
-    #[serde(rename = "TxBytes")]
+    #[serde(rename = "TxBytes", default)]
     pub tx_bytes: Option<u64>,
+}
+
+fn unknown_host_name() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TailscaleStatusOutput {
-    #[serde(rename = "Self")]
+    #[serde(rename = "Self", default)]
     pub self_node: Option<TailscalePeerInfo>,
-    #[serde(rename = "Peer")]
+    #[serde(rename = "Peer", default)]
     pub peer: Option<HashMap<String, TailscalePeerInfo>>,
 }
 
@@ -77,12 +100,9 @@ impl TailscaleInspector {
 
     pub async fn probe_socket_link(target: SocketAddr) -> Result<PeerLinkQuality> {
         let start = Instant::now();
-        let stream = tokio::time::timeout(
-            Duration::from_millis(3000),
-            TcpStream::connect(target),
-        )
-        .await
-        .context(format!("Timeout connecting to Tailscale target {}", target))??;
+        let stream = tokio::time::timeout(Duration::from_millis(3000), TcpStream::connect(target))
+            .await
+            .context(format!("Timeout connecting to Tailscale target {}", target))??;
 
         // Ensure TCP_NODELAY is active for minimum latency
         stream.set_nodelay(true)?;
@@ -143,25 +163,64 @@ impl TailscaleInspector {
     }
 
     pub async fn discover_cluster_nodes(port: u16) -> Result<Vec<DiscoveredNodeStatus>> {
-        let status = Self::get_status()?;
+        // Tailscale being absent or logged out is a normal configuration (LAN-only
+        // clusters, CI, a first run before `tailscale up`). Report it and return an
+        // empty mesh rather than failing the whole command.
+        let status = match Self::get_status() {
+            Ok(s) => s,
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "Tailscale status unavailable; reporting an empty cluster mesh. \
+                     LAN/loopback clusters do not require Tailscale."
+                );
+                return Ok(Vec::new());
+            }
+        };
         let mut nodes = Vec::new();
 
-        // 1. Check self node
+        // 1. This node. RTT is measured rather than assumed, and a loopback /
+        //    local address is explicitly *not* reported as a WireGuard link:
+        //    claiming a direct tunnel for the local node misleads the HUD.
         if let Some(self_node) = status.self_node {
-            let self_ip = self_node.tailscale_ips.first().cloned().unwrap_or_else(|| "127.0.0.1".into());
-            let socket: SocketAddr = format!("{}:{}", self_ip, port).parse().unwrap_or_else(|_| "127.0.0.1:50052".parse().unwrap());
-            let rpc_online = tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(socket)).await.is_ok();
+            let self_ip = self_node
+                .tailscale_ips
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1".into());
+            let socket: SocketAddr = format!("{}:{}", self_ip, port)
+                .parse()
+                .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port)));
 
+            let start = Instant::now();
+            let rpc_online =
+                match tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(socket))
+                    .await
+                {
+                    Ok(Ok(stream)) => {
+                        let _ = stream.set_nodelay(true);
+                        true
+                    }
+                    _ => false,
+                };
+            let measured_rtt = if rpc_online {
+                Some((start.elapsed().as_micros() as f64) / 1000.0)
+            } else {
+                None
+            };
+
+            let is_loopback = socket.ip().is_loopback();
             nodes.push(DiscoveredNodeStatus {
-                host_name: format!("{} (Coordinator)", self_node.host_name),
+                host_name: format!("{} (this node)", self_node.host_name),
                 ip: self_ip,
                 is_self: true,
-                is_tailscale_active: true,
-                is_direct_wireguard: true,
+                is_tailscale_active: !is_loopback,
+                // A local socket is not traversing WireGuard.
+                is_direct_wireguard: !is_loopback,
                 relay_region: None,
                 rpc_online,
-                rtt_ms: Some(0.5),
-                cluster_ready: true,
+                rtt_ms: measured_rtt,
+                cluster_ready: rpc_online,
             });
         }
 
@@ -186,14 +245,20 @@ impl TailscaleInspector {
 
                     if let Ok(addr) = addr_str.parse::<SocketAddr>() {
                         let start = Instant::now();
-                        if let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_millis(1500), TcpStream::connect(addr)).await {
+                        if let Ok(Ok(stream)) = tokio::time::timeout(
+                            Duration::from_millis(1500),
+                            TcpStream::connect(addr),
+                        )
+                        .await
+                        {
                             let _ = stream.set_nodelay(true);
                             rpc_online = true;
                             rtt_ms = Some((start.elapsed().as_micros() as f64) / 1000.0);
                         }
                     }
 
-                    let cluster_ready = rpc_online && is_direct && rtt_ms.is_some_and(|r| r <= 150.0);
+                    let cluster_ready =
+                        rpc_online && is_direct && rtt_ms.is_some_and(|r| r <= 150.0);
 
                     nodes.push(DiscoveredNodeStatus {
                         host_name: peer.host_name,

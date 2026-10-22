@@ -1,8 +1,8 @@
+use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use anyhow::{bail, Context, Result};
-use sha2::{Digest, Sha256};
 use tracing::info;
 
 #[derive(Debug, Clone)]
@@ -22,8 +22,14 @@ pub fn resolve_model_path<P: AsRef<Path>>(input_path: Option<P>) -> Result<PathB
             return Ok(path.to_path_buf());
         }
 
-        // Try with .gguf extension appended
-        let with_gguf = path.with_extension("gguf");
+        // Try with .gguf extension appended without replacing existing extension
+        let with_gguf = if path.extension().is_some_and(|ext| ext == "gguf") {
+            path.to_path_buf()
+        } else {
+            let mut s = path.as_os_str().to_os_string();
+            s.push(".gguf");
+            PathBuf::from(s)
+        };
         if with_gguf.exists() {
             return Ok(with_gguf);
         }
@@ -44,7 +50,13 @@ pub fn resolve_model_path<P: AsRef<Path>>(input_path: Option<P>) -> Result<PathB
             if stripped.exists() {
                 return Ok(stripped.to_path_buf());
             }
-            let stripped_gguf = stripped.with_extension("gguf");
+            let stripped_gguf = if stripped.extension().is_some_and(|ext| ext == "gguf") {
+                stripped.to_path_buf()
+            } else {
+                let mut s = stripped.as_os_str().to_os_string();
+                s.push(".gguf");
+                PathBuf::from(s)
+            };
             if stripped_gguf.exists() {
                 return Ok(stripped_gguf);
             }
@@ -66,15 +78,33 @@ pub fn resolve_model_path<P: AsRef<Path>>(input_path: Option<P>) -> Result<PathB
     }
 
     // Auto-discover in current directory or models/ folder
-    for candidate_dir in &[Path::new("models"), Path::new("."), Path::new("..").join("models").as_path()] {
+    for candidate_dir in &[
+        Path::new("models"),
+        Path::new("."),
+        Path::new("..").join("models").as_path(),
+    ] {
         if candidate_dir.exists() {
             if let Ok(entries) = std::fs::read_dir(candidate_dir) {
+                let mut candidates: Vec<PathBuf> = Vec::new();
                 for entry in entries.flatten() {
                     let p = entry.path();
                     if p.is_file() && p.extension().is_some_and(|ext| ext == "gguf") {
-                        info!(found = %p.display(), "Auto-discovered model file");
-                        return Ok(p);
+                        let fname = p.file_name().unwrap_or_default().to_string_lossy();
+                        if !crate::gguf_slicer::is_stage_slice_name(&fname) {
+                            candidates.push(p);
+                        }
                     }
+                }
+                candidates.sort();
+                if candidates.len() == 1 {
+                    info!(found = %candidates[0].display(), "Auto-discovered model file");
+                    return Ok(candidates.remove(0));
+                } else if candidates.len() > 1 {
+                    bail!(
+                        "Ambiguous model auto-discovery in {:?}: found multiple models ({:?}). Please specify --model explicitly.",
+                        candidate_dir,
+                        candidates.iter().map(|c| c.display().to_string()).collect::<Vec<_>>()
+                    );
                 }
             }
         }
@@ -85,20 +115,30 @@ pub fn resolve_model_path<P: AsRef<Path>>(input_path: Option<P>) -> Result<PathB
 
 pub fn inspect_gguf_file<P: AsRef<Path>>(path: P) -> Result<GgufMetadata> {
     let resolved = resolve_model_path(Some(path))?;
-    let mut file = File::open(&resolved).context(format!("Failed to open GGUF model file at {:?}", resolved))?;
+    let mut file = File::open(&resolved)
+        .context(format!("Failed to open GGUF model file at {:?}", resolved))?;
     let file_size_bytes = file.metadata()?.len();
 
     let mut magic = [0u8; 4];
     file.read_exact(&mut magic)?;
     if &magic != b"GGUF" {
-        bail!("Invalid GGUF header magic. Expected 'GGUF', got {:?}", magic);
+        bail!(
+            "Invalid GGUF header magic. Expected 'GGUF', got {:?}",
+            magic
+        );
     }
 
     let mut ver_bytes = [0u8; 4];
     file.read_exact(&mut ver_bytes)?;
     let version = u32::from_le_bytes(ver_bytes);
-    if !(2..=3).contains(&version) {
+    if version < 2 {
         bail!("Unsupported GGUF version: {}", version);
+    }
+    if version > 3 {
+        tracing::warn!(
+            "GGUF version {} is newer than expected (2..=3); attempting to parse",
+            version
+        );
     }
 
     let mut count_bytes = [0u8; 8];
@@ -108,12 +148,21 @@ pub fn inspect_gguf_file<P: AsRef<Path>>(path: P) -> Result<GgufMetadata> {
     file.read_exact(&mut count_bytes)?;
     let kv_count = u64::from_le_bytes(count_bytes);
 
-    // Compute fast 64MB block hash
+    // Compute fast 64MB block hash in 1MB chunks (streaming, no 64MB heap buffer)
     file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 64 * 1024 * 1024];
-    let n = file.read(&mut buffer)?;
-    hasher.update(&buffer[..n]);
+    let mut chunk = [0u8; 1024 * 1024];
+    let mut total_read = 0usize;
+    let max_bytes = 64 * 1024 * 1024;
+    while total_read < max_bytes {
+        let to_read = (max_bytes - total_read).min(chunk.len());
+        let n = file.read(&mut chunk[..to_read])?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&chunk[..n]);
+        total_read += n;
+    }
     let fast_checksum = hex::encode(&hasher.finalize()[..8]);
 
     info!(

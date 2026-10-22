@@ -30,12 +30,17 @@ windows-sys = { version = "0.59", features = [
 ] }
 sha2 = "0.10"
 hex = "0.4"
-futures-util = "0.3"
 tokio-stream = "0.1"
-sysinfo = "0.31"
 memmap2 = "0.9"
 byteorder = "1.5"
 bytes = "1.7"
 axum = { version = "0.7", features = ["macros"] }
-tower = { version = "0.4", features = ["limit", "buffer", "util"] }
+tower = { version = "0.5", features = ["limit", "buffer", "util"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
