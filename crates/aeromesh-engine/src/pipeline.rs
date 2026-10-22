@@ -445,15 +445,19 @@ async fn handle_coordinator_connection(
                 aeromesh_core::TcpPipelineTransport::configure_low_latency_stream(&ds_stream);
 
                 let next_stage = req.stage_index + 1;
-                let next_worker_start = (req.worker_layer_end + 1).min(req.total_layers.saturating_sub(1));
-                let remaining_stages = (req.total_stages.saturating_sub(next_stage) as usize).max(1);
-                let remaining_layers = (req.total_layers.saturating_sub(next_worker_start) as usize).max(1);
+                let next_worker_start =
+                    (req.worker_layer_end + 1).min(req.total_layers.saturating_sub(1));
+                let remaining_stages =
+                    (req.total_stages.saturating_sub(next_stage) as usize).max(1);
+                let remaining_layers =
+                    (req.total_layers.saturating_sub(next_worker_start) as usize).max(1);
                 let layers_per_stage = remaining_layers.div_ceil(remaining_stages);
                 let next_worker_end = if remaining_peers.is_empty() {
                     req.total_layers.saturating_sub(1)
                 } else {
                     ((next_worker_start as usize + layers_per_stage - 1)
-                        .min(req.total_layers.saturating_sub(1) as usize)) as u32
+                        .min(req.total_layers.saturating_sub(1) as usize))
+                        as u32
                 };
 
                 let downstream_req = HandshakeRequest {
@@ -1524,7 +1528,9 @@ impl PipelineCoordinatorClient {
         let total_time = total_start.elapsed();
         let tok_per_sec = (total_tokens as f64) / total_time.as_secs_f64();
         let bytes_per_step = match self.target_dtype {
-            ActivationDtype::Int8PerRow => (self.hidden_dim + 4 + if self.hidden_dim >= 256 { 48 } else { 0 }) as f64,
+            ActivationDtype::Int8PerRow => {
+                (self.hidden_dim + 4 + if self.hidden_dim >= 256 { 48 } else { 0 }) as f64
+            }
             dt => (self.hidden_dim * dt.bytes_per_element()) as f64,
         };
 

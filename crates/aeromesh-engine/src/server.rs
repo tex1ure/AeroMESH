@@ -773,7 +773,11 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
         "int8" => ("Per-Row INT8 Dynamic Scaling (75% Wire Reduction)", 1.0),
         _ => ("Raw FP32 Uncompressed", 4.0),
     };
-    let extra_overhead = if bytes_per_elem == 1.0 && meta.hidden_dim >= 256 { 52.0 } else { 0.0 };
+    let extra_overhead = if bytes_per_elem == 1.0 && meta.hidden_dim >= 256 {
+        52.0
+    } else {
+        0.0
+    };
     let per_token_kb = (meta.hidden_dim as f64 * bytes_per_elem + extra_overhead + 44.0) / 1024.0;
 
     let cluster_status = if !has_workers {

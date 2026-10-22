@@ -731,8 +731,12 @@ impl LlamaPipelineInstance {
 
         static IN_PLACE_LOAD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _load_lock = IN_PLACE_LOAD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let in_place_guard = crate::gguf_slicer::InPlaceStageGuard::try_new(model_path, &slice_config)?;
-        let path_str = in_place_guard.effective_path.to_str().context("Invalid model path string")?;
+        let in_place_guard =
+            crate::gguf_slicer::InPlaceStageGuard::try_new(model_path, &slice_config)?;
+        let path_str = in_place_guard
+            .effective_path
+            .to_str()
+            .context("Invalid model path string")?;
         let c_path = CString::new(path_str)?;
 
         let mut mparams = llama_call!(llama_model_default_params)?;

@@ -164,7 +164,10 @@ pub fn slice_gguf_stage<P: AsRef<Path>, Q: AsRef<Path>>(
         total_stages
     );
 
-    if std::fs::metadata(src_path).map(|m| m.len() > 10 * 1024 * 1024).unwrap_or(false) {
+    if std::fs::metadata(src_path)
+        .map(|m| m.len() > 10 * 1024 * 1024)
+        .unwrap_or(false)
+    {
         info!(
             source = %src_path.display(),
             stage_index = stage_index,
@@ -860,7 +863,6 @@ pub fn ggml_tensor_size_bytes(ggml_type: u32, element_count: u64) -> u64 {
     }
 }
 
-
 pub struct InPlaceStageGuard {
     pub effective_path: PathBuf,
     ephemeral_path: Option<PathBuf>,
@@ -913,7 +915,11 @@ impl InPlaceStageGuard {
                     alignment = (&val_bytes[..8]).read_u64::<LittleEndian>()?;
                 }
             }
-            raw_kvs.push(RawKvEntry { key, val_type, val_bytes });
+            raw_kvs.push(RawKvEntry {
+                key,
+                val_type,
+                val_bytes,
+            });
         }
 
         let mut tensors = Vec::with_capacity(tensor_count);

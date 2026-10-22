@@ -387,8 +387,7 @@ def patch_activation_rs():
                     let inv_scale = if max_abs > 1e-12 { 127.0 / max_abs } else { 0.0 };
                     payload.extend_from_slice(&scale.to_le_bytes());
 
-                    for i in 0..k_outliers {
-                        let idx = outlier_idx[i];
+                    for &idx in outlier_idx.iter().take(k_outliers) {
                         let (u_idx, exact_val) = if idx < d {
                             (idx as u16, row[idx])
                         } else {
@@ -507,7 +506,7 @@ def patch_activation_rs():
         let mut hdr = [0u8; Self::HEADER_SIZE];
         reader.read_exact(&mut hdr).await?;
         ensure!(
-            &hdr[0..4] == &TOKEN_RESP_MAGIC,
+            hdr[0..4] == TOKEN_RESP_MAGIC,
             "Invalid token response magic: {:?}",
             &hdr[0..4]
         );

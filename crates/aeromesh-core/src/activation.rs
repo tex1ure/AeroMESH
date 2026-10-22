@@ -448,12 +448,19 @@ impl ActivationFrame {
                         }
                     }
 
-                    let scale = if max_abs > 1e-12 { max_abs / 127.0 } else { 1.0 };
-                    let inv_scale = if max_abs > 1e-12 { 127.0 / max_abs } else { 0.0 };
+                    let scale = if max_abs > 1e-12 {
+                        max_abs / 127.0
+                    } else {
+                        1.0
+                    };
+                    let inv_scale = if max_abs > 1e-12 {
+                        127.0 / max_abs
+                    } else {
+                        0.0
+                    };
                     payload.extend_from_slice(&scale.to_le_bytes());
 
-                    for i in 0..k_outliers {
-                        let idx = outlier_idx[i];
+                    for &idx in outlier_idx.iter().take(k_outliers) {
                         let (u_idx, exact_val) = if idx < d {
                             (idx as u16, row[idx])
                         } else {
@@ -646,7 +653,8 @@ impl ActivationFrame {
                     }
                     for i in 0..k_outliers {
                         let off = 4 + i * 6;
-                        let u_idx = u16::from_le_bytes([row_bytes[off], row_bytes[off + 1]]) as usize;
+                        let u_idx =
+                            u16::from_le_bytes([row_bytes[off], row_bytes[off + 1]]) as usize;
                         let exact_val = f32::from_le_bytes([
                             row_bytes[off + 2],
                             row_bytes[off + 3],
@@ -904,7 +912,7 @@ impl TokenResponseFrame {
         let mut hdr = [0u8; Self::HEADER_SIZE];
         reader.read_exact(&mut hdr).await?;
         ensure!(
-            &hdr[0..4] == &TOKEN_RESP_MAGIC,
+            hdr[0..4] == TOKEN_RESP_MAGIC,
             "Invalid token response magic: {:?}",
             &hdr[0..4]
         );
