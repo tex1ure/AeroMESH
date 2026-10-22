@@ -697,7 +697,7 @@ def _stream_response(body: dict) -> StreamingResponse:
                     )
                     return
 
-                async for chunk in response.aiter_text():
+                async for chunk in response.aiter_raw():
                     yield chunk
         except httpx.ConnectError:
             yield _sse_error_frame(

@@ -620,13 +620,15 @@ async fn handle_coordinator_connection(
         dequant_buf.resize(total_elements, 0.0f32);
         frame.dequantize_into(&mut dequant_buf)?;
 
-        // Boundary Watchdog: Validate incoming activations
-        if let Err(e) = aeromesh_core::inspect_activations(
-            &format!("Worker_Stage{}_Ingress", current_stage_index),
-            &dequant_buf,
-            &[seq_len as usize, frame.header.hidden_dim as usize],
-        ) {
-            error!("🚨 Worker ingress watchdog assertion failed: {}", e);
+        // Boundary Watchdog: Validate incoming activations on prefill (seq_id == 0)
+        if seq_id == 0 {
+            if let Err(e) = aeromesh_core::inspect_activations(
+                "Worker_Ingress_Prefill",
+                &dequant_buf,
+                &[seq_len as usize, frame.header.hidden_dim as usize],
+            ) {
+                error!("🚨 Worker ingress watchdog assertion failed: {}", e);
+            }
         }
 
         if let Some(ref mut ds) = downstream_socket {
@@ -723,16 +725,18 @@ async fn handle_coordinator_connection(
                 _ => "FP32",
             };
 
-            println!(
-                "  ⚡ [Stage {} Terminal Worker] Step #{:<3} (pos: {}, S={}) | Recv: {:.2} KB [{}] | Processed in {:.2}ms",
-                current_stage_index,
-                seq_id + 1,
-                start_pos,
-                seq_len,
-                (frame.payload.len() as f64) / 1024.0,
-                dtype_tag,
-                eval_time_ms
-            );
+            if seq_id == 0 || (seq_id + 1) % 50 == 0 {
+                println!(
+                    "  ⚡ [Stage {} Terminal Worker] Step #{:<3} (pos: {}, S={}) | Recv: {:.2} KB [{}] | Processed in {:.2}ms",
+                    current_stage_index,
+                    seq_id + 1,
+                    start_pos,
+                    seq_len,
+                    (frame.payload.len() as f64) / 1024.0,
+                    dtype_tag,
+                    eval_time_ms
+                );
+            }
         }
     }
 

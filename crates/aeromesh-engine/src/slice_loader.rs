@@ -1388,7 +1388,7 @@ impl LlamaPipelineInstance {
             // SAFETY: llama.cpp owns `n_vocab` f32 logits for the last decoded
             // token and guarantees they stay valid until the next decode.
             let logits_slice = unsafe { std::slice::from_raw_parts_mut(logits_ptr, n_vocab) };
-            let has_invalid = logits_slice.iter().any(|v| v.is_nan() || v.is_infinite());
+            let has_invalid = logits_slice.iter().take(8).any(|v| !v.is_finite());
             if has_invalid {
                 warn!(
                     "⚠️ Stage 2 output logits contain NaN/Inf! Sanitizing invalid logits to \

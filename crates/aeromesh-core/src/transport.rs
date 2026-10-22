@@ -30,9 +30,11 @@ impl TcpPipelineTransport {
     }
 
     pub async fn send_activation(&mut self, frame: &ActivationFrame) -> Result<()> {
-        let bytes = frame.encode();
-        self.stream.write_all(&bytes).await?;
-        self.stream.flush().await?;
+        self.write_buf.clear();
+        self.write_buf.reserve(crate::activation::ActivationHeader::SIZE + frame.payload.len());
+        frame.header.encode(&mut self.write_buf);
+        self.write_buf.extend_from_slice(&frame.payload);
+        self.stream.write_all(&self.write_buf).await?;
         Ok(())
     }
 
