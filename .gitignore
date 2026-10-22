@@ -43,6 +43,7 @@ models/*.gguf
 *.safetensors
 *.pt
 *.onnx
+*.crdownload
 
 # Video & Large Media Demo Recordings (> 50MB)
 *.mp4

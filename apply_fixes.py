@@ -592,7 +592,6 @@ def patch_gguf_slicer_rs():
 
     text = replace_exact(rel_path, text, old_global_branch, new_global_branch)
 
-    # Ephemeral file ends with `_stage1.gguf` / `_stage2.gguf` so is_stage_slice_name() always filters it out
     ephemeral_guard_code = """
 pub struct InPlaceStageGuard {
     pub effective_path: PathBuf,
@@ -726,18 +725,6 @@ def patch_slice_loader_rs():
     path = ROOT / rel_path
     text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
 
-    text = re.sub(
-        r"^[ \t]*cparams\.(?:n_threads|n_threads_batch|flash_attn_type)\s*=[^;]+;[ \t]*\n",
-        "",
-        text,
-        flags=re.MULTILINE,
-    )
-    text = re.sub(
-        r"\}\s*else\s*\{\s*cparams\.embeddings\s*=\s*false;\s*cparams\.cb_eval\s*=\s*None;\s*cparams\.cb_eval_user_data\s*=\s*std::ptr::null_mut\(\);\s*\}",
-        "}",
-        text,
-    )
-
     old_open_block = """        let path_str = model_path.to_str().context("Invalid model path string")?;
         let c_path = CString::new(path_str)?;
 
@@ -770,25 +757,7 @@ def patch_slice_loader_rs():
         let model = model?;"""
 
     text = replace_exact(rel_path, text, old_open_block, new_open_block)
-
-    old_cb_block = """        cparams.embeddings = true;
-        cparams.cb_eval = Some(llama_cb_eval_capture);
-        cparams.cb_eval_user_data = capture_state.as_mut() as *mut _ as *mut c_void;"""
-
-    new_cb_block = """        if !slice_config.is_last_stage {
-            cparams.embeddings = true;
-            cparams.cb_eval = Some(llama_cb_eval_capture);
-            cparams.cb_eval_user_data = capture_state.as_mut() as *mut _ as *mut c_void;
-        }"""
-
-    if "if !slice_config.is_last_stage" not in text and old_cb_block in text:
-        text = text.replace(old_cb_block, new_cb_block, 1)
-
     text = text.replace("penalty_last_n: 256,", "penalty_last_n: 64,")
-    text = text.replace(
-        "                *batch.n_seq_id.add(i) = 1;\n                *(*batch.seq_id.add(i)) = 0;\n                *batch.logits.add(i) = 1;",
-        "                *batch.n_seq_id.add(i) = 1;\n                *(*batch.seq_id.add(i)) = 0;\n                *batch.logits.add(i) = if i + 1 == tokens.len() { 1 } else { 0 };",
-    )
 
     path.write_text(text, encoding="utf-8")
     print(f"[OK] Patched {rel_path}")
@@ -870,27 +839,6 @@ def patch_pipeline_rs():
 
     text = replace_exact(rel_path, text, old_downstream_calc, new_downstream_calc)
 
-    # Accurate dtype_tag and throttled console output on Intermediate Workers in 3+ node chains
-    old_inter_log = """            let dtype_tag = match ActivationDtype::from_u8(frame.header.dtype) {
-                Ok(ActivationDtype::Int8PerRow) => "INT8-Row",
-                Ok(ActivationDtype::Fp8E4M3) => "FP8-E4M3",
-                _ => "FP32",
-            };
-
-            println!(
-                "  ⚡ [Stage {} Intermediate] Step #{:<3} (pos: {}, S={}) | In: {:.2} KB [{}] -> Out: {:.2} KB | Forwarded to {} in {:.2}ms",
-                current_stage_index,
-                seq_id + 1,
-                start_pos,
-                seq_len,
-                (frame.payload.len() as f64) / 1024.0,
-                dtype_tag,
-                (next_frame.payload.len() as f64) / 1024.0,
-                downstream_peer_str,
-                eval_time_ms
-            );"""
-
-    # Match the intermediate log block regardless of the lightning emoji encoding
     inter_idx = text.find('            let dtype_tag = match ActivationDtype::from_u8(frame.header.dtype) {')
     if inter_idx != -1:
         inter_end = text.find("eval_time_ms\n            );", inter_idx)
@@ -956,6 +904,8 @@ def patch_pipeline_rs():
         "999",
     )
 
+    text = text.replace("let file_size_mb =", "let _file_size_mb =")
+
     text = text.replace(
         "tokio::time::sleep(Duration::from_millis(50)).await;",
         "tokio::time::sleep(Duration::from_millis(1)).await;",
@@ -1019,6 +969,7 @@ def patch_main_rs():
                         (DEFAULT_GPU_OFFLOAD_LAYERS, DEFAULT_GPU_OFFLOAD_LAYERS);"""
 
     text = replace_exact(rel_path, text, old_ngl, new_ngl)
+    text = text.replace("let file_size_mb =", "let _file_size_mb =")
     path.write_text(text, encoding="utf-8")
     print(f"[OK] Patched {rel_path}")
 
@@ -1028,23 +979,6 @@ def patch_app_js():
     path = ROOT / rel_path
     text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
 
-    # Fix N-Worker (3+ node) layer range and stage role display in Cluster Topology HUD
-    old_worker_map = """          workers.length > 0
-            ? workers
-                .map(
-                  (w, idx) => `
-          <div class="node-box">
-            <div>
-              <div style="font-weight: 700; color: var(--text-main); font-size: 13.5px;">Worker Stage ${idx + 2} (${escapeHtml(w)})</div>
-              <div style="font-size: 11.5px; color: var(--text-dim);">Layers ${escapeHtml(localStage.layer_end !== undefined ? Number(localStage.layer_end) + 1 : 0)}..${escapeHtml(totalLayers - 1)} • LM head • activation sink</div>
-            </div>
-            <div class="stat-highlight direct-badge" style="font-size: 12px;">${isDirectWg ? 'Direct WireGuard' : 'Connected'}</div>
-          </div>
-        `
-                )
-                .join('')"""
-
-    # Match the workers.map block cleanly regardless of bullet character encoding
     start_marker = "          workers.length > 0\n            ? workers\n                .map("
     end_marker = "                .join('')"
     if start_marker in text:
