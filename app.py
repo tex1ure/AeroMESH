@@ -615,15 +615,21 @@ def get_local_wifi_ip() -> str:
     except Exception:
         return "127.0.0.1"
 
+_CACHED_TS_IP = None
 def get_tailscale_ip() -> str:
+    global _CACHED_TS_IP
+    if _CACHED_TS_IP is not None:
+        return _CACHED_TS_IP
     creationflags = 0x08000000 if sys.platform == "win32" else 0
     try:
         res = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=2.0, creationflags=creationflags)
         if res.returncode == 0 and res.stdout.strip():
-            return res.stdout.strip().splitlines()[0]
+            _CACHED_TS_IP = res.stdout.strip().splitlines()[0]
+            return _CACHED_TS_IP
     except Exception:
         pass
-    return "Not Connected"
+    _CACHED_TS_IP = "Not Connected"
+    return _CACHED_TS_IP
 
 def find_sd_assets():
     root_dir = os.path.dirname(os.path.abspath(__file__))
