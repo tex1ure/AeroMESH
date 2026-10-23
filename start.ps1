@@ -52,6 +52,7 @@ param (
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 Set-Location $PSScriptRoot
 
 $script:DefaultWorkerPort = 50052
@@ -239,7 +240,7 @@ function Wait-ServerReady {
 function Get-AeroMeshExe {
     # Prefer the release binary (what setup.ps1 builds); fall back to debug so a
     # plain `cargo build` checkout still works.
-    foreach ($candidate in @("target\release\aeromesh.exe", "target\debug\aeromesh.exe")) {
+    foreach ($candidate in @("target\release\aeromesh.exe", "bin\aeromesh.exe", "target\debug\aeromesh.exe")) {
         if (Test-Path $candidate) { return (Resolve-Path $candidate).Path }
     }
     return ""
@@ -345,7 +346,12 @@ function Invoke-AeroMeshBootstrap {
         Write-Host "  [OK] Rust Engine Binary:      $exe" -ForegroundColor Green
     }
 
-    # 2. Check / Auto-Download CUDA Diffusion Engine (bin\diffusion\sd-cli.exe + cublas64_12.dll)
+    # 2. Copy existing bin\*.dll into bin\diffusion\ FIRST so we never re-download 430 MB of CUDA DLLs unnecessarily!
+    Get-ChildItem -Path "bin\*.dll" -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $destDll = Join-Path "bin\diffusion" $_.Name
+        if (-not (Test-Path $destDll)) { Copy-Item $_.FullName -Destination "bin\diffusion\" -Force }
+    }
+
     $sdCli = Join-Path $PSScriptRoot "bin\diffusion\sd-cli.exe"
     $cublasDll = Join-Path $PSScriptRoot "bin\diffusion\cublas64_12.dll"
     if (-not (Test-Path $sdCli) -or -not (Test-Path $cublasDll)) {
@@ -360,7 +366,7 @@ function Invoke-AeroMeshBootstrap {
                     $xDir = Join-Path $env:TEMP ("sd_auto_" + [System.IO.Path]::GetFileNameWithoutExtension($asset.name))
                     curl.exe -L -C - $asset.browser_download_url -o $zPath
                     if (Test-Path $xDir) { Remove-Item $xDir -Recurse -Force }
-                    Expand-Archive -Path $zPath -DestinationPath $xDir -Force
+                    New-Item -ItemType Directory -Path $xDir -Force | Out-Null; & tar.exe -xf $zPath -C $xDir
                     Get-ChildItem -Path $xDir -Recurse -Include "*.dll", "*.exe" | ForEach-Object {
                         Copy-Item $_.FullName -Destination "bin\diffusion\" -Force
                     }

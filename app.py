@@ -933,11 +933,28 @@ async def generate_image_pipeline(request: Request):
                 logger.warning("Stage-0 mesh conditioning fallback: %s", e)
 
         out_png = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", f".aeromesh_sd_{int(time.time()*1000)}.png")
-        sd_task = None
-        if sd_bin and sd_model:
-            sd_task = asyncio.create_task(
-                asyncio.to_thread(_run_sd_cli_sync, sd_bin, sd_model, enhanced_prompt, steps, out_png)
-            )
+        worker_ip = worker_badge.split(":")[0] if ":" in worker_badge else worker_badge
+        is_remote_worker = mesh_active and worker_ip not in ("127.0.0.1", "localhost", "::1")
+
+        async def _dispatch_diffusion():
+            # If a remote Worker laptop is connected over Tailscale/Wi-Fi, offload Diffusion to Worker (:50053) first!
+            if is_remote_worker:
+                try:
+                    w_url = f"http://{worker_ip}:50053/api/worker/render"
+                    logger.info("Offloading Stage-2 CUDA Diffusion to remote Worker GPU: %s", w_url)
+                    w_resp = await client.post(w_url, json={"prompt": enhanced_prompt, "steps": steps}, timeout=120.0)
+                    if w_resp.status_code == 200:
+                        w_data = w_resp.json()
+                        if w_data.get("b64_png"):
+                            with open(out_png, "wb") as f:
+                                f.write(base64.b64decode(w_data["b64_png"]))
+                            return
+                except Exception as e:
+                    logger.warning("Remote worker :50053 diffusion offload unavailable (%s), falling back to local GPU", e)
+            if sd_bin and sd_model:
+                await asyncio.to_thread(_run_sd_cli_sync, sd_bin, sd_model, enhanced_prompt, steps, out_png)
+
+        sd_task = asyncio.create_task(_dispatch_diffusion())
 
         patches = (width // 16) * (height // 16)
         step_wire_mb = 1.42

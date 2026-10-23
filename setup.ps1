@@ -23,6 +23,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 Set-Location $PSScriptRoot
 
 # External tools (nvidia-smi, tailscale, rustc, cargo, dlltool) write diagnostics
@@ -143,11 +144,7 @@ if ($pythonExe -and -not $CheckOnly -and -not (Test-Path $venvPython)) {
         if (Get-Command uv -ErrorAction SilentlyContinue) {
             Invoke-Native -Command "uv" -Arguments @("sync", "--extra", "dev") | Out-Null
         } else {
-            Invoke-Native -Command $venvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip", "--quiet") | Out-Null
-            Invoke-Native -Command $venvPython -Arguments @(
-                "-m", "pip", "install", "--quiet",
-                "fastapi>=0.100.0", "uvicorn>=0.22.0", "httpx>=0.24.0", "pytest>=8.0.0"
-            ) | Out-Null
+            Invoke-Native -Command $venvPython -Arguments @("-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--no-cache-dir", "fastapi>=0.100.0", "uvicorn>=0.22.0", "httpx>=0.24.0", "pytest>=8.0.0") | Out-Null
         }
         Write-Ok "Python environment ready."
     } catch {
