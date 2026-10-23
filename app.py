@@ -579,7 +579,11 @@ async def cluster_status():
 # ---------------------------------------------------------------------------
 # UNIFIED NODE CONTROL & CLUSTER DISCOVERY HELPERS (FOR DESKTOP / KIMI STUDIO)
 # ---------------------------------------------------------------------------
+_CACHED_GPU = None
 def get_gpu_summary() -> str:
+    global _CACHED_GPU
+    if _CACHED_GPU is not None:
+        return _CACHED_GPU
     candidates = [
         "nvidia-smi",
         r"C:\Windows\System32\nvidia-smi.exe",
@@ -596,7 +600,7 @@ def get_gpu_summary() -> str:
                 creationflags=creationflags
             )
             if res.returncode == 0 and res.stdout.strip():
-                return res.stdout.strip().splitlines()[0]
+                _CACHED_GPU = res.stdout.strip().splitlines()[0]; return _CACHED_GPU
         except Exception:
             pass
     return "CPU / Integrated GPU"

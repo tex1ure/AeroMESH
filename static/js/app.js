@@ -1,3 +1,9 @@
+window.getApiUrl = window.getApiUrl || function(path) {
+  const isHttp = window.location.protocol === 'http:' || window.location.protocol === 'https:';
+  const base = String(window.AEROMESH_API_BASE || (isHttp ? window.location.origin : 'http://127.0.0.1:7860')).replace(/\/+$/, '');
+  const p = String(path || '').startsWith('/') ? path : '/' + path;
+  return base + p;
+};
 /**
  * AeroMESH • Full-Spread Dark Claymorphism Chat Application
  * Features: Dynamic Backend Probing (Zero Hardcoding), SSE Streaming, DeepSeek-R1 <think> Accordion, KaTeX Math, Highlight.js
@@ -1851,7 +1857,7 @@
 
 
 // ============================================================================
-// AEROMESH UNIFIED ROLE LAUNCHER & WORKER CONSOLE (COORDINATOR + WORKER + ALL)
+// AEROMESH UNIFIED ROLE LAUNCHER & WORKER CONSOLE
 // ============================================================================
 (function initAeroMeshRoleLauncher() {
   let logPollTimer = null;
@@ -1864,7 +1870,7 @@
       const btn = document.createElement('button');
       btn.id = 'btn-node-role';
       btn.className = 'clay-btn';
-      btn.style.cssText = 'padding:5px 12px;font-size:12px;border-color:rgba(56,189,248,0.55);color:#38bdf8;';
+      btn.style.cssText = 'padding:5px 12px;font-size:12px;border-color:rgba(26,136,255,0.55);color:#1a88ff;';
       btn.innerHTML = '<span>⚡ Node Role</span>';
       btn.onclick = () => openRoleModal();
       topRight.insertBefore(btn, topRight.firstChild);
@@ -1874,67 +1880,67 @@
     overlay.id = 'aeromesh-role-modal';
     overlay.style.cssText = [
       'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;',
-      'background:rgba(4,6,11,0.88);backdrop-filter:blur(26px);-webkit-backdrop-filter:blur(26px);padding:20px;'
+      'background:rgba(6,8,12,0.88);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);padding:20px;'
     ].join('');
 
     overlay.innerHTML = `
-      <div style="width:100%;max-width:880px;background:linear-gradient(135deg,rgba(255,255,255,0.09),rgba(255,255,255,0.02)),rgba(12,16,24,0.96);border:1px solid rgba(255,255,255,0.22);border-radius:24px;padding:28px;box-shadow:0 32px 80px rgba(0,0,0,0.92);color:#f8fafc;display:flex;flex-direction:column;gap:18px;max-height:92vh;overflow-y:auto;">
+      <div style="width:100%;max-width:860px;background:#16161a;border:1px solid rgba(255,255,255,0.14);border-radius:20px;padding:26px;box-shadow:0 28px 70px rgba(0,0,0,0.85);color:#f4f4f6;display:flex;flex-direction:column;gap:18px;max-height:92vh;overflow-y:auto;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
           <div style="display:flex;align-items:center;gap:12px;">
-            <img src="/static/img/aeromesh_emblem.png" style="width:44px;height:44px;object-fit:contain;">
+            <img src="/static/img/aeromesh_emblem.png" onerror="this.src='/static/img/logo_emblem.png'" style="width:40px;height:40px;object-fit:contain;">
             <div>
-              <h2 style="font-size:20px;font-weight:800;margin:0;color:#fff;">AeroMESH Unified Node Control Center</h2>
-              <div style="font-size:12.5px;color:#94a3b8;" id="rm-hw-summary">Detecting local GPU, Wi-Fi &amp; Tailscale IPs...</div>
+              <h2 style="font-size:19px;font-weight:700;margin:0;color:#fff;">AeroMESH Unified Node Control Center</h2>
+              <div style="font-size:12.5px;color:#a1a1aa;" id="rm-hw-summary">Loading hardware summary...</div>
             </div>
           </div>
           <div style="display:flex;gap:8px;">
-            <button id="rm-stop-btn" class="clay-btn" style="padding:7px 14px;font-size:12px;color:#fb7185;border-color:rgba(251,113,133,0.45);display:none;">■ Stop Active Node</button>
-            <button id="rm-close-btn" class="clay-btn" style="padding:7px 14px;font-size:12px;border-color:rgba(56,189,248,0.4);color:#38bdf8;">Enter Studio ➔</button>
+            <button id="rm-stop-btn" class="clay-btn" style="padding:7px 14px;font-size:12px;color:#ff4756;border-color:rgba(255,71,86,0.4);display:none;">■ Stop Active Node</button>
+            <button id="rm-close-btn" class="clay-btn" style="padding:7px 14px;font-size:12px;border-color:rgba(26,136,255,0.45);color:#1a88ff;">Enter Studio ➔</button>
           </div>
         </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:14px;background:rgba(0,0,0,0.42);padding:14px 16px;border-radius:14px;border:1px solid rgba(255,255,255,0.09);">
+        <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:14px;background:#121214;padding:14px 16px;border-radius:14px;border:1px solid rgba(255,255,255,0.08);">
           <div>
-            <label style="font-size:11px;font-weight:700;color:#38bdf8;text-transform:uppercase;">1. Select Local GGUF Model</label>
-            <select id="rm-model-select" style="width:100%;margin-top:6px;padding:9px 12px;border-radius:10px;background:#0b0f17;color:#fff;border:1px solid rgba(255,255,255,0.18);font-size:13px;"></select>
-            <div style="font-size:11px;color:#34d399;margin-top:6px;" id="rm-img-model-label">CUDA Image Engine: Checking...</div>
+            <label style="font-size:11px;font-weight:700;color:#1a88ff;text-transform:uppercase;">1. Select Local GGUF Model</label>
+            <select id="rm-model-select" style="width:100%;margin-top:6px;padding:9px 12px;border-radius:10px;background:#18181b;color:#fff;border:1px solid rgba(255,255,255,0.16);font-size:13px;"></select>
+            <div style="font-size:11.5px;color:#16c456;margin-top:6px;" id="rm-img-model-label"></div>
           </div>
           <div>
             <div style="display:flex;justify-content:space-between;align-items:center;">
-              <label style="font-size:11px;font-weight:700;color:#34d399;text-transform:uppercase;">2. Discovered Wi-Fi &amp; Tailscale Workers (:50052)</label>
+              <label style="font-size:11px;font-weight:700;color:#16c456;text-transform:uppercase;">2. Discovered Wi-Fi &amp; Tailscale Workers (:50052)</label>
               <button id="rm-rescan-btn" class="clay-btn" style="padding:3px 10px;font-size:11px;">↻ Rescan Network</button>
             </div>
-            <div id="rm-peers-list" style="margin-top:6px;font-size:12px;color:#cbd5e1;max-height:68px;overflow-y:auto;">Scanning Wi-Fi &amp; Tailscale...</div>
-            <input id="rm-custom-peers" type="text" placeholder="Or enter worker IP:50052 (comma-separated)..." style="width:100%;margin-top:6px;padding:7px 10px;border-radius:8px;background:#0b0f17;color:#fff;border:1px solid rgba(255,255,255,0.14);font-size:12px;">
+            <div id="rm-peers-list" style="margin-top:6px;font-size:12px;color:#a1a1aa;max-height:60px;overflow-y:auto;">Ready to scan</div>
+            <input id="rm-custom-peers" type="text" placeholder="Or enter worker IP:50052 (comma-separated)..." style="width:100%;margin-top:6px;padding:7px 10px;border-radius:8px;background:#18181b;color:#fff;border:1px solid rgba(255,255,255,0.14);font-size:12px;">
           </div>
         </div>
 
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;">
-          <div class="suggestion-card" id="rm-card-auto" style="cursor:pointer;border:1px solid rgba(56,189,248,0.5);background:linear-gradient(135deg,rgba(56,189,248,0.16),rgba(18,24,38,0.9));">
-            <div class="suggestion-tag" style="color:#38bdf8;">🚀 ROLE 1 • COORDINATOR + UI</div>
+          <div class="suggestion-card" id="rm-card-auto" style="cursor:pointer;border:1px solid rgba(26,136,255,0.45);background:rgba(26,136,255,0.08);">
+            <div class="suggestion-tag" style="color:#1a88ff;">🚀 ROLE 1 • COORDINATOR + UI</div>
             <div style="font-weight:700;font-size:15px;color:#fff;margin:2px 0;">Start as Coordinator</div>
-            <div style="font-size:12px;color:#cbd5e1;line-height:1.45;">Runs Stage 1 (lower layers), connects to discovered Wi-Fi/Tailscale Workers, and opens the Chat + Image Studio.</div>
+            <div style="font-size:12px;color:#a1a1aa;line-height:1.45;">Runs Stage 1 (lower layers), connects to discovered Wi-Fi/Tailscale Workers, and opens the Chat + Image Studio.</div>
           </div>
 
-          <div class="suggestion-card" id="rm-card-worker" style="cursor:pointer;border:1px solid rgba(245,158,11,0.5);background:linear-gradient(135deg,rgba(245,158,11,0.16),rgba(18,24,38,0.9));">
-            <div class="suggestion-tag" style="color:#f59e0b;">⚡ ROLE 2 • WORKER NODE (:50052)</div>
+          <div class="suggestion-card" id="rm-card-worker" style="cursor:pointer;border:1px solid rgba(255,159,10,0.45);background:rgba(255,159,10,0.08);">
+            <div class="suggestion-tag" style="color:#ff9f0a;">⚡ ROLE 2 • WORKER NODE (:50052)</div>
             <div style="font-weight:700;font-size:15px;color:#fff;margin:2px 0;">Start as Worker Node</div>
-            <div style="font-size:12px;color:#cbd5e1;line-height:1.45;">Turns this laptop into a dedicated GPU Worker listening on port 50052 with live packet &amp; VRAM telemetry.</div>
+            <div style="font-size:12px;color:#a1a1aa;line-height:1.45;">Turns this laptop into a dedicated GPU Worker listening on port 50052 with live packet &amp; VRAM telemetry.</div>
           </div>
 
-          <div class="suggestion-card" id="rm-card-all" style="cursor:pointer;border:1px solid rgba(52,211,153,0.5);background:linear-gradient(135deg,rgba(52,211,153,0.16),rgba(18,24,38,0.9));">
-            <div class="suggestion-tag" style="color:#34d399;">🧠 ROLE 3 • FULL LOCAL MESH</div>
+          <div class="suggestion-card" id="rm-card-all" style="cursor:pointer;border:1px solid rgba(22,196,86,0.45);background:rgba(22,196,86,0.08);">
+            <div class="suggestion-tag" style="color:#16c456;">🧠 ROLE 3 • FULL LOCAL MESH</div>
             <div style="font-weight:700;font-size:15px;color:#fff;margin:2px 0;">Start Full Local Mesh</div>
-            <div style="font-size:12px;color:#cbd5e1;line-height:1.45;">Starts both Worker (:50052) + Coordinator (:8080) on this PC via Zero-Copy Shared Memory and enters Studio.</div>
+            <div style="font-size:12px;color:#a1a1aa;line-height:1.45;">Starts both Worker (:50052) + Coordinator (:8080) on this PC via Zero-Copy Shared Memory and enters Studio.</div>
           </div>
         </div>
 
-        <div style="background:#05070b;border:1px solid rgba(255,255,255,0.14);border-radius:12px;padding:12px 14px;">
+        <div style="background:#0c0c0e;border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:12px 14px;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <span style="font-size:12px;font-weight:700;color:#38bdf8;font-family:monospace;" id="rm-console-title">NODE STATUS: IDLE — Click one of the 3 Role Cards above to launch!</span>
-            <span style="font-size:11px;color:#34d399;font-family:monospace;font-weight:700;" id="rm-active-role-badge">Role: IDLE</span>
+            <span style="font-size:12px;font-weight:700;color:#1a88ff;font-family:monospace;" id="rm-console-title">NODE STATUS: IDLE — Click one of the 3 Role Cards above to launch!</span>
+            <span style="font-size:11px;color:#16c456;font-family:monospace;font-weight:700;" id="rm-active-role-badge">Role: IDLE</span>
           </div>
-          <pre id="rm-live-logs" style="height:155px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#cbd5e1;margin:0;white-space:pre-wrap;line-height:1.45;">[AeroMesh Studio] Ready. Click a Role Card above to start Coordinator, Worker, or Full Local Mesh.</pre>
+          <pre id="rm-live-logs" style="height:140px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#d4d4d8;margin:0;white-space:pre-wrap;line-height:1.45;">[AeroMesh Studio] Ready. Select your model above and click a Role Card to launch.</pre>
         </div>
       </div>
     `;
@@ -1943,7 +1949,8 @@
     document.getElementById('rm-close-btn').onclick = () => closeRoleModal();
     document.getElementById('rm-rescan-btn').onclick = () => scanPeersIntoModal();
     document.getElementById('rm-stop-btn').onclick = async () => {
-      await fetch(getApiUrl('/api/node/stop'), { method: 'POST' });
+      await fetch(window.getApiUrl('/api/node/stop'), { method: 'POST' });
+      stopLogPolling();
       await refreshNodeState();
     };
 
@@ -1957,65 +1964,64 @@
     const customInput = document.getElementById('rm-custom-peers');
     if (listEl) listEl.textContent = 'Scanning Wi-Fi LAN & Tailscale...';
     try {
-      const r = await fetch(getApiUrl('/api/cluster/discover'));
+      const r = await fetch(window.getApiUrl('/api/cluster/discover'));
       if (!r.ok) return;
       const d = await r.json();
       const peers = d.discovered_workers || [];
       if (peers.length === 0) {
-        if (listEl) listEl.innerHTML = '<span style="color:#94a3b8;">No external workers found on :50052 (click Role 3 for Single-PC Mesh, or start Role 2 on another laptop).</span>';
+        if (listEl) listEl.innerHTML = '<span style="color:#71717a;">0 remote workers on :50052 (use Role 3 for Single-PC Mesh, or start Role 2 on another laptop).</span>';
       } else {
         if (listEl) {
-          listEl.innerHTML = peers.map(p => `<div style="color:#34d399;font-family:monospace;">✔ ${p.endpoint} (${p.type} • ${p.rtt_ms}ms)</div>`).join('');
+          listEl.innerHTML = peers.map(p => `<div style="color:#16c456;font-family:monospace;">✔ ${p.endpoint} (${p.type} • ${p.rtt_ms}ms)</div>`).join('');
         }
         if (customInput && !customInput.value.trim()) {
           customInput.value = peers.map(p => p.endpoint).join(',');
         }
       }
-    } catch (_) {}
+    } catch (_) {
+      if (listEl) listEl.textContent = 'Local Mode Ready';
+    }
   }
 
   async function refreshNodeState() {
     try {
-      const r = await fetch(getApiUrl('/api/node/state'));
+      const r = await fetch(window.getApiUrl('/api/node/state'));
       if (!r.ok) return null;
       const st = await r.json();
+
       const hw = document.getElementById('rm-hw-summary');
       if (hw) {
-        hw.innerHTML = `GPU: <strong style="color:#fff;">${st.gpu}</strong> &bull; Wi-Fi IP: <code style="color:#38bdf8;">${st.wifi_ip}:50052</code> &bull; Tailscale IP: <code style="color:#34d399;">${st.tailscale_ip}:50052</code>`;
+        hw.innerHTML = `GPU: <strong style="color:#fff;">${st.gpu || 'NVIDIA CUDA GPU'}</strong> &bull; Wi-Fi IP: <code style="color:#1a88ff;">${st.wifi_ip || '127.0.0.1'}:50052</code> &bull; Tailscale IP: <code style="color:#16c456;">${st.tailscale_ip || 'Local'}:50052</code>`;
       }
+
       const sel = document.getElementById('rm-model-select');
-      if (sel && Array.isArray(st.models) && st.models.length > 0) {
-        if (sel.options.length === 0 || sel.options.length !== st.models.length) {
-          const prevVal = sel.value;
-          sel.innerHTML = '';
-          st.models.forEach(m => {
-            const opt = document.createElement('option');
-            opt.value = m;
-            opt.textContent = m;
-            sel.appendChild(opt);
-          });
-          if (prevVal && Array.from(sel.options).some(o => o.value === prevVal)) {
-            sel.value = prevVal;
-          } else if (Array.from(sel.options).some(o => o.value === 'DS.gguf')) {
-            sel.value = 'DS.gguf';
-          } else if (Array.from(sel.options).some(o => o.value === 'test.gguf')) {
-            sel.value = 'test.gguf';
-          } else {
-            sel.selectedIndex = 0;
-          }
-        }
+      const models = Array.isArray(st.models) ? st.models : [];
+      if (sel && sel.options.length !== models.length) {
+        const prev = sel.value;
+        sel.innerHTML = '';
+        models.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m;
+          opt.textContent = m;
+          if (m === prev || (!prev && m === 'test.gguf')) opt.selected = true;
+          sel.appendChild(opt);
+        });
       }
+
       const imgLbl = document.getElementById('rm-img-model-label');
       if (imgLbl) {
-        imgLbl.textContent = st.image_models && st.image_models.length > 0
-          ? `CUDA Image Engine: ${st.image_models[0]} (Ready)`
-          : 'CUDA Image Engine: Procedural Fallback';
+        const imgModels = Array.isArray(st.image_models) ? st.image_models : [];
+        imgLbl.textContent = imgModels.length > 0
+          ? `✔ CUDA Image Model Ready: ${imgModels[0]}`
+          : '✔ LLM Cluster Engine Ready';
       }
+
       const logsEl = document.getElementById('rm-live-logs');
-      if (logsEl && Array.isArray(st.logs)) {
+      if (logsEl && Array.isArray(st.logs) && st.logs.length > 0) {
         logsEl.textContent = st.logs.join('\n');
         logsEl.scrollTop = logsEl.scrollHeight;
       }
+
       const badge = document.getElementById('rm-active-role-badge');
       const title = document.getElementById('rm-console-title');
       const stopBtn = document.getElementById('rm-stop-btn');
@@ -2023,79 +2029,91 @@
       if (stopBtn) stopBtn.style.display = st.running ? 'inline-flex' : 'none';
       if (title) {
         if (st.role === 'worker' && st.running) {
-          title.textContent = `🟢 WORKER NODE ACTIVE ON PORT 50052 — Share IP ${st.tailscale_ip !== 'Not Connected' ? st.tailscale_ip : st.wifi_ip}:50052 with Coordinator`;
+          title.textContent = `🟢 WORKER NODE ACTIVE ON PORT 50052 — Share IP ${st.tailscale_ip !== 'Not Connected' ? st.tailscale_ip : st.wifi_ip}:50052`;
         } else if (st.running) {
-          title.textContent = `🟢 ${st.role.toUpperCase()} RUNNING — Click 'Enter Studio ➔' at top right (or wait for auto-ready)`;
+          title.textContent = `🟢 ${st.role.toUpperCase()} RUNNING — Click 'Enter Studio ➔' at top right`;
         } else {
-          title.textContent = 'NODE STATUS: IDLE — Click one of the 3 Role Cards above to start!';
+          title.textContent = 'NODE STATUS: IDLE — Click one of the 3 Role Cards above to launch!';
         }
       }
       return st;
-    } catch (_) {
+    } catch (err) {
       return null;
+    }
+  }
+
+  function startLogPolling() {
+    if (!logPollTimer) {
+      logPollTimer = setInterval(refreshNodeState, 1200);
+    }
+  }
+
+  function stopLogPolling() {
+    if (logPollTimer) {
+      clearInterval(logPollTimer);
+      logPollTimer = null;
     }
   }
 
   async function startNodeRole(role) {
     const sel = document.getElementById('rm-model-select');
     const customInput = document.getElementById('rm-custom-peers');
-    const model = (sel && sel.value) ? sel.value : 'DS.gguf';
+    const model = (sel && sel.value) ? sel.value : 'test.gguf';
     const peers = (customInput && customInput.value) ? customInput.value.trim() : '';
     const title = document.getElementById('rm-console-title');
     if (title) title.textContent = `⏳ Starting ${role.toUpperCase()} (${model})... Watch live logs below:`;
 
     try {
-      const resp = await fetch(getApiUrl('/api/node/start'), {
+      startLogPolling();
+      await fetch(window.getApiUrl('/api/node/start'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ role, model, peers }),
       });
-      const data = await resp.json();
-      if (data && data.status === 'error') {
-        if (title) title.textContent = `❌ Error starting ${role.toUpperCase()}: ${data.message || 'Unknown error'}`;
+
+      await refreshNodeState();
+
+      if (role === 'coordinator' || role === 'all') {
+        for (let i = 0; i < 45; i++) {
+          await new Promise(r => setTimeout(r, 700));
+          await refreshNodeState();
+          try {
+            const cs = await fetch(window.getApiUrl('/api/cluster/status'));
+            if (cs.ok) {
+              const cd = await cs.json();
+              if (cd.connected) {
+                if (typeof window.fetchModels === 'function') window.fetchModels();
+                if (typeof window.pollClusterStatus === 'function') window.pollClusterStatus();
+                closeRoleModal();
+                break;
+              }
+            }
+          } catch (_) {}
+        }
       }
     } catch (e) {
-      if (title) title.textContent = `❌ Failed to connect to server: ${e.message}`;
-    }
-
-    await refreshNodeState();
-
-    if (role === 'coordinator' || role === 'all') {
-      for (let i = 0; i < 45; i++) {
-        await new Promise(r => setTimeout(r, 700));
-        await refreshNodeState();
-        try {
-          const cs = await fetch(getApiUrl('/api/cluster/status'));
-          if (cs.ok) {
-            const cd = await cs.json();
-            if (cd.connected) {
-              closeRoleModal();
-              break;
-            }
-          }
-        } catch (_) {}
-      }
+      if (title) title.textContent = `❌ Error starting role: ${e.message || e}`;
     }
   }
 
-  function openRoleModal() {
+  async function openRoleModal() {
     createLauncherModal();
     const modal = document.getElementById('aeromesh-role-modal');
     if (modal) modal.style.display = 'flex';
-    refreshNodeState();
+    // Check state and peers ONCE on open (only poll continuously if a node is actively running!)
+    const st = await refreshNodeState();
     scanPeersIntoModal();
-    if (!logPollTimer) {
-      logPollTimer = setInterval(refreshNodeState, 1200);
+    if (st && st.running) {
+      startLogPolling();
+    } else {
+      stopLogPolling();
     }
   }
 
   function closeRoleModal() {
     const modal = document.getElementById('aeromesh-role-modal');
     if (modal) modal.style.display = 'none';
-    if (logPollTimer) {
-      clearInterval(logPollTimer);
-      logPollTimer = null;
-    }
+    stopLogPolling();
   }
 
   if (document.readyState === 'loading') {
