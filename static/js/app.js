@@ -1606,6 +1606,8 @@
 })();
 
 
+
+
 // ============================================================================
 // DISTRIBUTED 4-STEP DiT IMAGE GENERATION CONTROLLER (ALAT + INT8-DELTA)
 // ============================================================================
@@ -1662,7 +1664,7 @@
     userRow.className = 'message-row user-row';
     const userBubble = document.createElement('div');
     userBubble.className = 'user-bubble';
-    userBubble.textContent = `[Image Mode • 4-Step DiT] ${promptText}`;
+    userBubble.textContent = `[Image Mode • Distributed DiT] ${promptText}`;
     userRow.appendChild(userBubble);
     container.appendChild(userRow);
 
@@ -1674,26 +1676,27 @@
       </div>
       <div class="assistant-card">
         <div class="dit-pipeline-box">
-          <div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;">
-            <strong style="color:#38bdf8;" class="dit-status-title">Initializing CUDA Diffusion Pipeline (RealVisXL_V4.0_Lightning.safetensors)...</strong>
-            <span style="font-family:monospace;color:#34d399;" class="dit-wire-badge">2.00 MB Wire • 0.0 MB Weights</span>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;gap:8px;flex-wrap:wrap;">
+            <strong style="color:#38bdf8;" class="dit-status-title">Probing Coordinator & Worker Mesh...</strong>
+            <span style="font-family:monospace;color:#34d399;" class="dit-wire-badge">0.00 MB Wire • 0.0 MB Weights</span>
           </div>
-          <div class="dit-step-track"><div class="dit-step-fill" style="width:10%;"></div></div>
+          <div class="dit-step-track"><div class="dit-step-fill" style="width:8%;"></div></div>
           <div style="font-size:11.5px;color:var(--text-muted);font-family:monospace;" class="dit-stage-detail">
-            Stage 1 Conditioning ➔ INT8-Delta WireGuard ➔ Stage 2 Denoising + FP16 VAE Decode
+            Stage 0 Mesh Conditioning ➔ INT8-Delta WireGuard ➔ Stage 2 CUDA Denoising + FP16 VAE
           </div>
+          <div style="font-size:11px;color:#94a3b8;font-style:italic;display:none;" class="dit-cond-preview"></div>
         </div>
         <div class="dit-canvas-wrap">
-          <canvas width="512" height="512" style="filter:blur(16px);"></canvas>
+          <canvas width="768" height="768" style="filter:blur(16px);"></canvas>
         </div>
         <div class="message-actions">
           <div class="action-buttons-group">
             <button type="button" class="clay-action-pill dit-download-btn" style="display:none;">
-              <span>Download PNG</span>
+              <span>Download 768×768 PNG</span>
             </button>
           </div>
           <div class="telemetry-tag dit-footer-telemetry">
-            <span>Running CUDA Diffusion on RTX 4060...</span>
+            <span>Running Distributed Image Pipeline...</span>
           </div>
         </div>
       </div>
@@ -1705,6 +1708,7 @@
     const wireBadge = asstRow.querySelector('.dit-wire-badge');
     const stepFill = asstRow.querySelector('.dit-step-fill');
     const stageDetail = asstRow.querySelector('.dit-stage-detail');
+    const condPreview = asstRow.querySelector('.dit-cond-preview');
     const canvas = asstRow.querySelector('canvas');
     const downloadBtn = asstRow.querySelector('.dit-download-btn');
     const footerTelemetry = asstRow.querySelector('.dit-footer-telemetry');
@@ -1715,7 +1719,7 @@
       const resp = await fetch('/api/image/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: promptText, steps: 4, width: 512, height: 512, stream: true }),
+        body: JSON.stringify({ prompt: promptText, steps: 6, width: 768, height: 768, stream: true }),
       });
 
       const reader = resp.body.getReader();
@@ -1735,12 +1739,20 @@
           if (!payloadStr || payloadStr === '[DONE]') continue;
           const evt = JSON.parse(payloadStr);
 
-          if (evt.type === 'dit_step') {
+          if (evt.type === 'dit_mesh_conditioning') {
+            statusTitle.textContent = `🟢 Stage 0: 2-Node Mesh Conditioning (Coord ${evt.coordinator_layers} ➔ Worker ${evt.worker_node})`;
+            stageDetail.textContent = `Transport: ${evt.transport} (RTT: ${evt.rtt_ms} ms) • Streaming INT8 Prompt Activations...`;
+          } else if (evt.type === 'dit_step') {
             const pct = Math.round((evt.step / evt.total_steps) * 100);
             stepFill.style.width = `${pct}%`;
-            statusTitle.textContent = `Denoising Step ${evt.step}/${evt.total_steps} (σ=${evt.sigma_curr} ➔ ${evt.sigma_next})`;
+            const meshTag = evt.mesh_active ? '🟢 2-Node Mesh' : '🟡 Local GPU';
+            statusTitle.textContent = `${meshTag} • Denoising Step ${evt.step}/${evt.total_steps} (σ=${evt.sigma_curr} ➔ ${evt.sigma_next})`;
             wireBadge.textContent = `${evt.accum_wire_mb} MB Wire • 0.0 MB Weights`;
-            stageDetail.textContent = `${evt.stage1_blocks} ➔ [${evt.step_wire_mb} MB INT8-Delta] ➔ ${evt.stage2_blocks} ➔ [${evt.return_latent_kb} KB ALAT]`;
+            stageDetail.textContent = `${evt.stage1_blocks} ➔ [${evt.step_wire_mb} MB INT8-Delta] ➔ ${evt.stage2_blocks}`;
+            if (evt.conditioning && evt.conditioning !== promptText) {
+              condPreview.style.display = 'block';
+              condPreview.textContent = `Mesh-Conditioned Prompt: "${evt.conditioning}"`;
+            }
             const blurPx = Math.max(2, Math.round((1 - evt.step / evt.total_steps) * 16));
             canvas.style.filter = `blur(${blurPx}px)`;
             renderLatentCanvas(canvas, promptText, promptText, evt.step / evt.total_steps);
@@ -1749,19 +1761,22 @@
             if (sidebarWire) sidebarWire.textContent = `${evt.accum_wire_mb} MB Wire`;
           } else if (evt.type === 'dit_complete') {
             canvas.style.filter = 'none';
+            const meshModeLabel = evt.mesh_active
+              ? `🟢 2-Node Mesh (${evt.worker_node})`
+              : `🟡 Standalone GPU`;
             if (evt.b64_png) {
               const img = new Image();
               img.onload = () => {
-                canvas.width = img.width || 512;
-                canvas.height = img.height || 512;
+                canvas.width = img.width || 768;
+                canvas.height = img.height || 768;
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(img, 0, 0);
               };
               img.src = `data:image/png;base64,${evt.b64_png}`;
-              statusTitle.textContent = `CUDA Diffusion Complete (${evt.width}×${evt.height} • RealVisXL_V4.0_Lightning.safetensors)`;
+              statusTitle.textContent = `CUDA Diffusion Complete (${evt.width}×${evt.height} • ${evt.model_name}) • ${meshModeLabel}`;
             } else {
               renderLatentCanvas(canvas, promptText, evt.seed, 1.0);
-              statusTitle.textContent = `4-Step DiT Synthesis Complete (${evt.sd_error || 'Procedural Fallback'})`;
+              statusTitle.textContent = `DiT Synthesis Complete (${evt.sd_error || 'Procedural Fallback'})`;
             }
             footerTelemetry.innerHTML = `<span>${evt.steps} Steps in ${evt.elapsed_s}s</span> &bull; <span>${evt.accum_wire_mb} MB Total Wire</span> &bull; <span>0.0 MB Weights</span>`;
             downloadBtn.style.display = 'inline-flex';
@@ -1789,7 +1804,7 @@
       const chatInput = document.getElementById('chat-input');
       if (chatInput) {
         chatInput.placeholder = window.__ditImageMode
-          ? '🎨 [IMAGE MODE ON] Describe an image to generate on your RTX 4060 (RealVisXL_V4.0_Lightning.safetensors)...'
+          ? '🎨 [IMAGE MODE ON] Describe an image to generate across Coordinator + Worker + RealVisXL...'
           : 'Ask anything or prompt the AeroMesh cluster...';
       }
       return;

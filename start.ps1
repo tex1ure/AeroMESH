@@ -22,7 +22,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Position = 0)]
-    [ValidateSet("coordinator", "worker", "all", "status", "")]
+    [ValidateSet("coordinator", "worker", "all", "status", "auto", "doctor", "")]
     [string]$Role = "",
 
     [Parameter(Mandatory = $false)]
@@ -245,6 +245,159 @@ function Get-AeroMeshExe {
     return ""
 }
 
+function Find-AeroMeshWorkers {
+    param ([int]$TargetPort = 50052)
+    Write-Host "  [*] Auto-scanning Tailscale Mesh & Wi-Fi /24 Subnet for active Worker nodes (:$TargetPort)..." -ForegroundColor Cyan
+    $candidateIPs = New-Object System.Collections.Generic.List[string]
+    $localIPs = @("127.0.0.1", "0.0.0.0")
+    try {
+        $localIPs += @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress)
+    } catch {}
+
+    # 1. Tailscale peers
+    if (Get-Command tailscale -ErrorAction SilentlyContinue) {
+        try {
+            $tsJson = (& tailscale status --json 2>$null | Out-String)
+            if ($tsJson) {
+                $tsObj = $tsJson | ConvertFrom-Json
+                if ($tsObj.Peer) {
+                    foreach ($prop in $tsObj.Peer.PSObject.Properties) {
+                        $peer = $prop.Value
+                        if ($peer.Online -and $peer.TailscaleIPs) {
+                            foreach ($ip in $peer.TailscaleIPs) {
+                                if ($ip -match '^\d+\.\d+\.\d+\.\d+$' -and $ip -notin $localIPs -and -not $candidateIPs.Contains($ip)) {
+                                    $candidateIPs.Add($ip)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    # 2. Local Wi-Fi / LAN ARP neighbors + active /24 subnet sweep
+    try {
+        $arpLines = (& arp -a 2>$null)
+        foreach ($line in $arpLines) {
+            if ($line -match '(\d+\.\d+\.\d+\.\d+)\s+[0-9a-fA-F-]+\s+dynamic') {
+                $lip = $Matches[1]
+                if ($lip -notin $localIPs -and $lip -notmatch '\.255$' -and $lip -notmatch '^224\.' -and -not $candidateIPs.Contains($lip)) {
+                    $candidateIPs.Add($lip)
+                }
+            }
+        }
+        # Also sweep the primary Wi-Fi / LAN /24 subnet so even un-pinged laptops are discovered
+        foreach ($myIp in $localIPs) {
+            if ($myIp -match '^(192\.168\.\d+|10\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+)\.(\d+)$') {
+                $prefix = $Matches[1]
+                for ($h = 1; $h -le 254; $h++) {
+                    $subIp = "$prefix.$h"
+                    if ($subIp -notin $localIPs -and -not $candidateIPs.Contains($subIp)) {
+                        $candidateIPs.Add($subIp)
+                    }
+                }
+                break
+            }
+        }
+    } catch {}
+
+    $found = New-Object System.Collections.Generic.List[string]
+    $tasks = @{}
+    foreach ($cip in $candidateIPs) {
+        try {
+            $sock = New-Object System.Net.Sockets.TcpClient
+            $tasks[$cip] = @{ Socket = $sock; Async = $sock.BeginConnect($cip, $TargetPort, $null, $null) }
+        } catch {}
+    }
+    foreach ($cip in $tasks.Keys) {
+        $entry = $tasks[$cip]
+        try {
+            if ($entry.Async.AsyncWaitHandle.WaitOne(380, $false) -and $entry.Socket.Connected) {
+                $ep = "${cip}:${TargetPort}"
+                $found.Add($ep)
+                $netType = if ($cip.StartsWith("100.")) { "Tailscale WireGuard" } else { "Wi-Fi / LAN Direct" }
+                Write-Host "      [+] Auto-Discovered Worker: $ep ($netType)" -ForegroundColor Green
+            }
+        } catch {} finally {
+            $entry.Socket.Close()
+        }
+    }
+    return ,$found
+}
+
+function Invoke-AeroMeshBootstrap {
+    Write-Host "`n========================================================================" -ForegroundColor Cyan
+    Write-Host "   [*] AEROMESH BRAND-NEW PC DOCTOR & AUTO-BOOTSTRAPPER                 " -ForegroundColor Cyan
+    Write-Host "========================================================================" -ForegroundColor Cyan
+
+    foreach ($dir in @("models", "bin", "bin\diffusion")) {
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    }
+
+    # 1. Check / Build Rust aeromesh.exe if missing
+    $exe = Get-AeroMeshExe
+    if (-not $exe) {
+        Write-Host "  [*] aeromesh.exe not built yet -> Running setup.ps1 to compile release binary..." -ForegroundColor Yellow
+        & .\setup.ps1
+        $exe = Get-AeroMeshExe
+    } else {
+        Write-Host "  [OK] Rust Engine Binary:      $exe" -ForegroundColor Green
+    }
+
+    # 2. Check / Auto-Download CUDA Diffusion Engine (bin\diffusion\sd-cli.exe + cublas64_12.dll)
+    $sdCli = Join-Path $PSScriptRoot "bin\diffusion\sd-cli.exe"
+    $cublasDll = Join-Path $PSScriptRoot "bin\diffusion\cublas64_12.dll"
+    if (-not (Test-Path $sdCli) -or -not (Test-Path $cublasDll)) {
+        Write-Host "  [*] Auto-installing CUDA 12 Diffusion Engine (sd-cli.exe + cuBLAS DLLs)..." -ForegroundColor Cyan
+        try {
+            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/latest"
+            foreach ($asset in $rel.assets) {
+                $needSd = ($asset.name -match "win-cuda12-x64\.zip$" -and $asset.name -notmatch "^cudart" -and -not (Test-Path $sdCli))
+                $needCu = ($asset.name -match "^cudart.*cu12.*\.zip$" -and -not (Test-Path $cublasDll))
+                if ($needSd -or $needCu) {
+                    $zPath = Join-Path $env:TEMP $asset.name
+                    $xDir = Join-Path $env:TEMP ("sd_auto_" + [System.IO.Path]::GetFileNameWithoutExtension($asset.name))
+                    curl.exe -L -C - $asset.browser_download_url -o $zPath
+                    if (Test-Path $xDir) { Remove-Item $xDir -Recurse -Force }
+                    Expand-Archive -Path $zPath -DestinationPath $xDir -Force
+                    Get-ChildItem -Path $xDir -Recurse -Include "*.dll", "*.exe" | ForEach-Object {
+                        Copy-Item $_.FullName -Destination "bin\diffusion\" -Force
+                    }
+                }
+            }
+        } catch {
+            Write-Host "  [!] Could not auto-download diffusion binaries: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    Get-ChildItem -Path "bin\*.dll" -File -ErrorAction SilentlyContinue | ForEach-Object {
+        if (-not (Test-Path (Join-Path "bin\diffusion" $_.Name))) {
+            Copy-Item $_.FullName -Destination "bin\diffusion\" -Force
+        }
+    }
+
+    if (Test-Path $sdCli) {
+        $r = Invoke-Native -Command $sdCli -Arguments @("--help") -IgnoreErrors
+        if ($r.Ok) {
+            Write-Host "  [OK] CUDA Diffusion Engine:   bin\diffusion\sd-cli.exe (DLLs Verified)" -ForegroundColor Green
+        } else {
+            Write-Host "  [!] CUDA Diffusion Engine:   Exited with code $($r.Code)" -ForegroundColor Yellow
+        }
+    }
+
+    # 3. Check Diffusion Model in models\
+    $sdModels = @(Get-ChildItem -Path "models" -Filter "*.safetensors" -File -ErrorAction SilentlyContinue)
+    if ($sdModels.Count -eq 0) {
+        Write-Host "  [*] No .safetensors image model found in models\ -> Auto-downloading DreamShaper 8 (1.99 GB FP16)..." -ForegroundColor Cyan
+        curl.exe -L -C - "https://huggingface.co/Lykon/DreamShaper/resolve/main/DreamShaper_8_pruned.safetensors" -o "models\DreamShaper_8_pruned.safetensors"
+        $sdModels = @(Get-ChildItem -Path "models" -Filter "*.safetensors" -File -ErrorAction SilentlyContinue)
+    }
+    if ($sdModels.Count -gt 0) {
+        Write-Host "  [OK] Active Image Model:      models\$($sdModels[0].Name)" -ForegroundColor Green
+    }
+}
+
 function Show-AeroMeshBanner {
     Write-Host ""
     Write-Host "========================================================================" -ForegroundColor Cyan
@@ -373,6 +526,9 @@ Write-Host "--------------------------------------------------------------------
 if (-not $Role) {
     Write-Host ""
     Write-Host "Select your node role for this machine:" -ForegroundColor White
+    Write-Host "  [A] " -NoNewline -ForegroundColor Cyan
+    Write-Host "Auto-Pilot (1-Click)      " -NoNewline -ForegroundColor Cyan
+    Write-Host "(Checks PC, scans Wi-Fi & Tailscale for workers, launches full cluster)" -ForegroundColor Gray
     Write-Host "  [1] " -NoNewline -ForegroundColor Cyan
     Write-Host "Coordinator Node + Web UI " -NoNewline -ForegroundColor Green
     Write-Host "(Laptop A: runs the lower layers, hosts the API + web interface)" -ForegroundColor Gray
@@ -388,8 +544,10 @@ if (-not $Role) {
     Write-Host "  [Q] Quit" -ForegroundColor DarkGray
     Write-Host ""
 
-    $choice = Read-Host "Enter choice [1, 2, 3, 4, Q]"
+    $choice = Read-Host "Enter choice [A, 1, 2, 3, 4, Q] (Default: A)"
     switch ($choice.Trim().ToUpper()) {
+        ""  { $Role = "auto" }
+        "A" { $Role = "auto" }
         "1" { $Role = "coordinator" }
         "2" { $Role = "worker" }
         "3" { $Role = "all" }
@@ -399,6 +557,31 @@ if (-not $Role) {
             Write-Host "Exiting AeroMesh Launcher." -ForegroundColor DarkGray
             exit 0
         }
+    }
+}
+
+# ------------------------------------------------------------------------------
+# 0. AUTO-PILOT & DOCTOR ROLES (.\start.ps1 auto | .\start.ps1 doctor)
+# ------------------------------------------------------------------------------
+if ($Role -eq "doctor") {
+    Invoke-AeroMeshBootstrap
+    $discovered = Find-AeroMeshWorkers -TargetPort $script:DefaultWorkerPort
+    Write-Host "`n========================================================================" -ForegroundColor Cyan
+    Write-Host "   DOCTOR SUMMARY: Discovered $($discovered.Count) remote worker(s) on Wi-Fi / Tailscale" -ForegroundColor Green
+    Write-Host "========================================================================`n" -ForegroundColor Cyan
+    exit 0
+}
+
+if ($Role -eq "auto") {
+    Invoke-AeroMeshBootstrap
+    $discovered = Find-AeroMeshWorkers -TargetPort $script:DefaultWorkerPort
+    if ($discovered.Count -gt 0) {
+        $Peers = ($discovered -join ",")
+        Write-Host "`n  [+] AUTO-PILOT: Found $($discovered.Count) remote worker(s) ($Peers) -> Starting as Coordinator + Web UI!" -ForegroundColor Green
+        $Role = "coordinator"
+    } else {
+        Write-Host "`n  [+] AUTO-PILOT: No external workers on Wi-Fi/Tailscale -> Starting Full 2-Node Local Mesh (Worker + Coordinator + Web UI)!" -ForegroundColor Green
+        $Role = "all"
     }
 }
 
@@ -525,11 +708,17 @@ if ($Role -eq "coordinator") {
     $coordUrl = "http://127.0.0.1:$apiPort"
 
     if (-not $Peers) {
-        Write-Host ""
-        Write-Host "Enter worker address(es) as host:port, comma-separated for 3+ nodes" -ForegroundColor Yellow
-        Write-Host "  (press Enter to run standalone on this machine)" -ForegroundColor DarkGray
-        $entered = Read-Host "Worker peer(s)"
-        if ($entered) { $Peers = $entered.Trim() }
+        $autoPeers = Find-AeroMeshWorkers -TargetPort $script:DefaultWorkerPort
+        if ($autoPeers.Count -gt 0) {
+            $Peers = ($autoPeers -join ",")
+            Write-Host "  [+] Automatically connected to discovered worker(s): $Peers" -ForegroundColor Green
+        } else {
+            Write-Host ""
+            Write-Host "  [!] No remote workers auto-detected on Wi-Fi or Tailscale." -ForegroundColor Yellow
+            Write-Host "      Enter worker address(es) as host:port, or press Enter for standalone:" -ForegroundColor DarkGray
+            $entered = Read-Host "Worker peer(s)"
+            if ($entered) { $Peers = $entered.Trim() }
+        }
     }
 
     $peerList = @()
