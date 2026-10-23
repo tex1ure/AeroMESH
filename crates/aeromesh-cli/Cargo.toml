@@ -8,6 +8,11 @@ license.workspace = true
 name = "aeromesh"
 path = "src/main.rs"
 
+
+[[bin]]
+name = "AeroMesh-Desktop"
+path = "src/bin/aeromesh_desktop.rs"
+
 [dependencies]
 aeromesh-core = { path = "../aeromesh-core" }
 aeromesh-engine = { path = "../aeromesh-engine" }
@@ -18,3 +23,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tokio-stream = { workspace = true }
