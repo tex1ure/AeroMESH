@@ -2,6 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <script>
+    // Universal API base & relative resolution for native webviews (with_html / custom scheme / file://)
+    (function() {
+      const isHttp = window.location.protocol === 'http:' || window.location.protocol === 'https:';
+      window.AEROMESH_API_BASE = window.AEROMESH_API_BASE || (isHttp ? window.location.origin : 'http://127.0.0.1:7860');
+      if (!document.querySelector('base')) {
+        const b = document.createElement('base');
+        b.href = window.AEROMESH_API_BASE + '/';
+        document.head.appendChild(b);
+      }
+    })();
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AeroMesh • Distributed LLM Cluster Interface</title>
   

@@ -15,7 +15,7 @@ use axum::{
     body::Body,
     extract::{Path as AxumPath, State},
     http::{header, StatusCode},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -26,6 +26,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tower_http::cors::{Any, CorsLayer};
 
 struct RuntimeProcess {
     role: String,
@@ -39,6 +40,7 @@ struct RuntimeProcess {
 struct DesktopState {
     root_dir: PathBuf,
     api_key: String,
+    port: u16,
     runtime: Arc<Mutex<RuntimeProcess>>,
 }
 
@@ -150,13 +152,24 @@ fn get_tailscale_ip() -> String {
 }
 
 fn get_gpu_summary() -> String {
-    if let Ok(out) = Command::new("nvidia-smi").creation_flags(CREATE_NO_WINDOW)
-        .args(["--query-gpu=name,memory.total,memory.used", "--format=csv,noheader"])
-        .output()
-    {
-        if out.status.success() {
-            if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
-                return line.trim().to_string();
+    let candidates = [
+        "nvidia-smi",
+        r"C:\Windows\System32\nvidia-smi.exe",
+        r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+    ];
+    for p in candidates {
+        if let Ok(out) = Command::new(p)
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["--query-gpu=name,memory.total,memory.used", "--format=csv,noheader"])
+            .output()
+        {
+            if out.status.success() {
+                if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        return trimmed.to_string();
+                    }
+                }
             }
         }
     }
@@ -289,7 +302,7 @@ fn spawn_role_process(root_dir: &Path, rt: &mut RuntimeProcess, role: &str, mode
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.current_dir(root_dir);
     if role == "worker" {
-        cmd.args(["worker", "--port", "50052", "--model", &model_arg]);
+        cmd.args(["start", "--role", "worker", "--port", "50052", "--model", &model_arg]);
     } else if role == "coordinator" {
         if peers.trim().is_empty() {
             cmd.args(["start", "--role", "coordinator", "--model", &model_arg, "--port", "8080"]);
@@ -464,8 +477,20 @@ async fn backend_http10_json(method: &str, path: &str, api_key: &str, body: Opti
 
 async fn serve_index(State(st): State<Arc<DesktopState>>) -> impl IntoResponse {
     let p = st.root_dir.join("static").join("index.html");
-    let html = fs::read_to_string(p).unwrap_or_else(|_| "<h1>AeroMesh UI missing static/index.html</h1>".to_string());
-    Html(html)
+    let mut html = fs::read_to_string(p).unwrap_or_else(|_| "<h1>AeroMesh UI missing static/index.html</h1>".to_string());
+    let inject = format!(
+        "<script>window.AEROMESH_API_BASE = 'http://127.0.0.1:{}';</script><base href=\"http://127.0.0.1:{}/\">",
+        st.port, st.port
+    );
+    if let Some(pos) = html.find("<head>") {
+        html.insert_str(pos + 6, &inject);
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+        .body(Body::from(html))
+        .unwrap()
 }
 
 async fn serve_static(State(st): State<Arc<DesktopState>>, AxumPath(rel): AxumPath<String>) -> impl IntoResponse {
@@ -853,20 +878,27 @@ fn spawn_desktop_window(root_dir: &Path, url: &str) -> Option<Child> {
     None
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let exe_path = env::current_exe()?;
-    let mut root_dir = exe_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    if root_dir.ends_with("target\\release") || root_dir.ends_with("target/release") || root_dir.ends_with("bin") {
-        if let Some(p) = root_dir.parent() {
-            root_dir = p.to_path_buf();
-            if root_dir.ends_with("target") {
-                if let Some(p2) = root_dir.parent() {
-                    root_dir = p2.to_path_buf();
-                }
-            }
+fn find_project_root() -> PathBuf {
+    if let Ok(cur) = env::current_dir() {
+        if cur.join("static").join("index.html").exists() {
+            return cur;
         }
     }
+    if let Ok(exe) = env::current_exe() {
+        let mut cur = exe.parent();
+        while let Some(p) = cur {
+            if p.join("static").join("index.html").exists() {
+                return p.to_path_buf();
+            }
+            cur = p.parent();
+        }
+    }
+    PathBuf::from(".")
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let root_dir = find_project_root();
     env::set_current_dir(&root_dir)?;
 
     let bin_path = root_dir.join("bin");
@@ -889,11 +921,29 @@ async fn main() -> anyhow::Result<()> {
         ])),
     }));
 
+    // Find available bind port (7860..=7875)
+    let mut bound_listener = None;
+    let mut bound_port = 7860;
+    for test_port in 7860..=7875 {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), test_port);
+        if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
+            bound_listener = Some(listener);
+            bound_port = test_port;
+            break;
+        }
+    }
+
     let state = Arc::new(DesktopState {
         root_dir: root_dir.clone(),
         api_key: api_key.clone(),
+        port: bound_port,
         runtime: runtime.clone(),
     });
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
     let app = Router::new()
         .route("/", get(serve_index))
@@ -913,37 +963,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/chat", post(post_chat_stream))
         .route("/api/image/stream", post(post_image_stream))
         .route("/v1/images/generations", post(post_image_stream))
+        .layer(cors)
         .with_state(state);
 
-    let ui_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7860);
-    match tokio::net::TcpListener::bind(ui_addr).await {
-        Ok(listener) => {
-            if let Some(mut win_child) = spawn_desktop_window(&root_dir, "http://127.0.0.1:7860") {
-                let rt_watchdog = runtime.clone();
-                std::thread::spawn(move || {
-                    let _ = win_child.wait();
-                    if let Ok(mut guard) = rt_watchdog.lock() {
-                        if let Some(mut c) = guard.child.take() {
-                            let _ = Command::new("taskkill")
-                                .creation_flags(CREATE_NO_WINDOW)
-                                .args(["/F", "/T", "/PID", &c.id().to_string()])
-                                .output();
-                            let _ = c.kill();
-                        }
-                    }
-                    let _ = Command::new("taskkill")
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .args(["/F", "/IM", "aeromesh.exe"])
-                        .output();
-                    std::process::exit(0);
-                });
-            }
-            let _ = axum::serve(listener, app).await;
-        }
-        Err(_) => {
-            let _ = spawn_desktop_window(&root_dir, "http://127.0.0.1:7860");
-        }
+    let target_url = format!("http://127.0.0.1:{}", bound_port);
+    if let Some(listener) = bound_listener {
+        println!("[AeroMesh Studio] Running unified server on {}", target_url);
+        let _ = spawn_desktop_window(&root_dir, &target_url);
+        let _ = axum::serve(listener, app).await;
+    } else {
+        let _ = spawn_desktop_window(&root_dir, &target_url);
     }
+
     if let Ok(mut rt) = runtime.lock() {
         if let Some(mut c) = rt.child.take() {
             let _ = c.kill();

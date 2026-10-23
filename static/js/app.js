@@ -12,6 +12,14 @@
   let conversations = [];
   let currentChatId = null;
 
+  // Resolve API Base dynamically to guarantee compatibility with native webviews (with_html / custom scheme / file://)
+  function getApiUrl(path) {
+    const base = window.AEROMESH_API_BASE || 
+      ((window.location.protocol === 'http:' || window.location.protocol === 'https:') ? window.location.origin : 'http://127.0.0.1:7860');
+    if (!path.startsWith('/')) path = '/' + path;
+    return base.replace(/\/+$/, '') + path;
+  }
+
   // Active concurrent streaming sessions: Map<chatId, streamState>
   const activeStreams = new Map();
   function isAnyChatGenerating() {
@@ -278,7 +286,7 @@
   // --- DYNAMIC BACKEND FETCHING (ZERO HARDCODING) ---
   async function fetchModels() {
     try {
-      const resp = await fetch('/v1/models');
+      const resp = await fetch(getApiUrl('/v1/models'));
       if (resp.ok) {
         const data = await resp.json();
         availableModels = data.data || [];
@@ -322,7 +330,7 @@
         renderModelDropdown();
 
         try {
-          const resp = await fetch('/api/model/switch', {
+          const resp = await fetch(getApiUrl('/api/model/switch'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: m.id })
@@ -356,7 +364,7 @@
 
   async function fetchClusterStatus() {
     try {
-      const resp = await fetch('/api/cluster/status');
+      const resp = await fetch(getApiUrl('/api/cluster/status'));
       if (resp.ok) {
         const data = await resp.json();
         setClusterState(mapClusterState(data), data);
@@ -1220,7 +1228,7 @@
     }
     activeStreams.delete(chatId);
     try {
-      fetch('/api/chat/abort', { method: 'POST' }).catch(() => {});
+      fetch(getApiUrl('/api/chat/abort'), { method: 'POST' }).catch(() => {});
     } catch (e) {}
 
     if (chatId === currentChatId) {
@@ -1333,7 +1341,7 @@
     ];
 
     try {
-      const response = await fetch('/api/chat/stream', {
+      const response = await fetch(getApiUrl('/api/chat/stream'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -1417,7 +1425,7 @@
               try {
                 reader.cancel();
                 abortController.abort();
-                fetch('/api/chat/abort', { method: 'POST' }).catch(() => {});
+                fetch(getApiUrl('/api/chat/abort'), { method: 'POST' }).catch(() => {});
               } catch (_) {}
               break;
             }
@@ -1720,7 +1728,7 @@
     renderLatentCanvas(canvas, promptText, '7f4e9a12', 0.3);
 
     try {
-      const resp = await fetch('/api/image/stream', {
+      const resp = await fetch(getApiUrl('/api/image/stream'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: promptText, steps: 6, width: 768, height: 768, stream: true }),
@@ -1935,7 +1943,7 @@
     document.getElementById('rm-close-btn').onclick = () => closeRoleModal();
     document.getElementById('rm-rescan-btn').onclick = () => scanPeersIntoModal();
     document.getElementById('rm-stop-btn').onclick = async () => {
-      await fetch('/api/node/stop', { method: 'POST' });
+      await fetch(getApiUrl('/api/node/stop'), { method: 'POST' });
       await refreshNodeState();
     };
 
@@ -1949,7 +1957,7 @@
     const customInput = document.getElementById('rm-custom-peers');
     if (listEl) listEl.textContent = 'Scanning Wi-Fi LAN & Tailscale...';
     try {
-      const r = await fetch('/api/cluster/discover');
+      const r = await fetch(getApiUrl('/api/cluster/discover'));
       if (!r.ok) return;
       const d = await r.json();
       const peers = d.discovered_workers || [];
@@ -1968,7 +1976,7 @@
 
   async function refreshNodeState() {
     try {
-      const r = await fetch('/api/node/state');
+      const r = await fetch(getApiUrl('/api/node/state'));
       if (!r.ok) return null;
       const st = await r.json();
       const hw = document.getElementById('rm-hw-summary');
@@ -1976,14 +1984,26 @@
         hw.innerHTML = `GPU: <strong style="color:#fff;">${st.gpu}</strong> &bull; Wi-Fi IP: <code style="color:#38bdf8;">${st.wifi_ip}:50052</code> &bull; Tailscale IP: <code style="color:#34d399;">${st.tailscale_ip}:50052</code>`;
       }
       const sel = document.getElementById('rm-model-select');
-      if (sel && sel.options.length === 0 && Array.isArray(st.models)) {
-        st.models.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m;
-          opt.textContent = m;
-          if (m === 'test.gguf') opt.selected = true;
-          sel.appendChild(opt);
-        });
+      if (sel && Array.isArray(st.models) && st.models.length > 0) {
+        if (sel.options.length === 0 || sel.options.length !== st.models.length) {
+          const prevVal = sel.value;
+          sel.innerHTML = '';
+          st.models.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            sel.appendChild(opt);
+          });
+          if (prevVal && Array.from(sel.options).some(o => o.value === prevVal)) {
+            sel.value = prevVal;
+          } else if (Array.from(sel.options).some(o => o.value === 'DS.gguf')) {
+            sel.value = 'DS.gguf';
+          } else if (Array.from(sel.options).some(o => o.value === 'test.gguf')) {
+            sel.value = 'test.gguf';
+          } else {
+            sel.selectedIndex = 0;
+          }
+        }
       }
       const imgLbl = document.getElementById('rm-img-model-label');
       if (imgLbl) {
@@ -2019,16 +2039,24 @@
   async function startNodeRole(role) {
     const sel = document.getElementById('rm-model-select');
     const customInput = document.getElementById('rm-custom-peers');
-    const model = (sel && sel.value) ? sel.value : 'test.gguf';
+    const model = (sel && sel.value) ? sel.value : 'DS.gguf';
     const peers = (customInput && customInput.value) ? customInput.value.trim() : '';
     const title = document.getElementById('rm-console-title');
     if (title) title.textContent = `⏳ Starting ${role.toUpperCase()} (${model})... Watch live logs below:`;
 
-    await fetch('/api/node/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role, model, peers }),
-    });
+    try {
+      const resp = await fetch(getApiUrl('/api/node/start'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role, model, peers }),
+      });
+      const data = await resp.json();
+      if (data && data.status === 'error') {
+        if (title) title.textContent = `❌ Error starting ${role.toUpperCase()}: ${data.message || 'Unknown error'}`;
+      }
+    } catch (e) {
+      if (title) title.textContent = `❌ Failed to connect to server: ${e.message}`;
+    }
 
     await refreshNodeState();
 
@@ -2037,7 +2065,7 @@
         await new Promise(r => setTimeout(r, 700));
         await refreshNodeState();
         try {
-          const cs = await fetch('/api/cluster/status');
+          const cs = await fetch(getApiUrl('/api/cluster/status'));
           if (cs.ok) {
             const cd = await cs.json();
             if (cd.connected) {

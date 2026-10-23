@@ -5,6 +5,10 @@ import json
 import glob
 import hmac
 import logging
+import subprocess
+import socket
+import threading
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -256,10 +260,20 @@ async def lifespan(app: FastAPI):
         await client.aclose()
 
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(
     title="AeroMesh Intelligence Engine Gateway",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -560,6 +574,298 @@ async def cluster_status():
         "coordinator_endpoint": AEROMESH_BACKEND_URL,
         "message": "AeroMesh Coordinator is offline. Start the coordinator with: cargo run --bin aeromesh -- serve --model <model.gguf> --layers <range> --peers <worker-ip>:50052"
     }
+
+
+# ---------------------------------------------------------------------------
+# UNIFIED NODE CONTROL & CLUSTER DISCOVERY HELPERS (FOR DESKTOP / KIMI STUDIO)
+# ---------------------------------------------------------------------------
+def get_gpu_summary() -> str:
+    candidates = [
+        "nvidia-smi",
+        r"C:\Windows\System32\nvidia-smi.exe",
+        r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
+    ]
+    creationflags = 0x08000000 if sys.platform == "win32" else 0
+    for c in candidates:
+        try:
+            res = subprocess.run(
+                [c, "--query-gpu=name,memory.total,memory.used", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                creationflags=creationflags
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip().splitlines()[0]
+        except Exception:
+            pass
+    return "CPU / Integrated GPU"
+
+def get_local_wifi_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+def get_tailscale_ip() -> str:
+    creationflags = 0x08000000 if sys.platform == "win32" else 0
+    try:
+        res = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=2.0, creationflags=creationflags)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip().splitlines()[0]
+    except Exception:
+        pass
+    return "Not Connected"
+
+def find_sd_assets():
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(root_dir, "bin", "diffusion", "sd-cli.exe"),
+        os.path.join(root_dir, "bin", "sd-cli.exe"),
+        os.path.join(root_dir, "bin", "sd.exe"),
+    ]
+    sd_bin = next((c for c in candidates if os.path.exists(c)), None)
+    sd_model = None
+    models_dir = os.path.join(root_dir, "models")
+    if os.path.exists(models_dir):
+        safes = [f for f in sorted(os.listdir(models_dir)) if f.endswith(".safetensors")]
+        if safes:
+            dream = next((f for f in safes if "dreamshaper" in f.lower()), safes[0])
+            sd_model = dream
+    return sd_bin, sd_model
+
+def discover_workers_sync(port=50052):
+    my_wifi = get_local_wifi_ip()
+    my_ts = get_tailscale_ip()
+    candidates = {}
+    creationflags = 0x08000000 if sys.platform == "win32" else 0
+    
+    try:
+        ts_out = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=2.0, creationflags=creationflags)
+        if ts_out.returncode == 0:
+            data = json.loads(ts_out.stdout)
+            peers = data.get("Peer", {})
+            for p in peers.values():
+                if p.get("Online"):
+                    host = p.get("HostName", "tailscale-peer")
+                    for ip in p.get("TailscaleIPs", []):
+                        if "." in ip and ip != my_ts:
+                            candidates[ip] = ("Tailscale Direct WireGuard", host)
+    except Exception:
+        pass
+        
+    try:
+        arp_out = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=2.0, creationflags=creationflags)
+        if arp_out.returncode == 0:
+            for line in arp_out.stdout.splitlines():
+                if "dynamic" in line.lower():
+                    tokens = line.split()
+                    if tokens:
+                        ip = tokens[0]
+                        if ip.count(".") == 3 and not ip.endswith(".255") and not ip.startswith("224.") and ip not in ("127.0.0.1", my_wifi):
+                            candidates.setdefault(ip, ("Wi-Fi / LAN Direct TCP", f"lan-{ip}"))
+    except Exception:
+        pass
+        
+    found = []
+    for ip, (net_type, host) in candidates.items():
+        try:
+            t0 = time.perf_counter()
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.35)
+            err = s.connect_ex((ip, port))
+            s.close()
+            if err == 0:
+                rtt = round((time.perf_counter() - t0) * 1000, 2)
+                found.append({
+                    "endpoint": f"{ip}:{port}",
+                    "ip": ip,
+                    "port": port,
+                    "type": net_type,
+                    "hostname": host,
+                    "rtt_ms": rtt
+                })
+        except Exception:
+            pass
+    return found
+
+class NodeRuntimeManager:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.role = "idle"
+        self.model = "models/test.gguf"
+        self.peers = ""
+        self.process = None
+        self.logs = ["[AeroMesh Studio] Ready. Click a Role Card above to start Coordinator, Worker, or Full Local Mesh."]
+
+    def push_log(self, line: str):
+        with self.lock:
+            self.logs.append(line)
+            if len(self.logs) > 120:
+                self.logs = self.logs[-120:]
+
+    def is_running(self) -> bool:
+        with self.lock:
+            if self.process is None:
+                return False
+            poll = self.process.poll()
+            if poll is not None:
+                self.role = "idle"
+                self.process = None
+                return False
+            return True
+
+    def stop(self):
+        with self.lock:
+            if self.process is not None:
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.process.pid)], capture_output=True)
+                except Exception:
+                    pass
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+                self.process = None
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", "aeromesh.exe"], capture_output=True)
+            except Exception:
+                pass
+            self.role = "idle"
+            self.logs.append("[AeroMesh Studio] Node stopped by user.")
+
+    def start(self, role: str, model: str, peers: str) -> dict:
+        self.stop()
+        root_dir = os.path.dirname(os.path.abspath(__file__))
+        engine_candidates = [
+            os.path.join(root_dir, "target", "release", "aeromesh.exe"),
+            os.path.join(root_dir, "bin", "aeromesh.exe"),
+            os.path.join(root_dir, "aeromesh.exe"),
+        ]
+        engine_exe = next((c for c in engine_candidates if os.path.exists(c)), "aeromesh.exe")
+        
+        model_arg = model if (model.startswith("models/") or model.startswith("models\\")) else f"models/{model}"
+        
+        cmd = [engine_exe]
+        if role == "worker":
+            cmd += ["start", "--role", "worker", "--port", "50052", "--model", model_arg]
+        elif role == "coordinator":
+            cmd += ["start", "--role", "coordinator", "--model", model_arg, "--port", "8080"]
+            if peers.strip():
+                cmd += ["--peers", peers.strip()]
+        else:
+            cmd += ["start", "--role", "all", "--model", model_arg, "--port", "8080"]
+            
+        with self.lock:
+            self.logs.clear()
+            self.logs.append(f"[AeroMesh Studio] Started role '{role.upper()}' with model '{model_arg}'")
+            try:
+                creationflags = 0x08000000 if sys.platform == "win32" else 0
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=root_dir,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    creationflags=creationflags
+                )
+                self.process = proc
+                self.role = role
+                self.model = model_arg
+                self.peers = peers
+                
+                def log_reader(p: subprocess.Popen):
+                    for line in iter(p.stdout.readline, ""):
+                        clean = line.rstrip()
+                        if clean:
+                            self.push_log(clean)
+                    p.stdout.close()
+                
+                t = threading.Thread(target=log_reader, args=(proc,), daemon=True)
+                t.start()
+                return {"status": "ok", "role": role, "model": model, "peers": peers}
+            except Exception as e:
+                self.logs.append(f"[AeroMesh Studio] Failed to start aeromesh.exe: {e}")
+                return {"status": "error", "message": str(e)}
+
+node_manager = NodeRuntimeManager()
+
+
+@app.get("/api/cluster/discover", dependencies=[Depends(verify_gateway_access)])
+async def cluster_discover():
+    peers = discover_workers_sync(50052)
+    sd_bin, sd_model = find_sd_assets()
+    return {
+        "discovered_workers": peers,
+        "count": len(peers),
+        "diffusion_engine_ready": sd_bin is not None and sd_model is not None,
+        "diffusion_model": sd_model
+    }
+
+
+@app.get("/api/node/state", dependencies=[Depends(verify_gateway_access)])
+async def node_state():
+    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+    gguf_models = []
+    image_models = []
+    if os.path.exists(models_dir):
+        for f in sorted(os.listdir(models_dir)):
+            if f.endswith(".gguf") and not _is_slice_file(f) and not f.startswith(".aeromesh_"):
+                gguf_models.append(f)
+            elif f.endswith(".safetensors"):
+                image_models.append(f)
+                
+    with node_manager.lock:
+        role = node_manager.role
+        model = node_manager.model
+        peers = node_manager.peers
+        running = node_manager.is_running()
+        logs_copy = list(node_manager.logs)
+
+    return {
+        "role": role,
+        "running": running,
+        "model": model,
+        "peers": peers,
+        "gpu": get_gpu_summary(),
+        "wifi_ip": get_local_wifi_ip(),
+        "tailscale_ip": get_tailscale_ip(),
+        "models": gguf_models,
+        "image_models": image_models,
+        "logs": logs_copy
+    }
+
+
+@app.post("/api/node/start", dependencies=[Depends(verify_gateway_access)])
+async def node_start(request: Request):
+    body = await _read_json_body(request)
+    role = body.get("role", "all")
+    model = body.get("model", "test.gguf")
+    peers = body.get("peers", "")
+    
+    if role == "auto":
+        discovered = discover_workers_sync(50052)
+        if discovered:
+            peers = ",".join(d["endpoint"] for d in discovered)
+            role = "coordinator"
+        else:
+            role = "all"
+            
+    res = node_manager.start(role, model, peers)
+    return JSONResponse(status_code=200 if res.get("status") == "ok" else 500, content=res)
+
+
+@app.post("/api/node/stop", dependencies=[Depends(verify_gateway_access)])
+async def node_stop():
+    node_manager.stop()
+    return {"status": "stopped", "role": "idle"}
 
 
 async def _read_json_body(request: Request) -> dict:
