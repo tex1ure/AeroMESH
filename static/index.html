@@ -74,7 +74,7 @@
           crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
   <!-- AeroMESH Kimi Desktop Design System -->
-  <link rel="stylesheet" href="/static/css/liquid_glass.css?v=kimi4">
+  <link rel="stylesheet" href="/static/css/liquid_glass.css?v=kimi5">
 </head>
 <body>
 
@@ -295,7 +295,8 @@
         <!-- Tier 2: Attached Lower Context Foot -->
         <div class="composer-foot input-footer-disclaimer" id="footer-disclaimer">
           <div class="foot-info-text">
-            <span>⚡ AeroMesh Zero-Weight Pipeline • Activations streamed via Tailscale Direct WireGuard • 0.0 MB Weights on Wire</span>
+            <i data-lucide="zap" style="width: 12px; height: 12px; color: var(--Colors-KMBlue); flex-shrink: 0;"></i>
+            <span>AeroMesh Zero-Weight Pipeline • Activations streamed via WiFi • 0.0 MB Weights on Wire</span>
           </div>
           <div class="foot-shortcut-hint">
             <span><strong>Enter ↵</strong> to send, <strong>Shift+Enter</strong> for newline</span>
@@ -326,7 +327,8 @@
 
     <p style="font-size: 13px; color: var(--text-muted);" id="modal-description">
       Dynamic cluster node status and layer slice allocation queried directly from the backend coordinator:
-    </p>
+    </p> 
+    <!-- ngl i love simple icons instead of these crappy emojis 😭 (proceeds to add an emoji in the comment lmaao) -->
 
     <div class="cluster-diagram" id="modal-nodes-container">
       <!-- Dynamically filled by JS from /api/cluster/status -->
@@ -347,7 +349,7 @@
 
 <!-- Application Scripts -->
 <script src="/static/js/liquid_mesh.js"></script>
-<script src="/static/js/app.js?v=kimi4"></script>
+<script src="/static/js/app.js?v=kimi5"></script>
 
 </body>
 </html>

@@ -1168,10 +1168,13 @@ body::after {
   100% { transform: scale(1.04); }
 }
 
-.input-footer-disclaimer {
+.input-footer-disclaimer,
+.composer-foot {
   font-size: 11px;
   color: var(--text-dim);
-  text-align: center;
+  background-color: rgba(22, 22, 26, 0.82);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
 }
 
 /* ==========================================================================

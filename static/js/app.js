@@ -106,6 +106,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
     loadConversations();
     setupEventListeners();
     configureMarked();
+    initDockResizeObserver();
 
     await fetchModels();
     await fetchClusterStatus();
@@ -455,7 +456,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
       elements.clusterStatsDynamic.innerHTML = `
         <div class="cluster-stats-row">
           <span>Status:</span>
-          <span style="color: var(--accent-orange); font-weight: 600;">⚠️ Coordinator up, no workers</span>
+          <span style="color: var(--accent-orange); font-weight: 600; display: inline-flex; align-items: center; gap: 4px;"><i data-lucide="alert-triangle" style="width: 12px; height: 12px;"></i>Coordinator up, no workers</span>
         </div>
         <div class="cluster-stats-row">
           <span>Worker${workers.length > 1 ? 's' : ''}:</span>
@@ -491,7 +492,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
       elements.sidebarStatusDot.classList.remove('offline');
       if (state === 'online_generating') {
         elements.sidebarStatusDot.classList.add('generating');
-        elements.clusterStatusLabel.textContent = '⚡ Inferring (P2P)';
+        elements.clusterStatusLabel.textContent = 'Inferring (P2P)';
       } else {
         elements.sidebarStatusDot.classList.remove('generating');
         elements.clusterStatusLabel.textContent = 'Mesh Online';
@@ -508,7 +509,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
         <div class="cluster-stats-row">
           <span>Status:</span>
           <span style="color: ${workerDisconnected ? 'var(--accent-orange)' : 'var(--accent-mint)'}; font-weight: 600;">
-            ${workerDisconnected ? '⚠️ Worker Disconnected' : (state === 'online_generating' ? `⚡ Inferring (${totalNodes} Nodes)` : 'Active (Idle)')}
+            ${workerDisconnected ? 'Worker Disconnected' : (state === 'online_generating' ? `Inferring (${totalNodes} Nodes)` : 'Active (Idle)')}
           </span>
         </div>
         <div class="cluster-stats-row">
@@ -743,7 +744,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
     let markdown = `# ${chat.title}\n\n*Created: ${new Date(chat.createdAt).toLocaleString()}*\n*Model: ${activeModel}*\n\n---\n\n`;
 
     chat.messages.forEach((msg) => {
-      const role = msg.role === 'user' ? '### 👤 User' : '### ⚡ AeroMesh Cluster';
+      const role = msg.role === 'user' ? '### User' : '### AeroMesh Cluster';
       markdown += `${role}\n\n${msg.content}\n\n---\n\n`;
     });
 
@@ -950,13 +951,14 @@ window.getApiUrl = window.getApiUrl || function(path) {
       telemetryTag.className = 'telemetry-tag';
       if (metrics) {
         if (metrics.isDistributed || (metrics.wireMB && parseFloat(metrics.wireMB) > 0)) {
-          telemetryTag.innerHTML = `<span>⚡ ${metrics.tokPerSec || '—'} tok/s</span> • <span>🌐 ${metrics.wireMB || '0.00'} MB Wire</span> • <span>📦 ${metrics.perTokenKB || 'not reported'}</span> • <span class="badge-direct-wireguard"><i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> Direct WireGuard</span>`;
+          telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${metrics.tokPerSec || '—'} tok/s</span> • <span><i data-lucide="network" style="width: 11px; height: 11px;"></i> ${metrics.wireMB || '0.00'} MB Wire</span> • <span><i data-lucide="box" style="width: 11px; height: 11px;"></i> ${metrics.perTokenKB || 'not reported'}</span> • <span class="badge-direct-wireguard"><i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> Direct WireGuard</span>`;
         } else {
-          telemetryTag.innerHTML = `<span>⚡ ${metrics.tokPerSec || '—'} tok/s</span> • <span>0.0 MB Wire (SHM)</span>`;
+          telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${metrics.tokPerSec || '—'} tok/s</span> • <span>0.0 MB Wire (SHM)</span>`;
         }
       } else {
-        telemetryTag.innerHTML = `<span>⚡ Zero-Weight Mesh</span>`;
+        telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> Zero-Weight Mesh</span>`;
       }
+      if (window.lucide) lucide.createIcons();
 
       actions.appendChild(btnGroup);
       actions.appendChild(telemetryTag);
@@ -1034,7 +1036,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
     const telemetryTag = document.createElement('div');
     telemetryTag.className = 'telemetry-tag';
-    telemetryTag.innerHTML = `<span>⚡ Streaming activations...</span>`;
+    telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> Streaming activations...</span>`;
 
     actions.appendChild(btnGroup);
     actions.appendChild(telemetryTag);
@@ -1081,9 +1083,9 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
         if (liveStats) {
           if (liveStats.isDistributed) {
-            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(liveStats.tokPerSec)} tok/s</span> • <span>🌐 ${escapeHtml(liveStats.wireMB || 'unknown')} MB wire</span> • <span>📦 ${escapeHtml(liveStats.perTokenKB)}</span>`;
+            telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${escapeHtml(liveStats.tokPerSec)} tok/s</span> • <span><i data-lucide="network" style="width: 11px; height: 11px;"></i> ${escapeHtml(liveStats.wireMB || 'unknown')} MB wire</span> • <span><i data-lucide="box" style="width: 11px; height: 11px;"></i> ${escapeHtml(liveStats.perTokenKB)}</span>`;
           } else {
-            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(liveStats.tokPerSec)} tok/s</span> • <span>0 MB wire (shared memory)</span>`;
+            telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${escapeHtml(liveStats.tokPerSec)} tok/s</span> • <span>0 MB wire (shared memory)</span>`;
           }
           if (window.lucide) lucide.createIcons();
         }
@@ -1103,21 +1105,22 @@ window.getApiUrl = window.getApiUrl || function(path) {
           // Terminal state for an aborted or failed generation: replace the
           // live label so the card does not claim to still be streaming.
           const label = metrics.reason === 'Stopped' ? 'Stopped by user' : 'Stream failed';
-          telemetryTag.innerHTML = `<span>⚠️ ${escapeHtml(label)}</span>`;
+          telemetryTag.innerHTML = `<span><i data-lucide="alert-triangle" style="width: 11px; height: 11px;"></i> ${escapeHtml(label)}</span>`;
         } else if (metrics) {
           const perToken = escapeHtml(metrics.perTokenKB || 'not reported');
           const wire = metrics.wireMB === null || metrics.wireMB === undefined
             ? 'unknown'
             : `${escapeHtml(metrics.wireMB)} MB wire`;
           if (metrics.isDistributed) {
-            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(metrics.tokPerSec)} tok/s</span> • <span>🌐 ${wire}</span> • <span>📦 ${perToken}</span>`;
+            telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${escapeHtml(metrics.tokPerSec)} tok/s</span> • <span><i data-lucide="network" style="width: 11px; height: 11px;"></i> ${wire}</span> • <span><i data-lucide="box" style="width: 11px; height: 11px;"></i> ${perToken}</span>`;
           } else {
-            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(metrics.tokPerSec)} tok/s</span> • <span>0 MB wire (shared memory)</span>`;
+            telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${escapeHtml(metrics.tokPerSec)} tok/s</span> • <span>0 MB wire (shared memory)</span>`;
           }
         }
 
         copyBtn.onclick = () => copyToClipboard(finalContent, copyBtn);
         if (window.lucide) lucide.createIcons();
+        scrollToBottom(true);
       }
     };
   }
@@ -1194,8 +1197,48 @@ window.getApiUrl = window.getApiUrl || function(path) {
     });
   }
 
-  function scrollToBottom() {
-    elements.chatViewport.scrollTop = elements.chatViewport.scrollHeight;
+  function scrollToBottom(smooth = false) {
+    if (!elements.chatViewport) return;
+    if (!smooth) {
+      elements.chatViewport.scrollTop = elements.chatViewport.scrollHeight;
+    }
+    requestAnimationFrame(() => {
+      if (!elements.chatViewport) return;
+      if (smooth) {
+        elements.chatViewport.scrollTo({
+          top: elements.chatViewport.scrollHeight,
+          behavior: 'smooth'
+        });
+      } else {
+        elements.chatViewport.scrollTop = elements.chatViewport.scrollHeight;
+      }
+    });
+  }
+  window.scrollToBottom = scrollToBottom;
+
+  function initDockResizeObserver() {
+    const dock = document.querySelector('.bottom-input-anchor') || document.querySelector('.composer-wrap');
+    if (!dock) return;
+
+    function updateDockHeight() {
+      const rect = dock.getBoundingClientRect();
+      if (rect.height > 40) {
+        document.documentElement.style.setProperty('--composer-dock-height', `${Math.ceil(rect.height)}px`);
+      }
+    }
+
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(() => {
+        updateDockHeight();
+      });
+      ro.observe(dock);
+      const composerWrap = document.querySelector('.composer-wrap');
+      if (composerWrap && composerWrap !== dock) {
+        ro.observe(composerWrap);
+      }
+    }
+    window.addEventListener('resize', updateDockHeight);
+    updateDockHeight();
   }
 
   // --- CONCURRENCY MANAGEMENT & STREAM ABORT ---
@@ -1280,6 +1323,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
     // Render User Message directly
     appendMessageElement('user', messageText);
+    scrollToBottom(true);
 
     const targetChatId = currentChatId;
     const assistantMessageIndex = chat.messages.length;
@@ -1313,6 +1357,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
     const abortController = new AbortController();
     const liveCard = createLiveAssistantRow();
+    scrollToBottom(true);
 
     const streamInfo = {
       chatId: targetChatId,
@@ -1514,6 +1559,13 @@ window.getApiUrl = window.getApiUrl || function(path) {
     if (elements.sendBtn && !elements.sendBtn.classList.contains('stop-btn-clay')) {
       elements.sendBtn.classList.toggle('active', textarea.value.trim().length > 0);
     }
+    const dock = document.querySelector('.bottom-input-anchor');
+    if (dock) {
+      const rect = dock.getBoundingClientRect();
+      if (rect.height > 40) {
+        document.documentElement.style.setProperty('--composer-dock-height', `${Math.ceil(rect.height)}px`);
+      }
+    }
   }
 
   // --- EVENT LISTENERS ---
@@ -1678,6 +1730,15 @@ window.getApiUrl = window.getApiUrl || function(path) {
     const viewport = document.getElementById('chat-viewport');
     if (!container) return;
 
+    function scrollChatUp(smooth = false) {
+      if (typeof window.scrollToBottom === 'function') {
+        window.scrollToBottom(smooth);
+      } else if (viewport) {
+        if (smooth) viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
+        else viewport.scrollTop = viewport.scrollHeight;
+      }
+    }
+
     const userRow = document.createElement('div');
     userRow.className = 'message-row user-row';
     const userBubble = document.createElement('div');
@@ -1685,6 +1746,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
     userBubble.textContent = `[Image Mode • Distributed DiT] ${promptText}`;
     userRow.appendChild(userBubble);
     container.appendChild(userRow);
+    scrollChatUp(true);
 
     const asstRow = document.createElement('div');
     asstRow.className = 'message-row';
@@ -1720,7 +1782,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
       </div>
     `;
     container.appendChild(asstRow);
-    if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    scrollChatUp(true);
 
     const statusTitle = asstRow.querySelector('.dit-status-title');
     const wireBadge = asstRow.querySelector('.dit-wire-badge');
@@ -1732,6 +1794,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
     const footerTelemetry = asstRow.querySelector('.dit-footer-telemetry');
 
     renderLatentCanvas(canvas, promptText, '7f4e9a12', 0.3);
+    scrollChatUp(true);
 
     try {
       const resp = await fetch(getApiUrl('/api/image/stream'), {
@@ -1758,12 +1821,13 @@ window.getApiUrl = window.getApiUrl || function(path) {
           const evt = JSON.parse(payloadStr);
 
           if (evt.type === 'dit_mesh_conditioning') {
-            statusTitle.textContent = `🟢 Stage 0: 2-Node Mesh Conditioning (Coord ${evt.coordinator_layers} ➔ Worker ${evt.worker_node})`;
+            statusTitle.textContent = `Stage 0: 2-Node Mesh Conditioning (Coord ${evt.coordinator_layers} ➔ Worker ${evt.worker_node})`;
             stageDetail.textContent = `Transport: ${evt.transport} (RTT: ${evt.rtt_ms} ms) • Streaming INT8 Prompt Activations...`;
+            scrollChatUp(false);
           } else if (evt.type === 'dit_step') {
             const pct = Math.round((evt.step / evt.total_steps) * 100);
             stepFill.style.width = `${pct}%`;
-            const meshTag = evt.mesh_active ? '🟢 2-Node Mesh' : '🟡 Local GPU';
+            const meshTag = evt.mesh_active ? '2-Node Mesh' : 'Local GPU';
             statusTitle.textContent = `${meshTag} • Denoising Step ${evt.step}/${evt.total_steps} (σ=${evt.sigma_curr} ➔ ${evt.sigma_next})`;
             wireBadge.textContent = `${evt.accum_wire_mb} MB Wire • 0.0 MB Weights`;
             stageDetail.textContent = `${evt.stage1_blocks} ➔ [${evt.step_wire_mb} MB INT8-Delta] ➔ ${evt.stage2_blocks}`;
@@ -1777,11 +1841,12 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
             const sidebarWire = document.getElementById('cluster-wire-transfer');
             if (sidebarWire) sidebarWire.textContent = `${evt.accum_wire_mb} MB Wire`;
+            scrollChatUp(false);
           } else if (evt.type === 'dit_complete') {
             canvas.style.filter = 'none';
             const meshModeLabel = evt.mesh_active
-              ? `🟢 2-Node Mesh (${evt.worker_node})`
-              : `🟡 Standalone GPU`;
+              ? `2-Node Mesh (${evt.worker_node})`
+              : `Standalone GPU`;
             if (evt.b64_png) {
               const img = new Image();
               img.onload = () => {
@@ -1789,6 +1854,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
                 canvas.height = img.height || 768;
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(img, 0, 0);
+                scrollChatUp(true);
               };
               img.src = `data:image/png;base64,${evt.b64_png}`;
               statusTitle.textContent = `CUDA Diffusion Complete (${evt.width}×${evt.height} • ${evt.model_name}) • ${meshModeLabel}`;
@@ -1804,6 +1870,8 @@ window.getApiUrl = window.getApiUrl || function(path) {
               a.download = `aeromesh-dit-${evt.seed || 'render'}.png`;
               a.click();
             };
+            scrollChatUp(true);
+            setTimeout(() => scrollChatUp(true), 120);
           }
         }
       }
@@ -1822,8 +1890,9 @@ window.getApiUrl = window.getApiUrl || function(path) {
       const chatInput = document.getElementById('chat-input');
       if (chatInput) {
         chatInput.placeholder = window.__ditImageMode
-          ? '🎨 [IMAGE MODE ON] Describe an image to generate across Coordinator + Worker + RealVisXL...'
+          ? 'Describe an image to generate across Coordinator + Worker...'
           : 'Ask anything or prompt the AeroMesh cluster...';
+          // ngl i hate gemini 3.8 flash.. mf broke my code
       }
       return;
     }
@@ -1870,10 +1939,11 @@ window.getApiUrl = window.getApiUrl || function(path) {
       const btn = document.createElement('button');
       btn.id = 'btn-node-role';
       btn.className = 'clay-btn';
-      btn.style.cssText = 'padding:5px 12px;font-size:12px;border-color:rgba(26,136,255,0.55);color:#1a88ff;';
-      btn.innerHTML = '<span>⚡ Node Role</span>';
+      btn.style.cssText = 'padding:5px 12px;font-size:12px;border-color:rgba(26,136,255,0.55);color:#1a88ff;display:inline-flex;align-items:center;gap:6px;';
+      btn.innerHTML = '<i data-lucide="zap" style="width: 13px; height: 13px;"></i><span>Node Role</span>';
       btn.onclick = () => openRoleModal();
       topRight.insertBefore(btn, topRight.firstChild);
+      if (window.lucide) lucide.createIcons();
     }
 
     const overlay = document.createElement('div');
@@ -1894,8 +1964,8 @@ window.getApiUrl = window.getApiUrl || function(path) {
             </div>
           </div>
           <div style="display:flex;gap:8px;">
-            <button id="rm-stop-btn" class="clay-btn" style="padding:7px 14px;font-size:12px;color:#ff4756;border-color:rgba(255,71,86,0.4);display:none;">■ Stop Active Node</button>
-            <button id="rm-close-btn" class="clay-btn" style="padding:7px 14px;font-size:12px;border-color:rgba(26,136,255,0.45);color:#1a88ff;">Enter Studio ➔</button>
+            <button id="rm-stop-btn" class="clay-btn" style="padding:7px 14px;font-size:12px;color:#ff4756;border-color:rgba(255,71,86,0.4);display:none;align-items:center;gap:6px;"><i data-lucide="square" style="width: 12px; height: 12px;"></i><span>Stop Active Node</span></button>
+            <button id="rm-close-btn" class="clay-btn" style="padding:7px 14px;font-size:12px;border-color:rgba(26,136,255,0.45);color:#1a88ff;display:inline-flex;align-items:center;gap:6px;"><span>Enter Studio</span><i data-lucide="arrow-right" style="width: 13px; height: 13px;"></i></button>
           </div>
         </div>
 
@@ -1908,7 +1978,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
           <div>
             <div style="display:flex;justify-content:space-between;align-items:center;">
               <label style="font-size:11px;font-weight:700;color:#16c456;text-transform:uppercase;">2. Discovered Wi-Fi &amp; Tailscale Workers (:50052)</label>
-              <button id="rm-rescan-btn" class="clay-btn" style="padding:3px 10px;font-size:11px;">↻ Rescan Network</button>
+              <button id="rm-rescan-btn" class="clay-btn" style="padding:3px 10px;font-size:11px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="refresh-cw" style="width: 11px; height: 11px;"></i><span>Rescan Network</span></button>
             </div>
             <div id="rm-peers-list" style="margin-top:6px;font-size:12px;color:#a1a1aa;max-height:60px;overflow-y:auto;">Ready to scan</div>
             <input id="rm-custom-peers" type="text" placeholder="Or enter worker IP:50052 (comma-separated)..." style="width:100%;margin-top:6px;padding:7px 10px;border-radius:8px;background:#18181b;color:#fff;border:1px solid rgba(255,255,255,0.14);font-size:12px;">
@@ -1917,19 +1987,19 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;">
           <div class="suggestion-card" id="rm-card-auto" style="cursor:pointer;border:1px solid rgba(26,136,255,0.45);background:rgba(26,136,255,0.08);">
-            <div class="suggestion-tag" style="color:#1a88ff;">🚀 ROLE 1 • COORDINATOR + UI</div>
+            <div class="suggestion-tag" style="color:#1a88ff;display:inline-flex;align-items:center;gap:6px;"><i data-lucide="server" style="width: 13px; height: 13px;"></i><span>ROLE 1 • COORDINATOR + UI</span></div>
             <div style="font-weight:700;font-size:15px;color:#fff;margin:2px 0;">Start as Coordinator</div>
             <div style="font-size:12px;color:#a1a1aa;line-height:1.45;">Runs Stage 1 (lower layers), connects to discovered Wi-Fi/Tailscale Workers, and opens the Chat + Image Studio.</div>
           </div>
 
           <div class="suggestion-card" id="rm-card-worker" style="cursor:pointer;border:1px solid rgba(255,159,10,0.45);background:rgba(255,159,10,0.08);">
-            <div class="suggestion-tag" style="color:#ff9f0a;">⚡ ROLE 2 • WORKER NODE (:50052)</div>
+            <div class="suggestion-tag" style="color:#ff9f0a;display:inline-flex;align-items:center;gap:6px;"><i data-lucide="zap" style="width: 13px; height: 13px;"></i><span>ROLE 2 • WORKER NODE (:50052)</span></div>
             <div style="font-weight:700;font-size:15px;color:#fff;margin:2px 0;">Start as Worker Node</div>
             <div style="font-size:12px;color:#a1a1aa;line-height:1.45;">Turns this laptop into a dedicated GPU Worker listening on port 50052 with live packet &amp; VRAM telemetry.</div>
           </div>
 
           <div class="suggestion-card" id="rm-card-all" style="cursor:pointer;border:1px solid rgba(22,196,86,0.45);background:rgba(22,196,86,0.08);">
-            <div class="suggestion-tag" style="color:#16c456;">🧠 ROLE 3 • FULL LOCAL MESH</div>
+            <div class="suggestion-tag" style="color:#16c456;display:inline-flex;align-items:center;gap:6px;"><i data-lucide="network" style="width: 13px; height: 13px;"></i><span>ROLE 3 • FULL LOCAL MESH</span></div>
             <div style="font-weight:700;font-size:15px;color:#fff;margin:2px 0;">Start Full Local Mesh</div>
             <div style="font-size:12px;color:#a1a1aa;line-height:1.45;">Starts both Worker (:50052) + Coordinator (:8080) on this PC via Zero-Copy Shared Memory and enters Studio.</div>
           </div>
@@ -1945,6 +2015,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
       </div>
     `;
     document.body.appendChild(overlay);
+    if (window.lucide) lucide.createIcons();
 
     document.getElementById('rm-close-btn').onclick = () => closeRoleModal();
     document.getElementById('rm-rescan-btn').onclick = () => scanPeersIntoModal();
@@ -2029,9 +2100,9 @@ window.getApiUrl = window.getApiUrl || function(path) {
       if (stopBtn) stopBtn.style.display = st.running ? 'inline-flex' : 'none';
       if (title) {
         if (st.role === 'worker' && st.running) {
-          title.textContent = `🟢 WORKER NODE ACTIVE ON PORT 50052 — Share IP ${st.tailscale_ip !== 'Not Connected' ? st.tailscale_ip : st.wifi_ip}:50052`;
+          title.textContent = `[ACTIVE] WORKER NODE ACTIVE ON PORT 50052 — Share IP ${st.tailscale_ip !== 'Not Connected' ? st.tailscale_ip : st.wifi_ip}:50052`;
         } else if (st.running) {
-          title.textContent = `🟢 ${st.role.toUpperCase()} RUNNING — Click 'Enter Studio ➔' at top right`;
+          title.textContent = `[ACTIVE] ${st.role.toUpperCase()} RUNNING — Click 'Enter Studio' at top right`;
         } else {
           title.textContent = 'NODE STATUS: IDLE — Click one of the 3 Role Cards above to launch!';
         }
