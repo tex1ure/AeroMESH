@@ -80,3 +80,5 @@ $RECYCLE.BIN/
 # Fixes files
 apply_fixes.py
 
+# Extracted reference bundles
+kimi-extracted/

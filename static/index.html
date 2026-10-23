@@ -6,7 +6,7 @@
   <title>AeroMesh • Distributed LLM Cluster Interface</title>
   
   <!-- Favicon -->
-  <link rel="icon" type="image/png" href="/static/img/favicon.png">
+  <link rel="icon" type="image/png" href="/static/img/aeromesh_favicon.png">
 
   <!--
     Third-party libraries are pinned to exact versions so a breaking upstream
@@ -56,8 +56,8 @@
           integrity="sha384-+VBxd3r6XgURycqtZ117nYw44OOcIax56Z4dCRWbxyPt0Koah1uHoK0o4+/RRE05"
           crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
-  <!-- AeroMESH Liquid Glass Design System -->
-  <link rel="stylesheet" href="/static/css/liquid_glass.css?v=dit7">
+  <!-- AeroMESH Kimi Desktop Design System -->
+  <link rel="stylesheet" href="/static/css/liquid_glass.css?v=kimi1">
 </head>
 <body>
 
@@ -74,7 +74,7 @@
       <div class="brand-row">
         <div class="brand-badge">
           <div class="brand-icon">
-            <img src="/static/img/logo_emblem.png" alt="AeroMESH Logo" class="brand-logo-img">
+            <img src="/static/img/aeromesh_emblem.png" alt="AeroMESH Logo" class="brand-logo-img">
           </div>
           <div>
             <div class="brand-title">AeroMESH <span class="brand-tag">P2P MESH</span></div>
@@ -178,7 +178,7 @@
         <!-- Hero State (Displayed when chat is empty) -->
         <div id="hero-state">
           <div class="hero-emblem">
-            <img src="/static/img/logo_emblem.png" alt="AeroMESH Logo" class="hero-logo-img">
+            <img src="/static/img/aeromesh_emblem.png" alt="AeroMESH Logo" class="hero-logo-img">
           </div>
           <div>
             <h1 class="hero-title">AeroMESH <span>Cluster</span></h1>
@@ -229,42 +229,13 @@
     </div>
 
     <!-- ====================================================================
-         FLOATING CLAYMORPHIC BOTTOM INPUT DOCK
+         FLOATING COMPOSER DOCK (Kimi Two-Tier Stacked Card Architecture)
          ==================================================================== -->
     <div class="bottom-input-anchor">
-      <div class="input-dock-container">
+      <div class="composer-wrap input-dock-container">
 
-        <!-- Toolbar Pills Row -->
-        <div class="input-toolbar-row">
-          <div class="toolbar-pills">
-            <div class="clay-tool-pill active" id="pill-reasoning" title="Toggle DeepSeek-R1 reasoning foldout">
-              <i data-lucide="brain" style="width: 12px; height: 12px;"></i>
-              <span>Reasoning Mode</span>
-            </div>
-
-            <div class="clay-tool-pill" id="pill-image-mode" title="Toggle 2-Node Distributed 4-Step DiT Image Generation">
-              <i data-lucide="image" style="width: 12px; height: 12px;"></i>
-              <span>Image Mode (4-Step DiT)</span>
-            </div>
-
-            <div class="clay-tool-pill" id="pill-tokens" title="Set token output budget">
-              <i data-lucide="sliders" style="width: 12px; height: 12px;"></i>
-              <span id="max-tokens-label">Max Tokens: 1024</span>
-            </div>
-
-            <div class="clay-tool-pill" id="pill-clearkv" title="Clear KV Cache on next generation">
-              <i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i>
-              <span>Reset KV on Send</span>
-            </div>
-          </div>
-
-          <div style="font-size: 11px; color: var(--text-dim);">
-            <span><strong>Enter ↵</strong> to send, <strong>Shift+Enter</strong> for newline</span>
-          </div>
-        </div>
-
-        <!-- Main Floating Clay Input Capsule -->
-        <div class="input-capsule">
+        <!-- Tier 1: Primary Floating Composer Card -->
+        <div class="composer input-capsule">
           <div class="textarea-row">
             <textarea
               id="chat-input"
@@ -272,15 +243,46 @@
               placeholder="Ask anything or prompt the AeroMesh cluster..."
               autocomplete="off"
             ></textarea>
-            
+          </div>
+
+          <!-- Bottom Action Row: Controls + Circular Submit Button -->
+          <div class="composer-toolbar input-toolbar-row">
+            <div class="toolbar-pills">
+              <div class="clay-tool-pill active" id="pill-reasoning" title="Toggle DeepSeek-R1 reasoning foldout">
+                <i data-lucide="brain" style="width: 13px; height: 13px;"></i>
+                <span>Reasoning</span>
+              </div>
+
+              <div class="clay-tool-pill" id="pill-image-mode" title="Toggle 2-Node Distributed 4-Step DiT Image Generation">
+                <i data-lucide="image" style="width: 13px; height: 13px;"></i>
+                <span>Image Mode (4-Step DiT)</span>
+              </div>
+
+              <div class="clay-tool-pill" id="pill-tokens" title="Set token output budget">
+                <i data-lucide="sliders" style="width: 13px; height: 13px;"></i>
+                <span id="max-tokens-label">Max Tokens: 1024</span>
+              </div>
+
+              <div class="clay-tool-pill" id="pill-clearkv" title="Clear KV Cache on next generation">
+                <i data-lucide="refresh-cw" style="width: 13px; height: 13px;"></i>
+                <span>Reset KV on Send</span>
+              </div>
+            </div>
+
             <button id="send-btn" class="send-btn-clay" title="Send Prompt (Enter)">
               <i data-lucide="arrow-up" style="width: 18px; height: 18px; stroke-width: 2.5;"></i>
             </button>
           </div>
         </div>
 
-        <div class="input-footer-disclaimer" id="footer-disclaimer">
-          ⚡ AeroMesh Zero-Weight Pipeline • Activations streamed via Tailscale Direct WireGuard • 0.0 MB Weights on Wire
+        <!-- Tier 2: Attached Lower Context Foot -->
+        <div class="composer-foot input-footer-disclaimer" id="footer-disclaimer">
+          <div class="foot-info-text">
+            <span>⚡ AeroMesh Zero-Weight Pipeline • Activations streamed via Tailscale Direct WireGuard • 0.0 MB Weights on Wire</span>
+          </div>
+          <div class="foot-shortcut-hint">
+            <span><strong>Enter ↵</strong> to send, <strong>Shift+Enter</strong> for newline</span>
+          </div>
         </div>
 
       </div>
@@ -297,7 +299,7 @@
   <div class="clay-modal">
     <div class="modal-header">
       <div class="modal-title">
-        <img src="/static/img/logo_emblem.png" alt="AeroMESH Logo" style="width: 22px; height: 22px; object-fit: contain;">
+        <img src="/static/img/aeromesh_emblem.png" alt="AeroMESH Logo" style="width: 22px; height: 22px; object-fit: contain;">
         <span>AeroMesh Cluster Topology</span>
       </div>
       <button class="modal-close-btn" id="modal-close-btn">
@@ -328,7 +330,7 @@
 
 <!-- Application Scripts -->
 <script src="/static/js/liquid_mesh.js"></script>
-<script src="/static/js/app.js?v=dit9"></script>
+<script src="/static/js/app.js?v=kimi1"></script>
 
 </body>
 </html>

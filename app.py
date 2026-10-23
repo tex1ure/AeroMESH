@@ -418,24 +418,13 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_spa():
-    """Serves the single-page dashboard.
-
-    The file is read once and cached: it was previously re-read from disk on
-    every request.
-    """
-    global _index_html_cache
-    if _index_html_cache is None:
-        index_path = os.path.join(STATIC_DIR, "index.html")
-        if os.path.exists(index_path):
-            with open(index_path, "r", encoding="utf-8") as f:
-                _index_html_cache = f.read()
-        else:
-            logger.error("static/index.html is missing; the dashboard cannot be served")
-            _index_html_cache = "<h1>AeroMesh UI error: static/index.html not found</h1>"
-    return _index_html_cache
-
-
-_index_html_cache = None
+    """Serves the single-page dashboard."""
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            return f.read()
+    logger.error("static/index.html is missing; the dashboard cannot be served")
+    return "<h1>AeroMesh UI error: static/index.html not found</h1>"
 
 
 # ---------------------------------------------------------------------------

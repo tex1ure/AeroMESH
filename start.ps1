@@ -462,6 +462,19 @@ function Get-TailscaleIPv4 {
     return "127.0.0.1"
 }
 
+function Open-DesktopApp {
+    param([string]$Url)
+    $edgePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    $chromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+    if (Test-Path $edgePath) {
+        Start-Process -FilePath $edgePath -ArgumentList "--app=$Url", "--window-size=1300,860"
+    } elseif (Test-Path $chromePath) {
+        Start-Process -FilePath $chromePath -ArgumentList "--app=$Url", "--window-size=1300,860"
+    } else {
+        Start-Process $Url
+    }
+}
+
 function Start-WebGateway {
     <#
       Launches the FastAPI gateway in the foreground and returns when it exits.
@@ -692,7 +705,7 @@ if ($Role -eq "all") {
 
     try {
         $isReady = Wait-ServerReady $coordUrl 90 "Coordinator"
-        if ($isReady -and -not $NoBrowser -and -not $NoUI) { Start-Process "http://127.0.0.1:$uiPort" }
+        if ($isReady -and -not $NoBrowser -and -not $NoUI) { Open-DesktopApp "http://127.0.0.1:$uiPort" }
         Start-WebGateway -CoordUrl $coordUrl -UiPort $uiPort -PythonExe $pythonExe
     } finally {
         Write-Host ""
@@ -790,7 +803,7 @@ if ($Role -eq "coordinator") {
     try {
         $timeout = if ($Mode -eq "rpc") { 120 } else { 60 }
         $isReady = Wait-ServerReady $coordUrl $timeout "Coordinator"
-        if ($isReady -and -not $NoBrowser -and -not $NoUI) { Start-Process "http://127.0.0.1:$uiPort" }
+        if ($isReady -and -not $NoBrowser -and -not $NoUI) { Open-DesktopApp "http://127.0.0.1:$uiPort" }
         Start-WebGateway -CoordUrl $coordUrl -UiPort $uiPort -PythonExe $pythonExe
     } finally {
         Write-Host ""

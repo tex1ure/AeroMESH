@@ -866,7 +866,7 @@
     } else {
       const avatar = document.createElement('div');
       avatar.className = 'message-avatar assistant-avatar';
-      avatar.innerHTML = '<img src="/static/img/logo_emblem.png" alt="AeroMESH" class="avatar-logo-img">';
+      avatar.innerHTML = '<img src="/static/img/aeromesh_emblem.png" alt="AeroMESH" class="avatar-logo-img">';
 
       const card = document.createElement('div');
       card.className = 'assistant-card';
@@ -963,7 +963,7 @@
 
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar assistant-avatar';
-    avatar.innerHTML = '<img src="/static/img/logo_emblem.png" alt="AeroMESH" class="avatar-logo-img">';
+    avatar.innerHTML = '<img src="/static/img/aeromesh_emblem.png" alt="AeroMESH" class="avatar-logo-img">';
 
     const card = document.createElement('div');
     card.className = 'assistant-card';
@@ -1493,9 +1493,13 @@
 
   function adjustTextareaHeight() {
     const textarea = elements.chatInput;
+    if (!textarea) return;
     textarea.style.height = 'auto';
-    const newHeight = Math.min(textarea.scrollHeight, 180);
+    const newHeight = Math.min(textarea.scrollHeight, 220);
     textarea.style.height = (newHeight > 24 ? newHeight : 24) + 'px';
+    if (elements.sendBtn && !elements.sendBtn.classList.contains('stop-btn-clay')) {
+      elements.sendBtn.classList.toggle('active', textarea.value.trim().length > 0);
+    }
   }
 
   // --- EVENT LISTENERS ---
@@ -1672,7 +1676,7 @@
     asstRow.className = 'message-row';
     asstRow.innerHTML = `
       <div class="message-avatar assistant-avatar">
-        <img src="/static/img/logo_emblem.png" alt="AeroMESH" class="avatar-logo-img">
+        <img src="/static/img/aeromesh_emblem.png" alt="AeroMESH" class="avatar-logo-img">
       </div>
       <div class="assistant-card">
         <div class="dit-pipeline-box">
@@ -1869,7 +1873,7 @@
       <div style="width:100%;max-width:880px;background:linear-gradient(135deg,rgba(255,255,255,0.09),rgba(255,255,255,0.02)),rgba(12,16,24,0.96);border:1px solid rgba(255,255,255,0.22);border-radius:24px;padding:28px;box-shadow:0 32px 80px rgba(0,0,0,0.92);color:#f8fafc;display:flex;flex-direction:column;gap:18px;max-height:92vh;overflow-y:auto;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
           <div style="display:flex;align-items:center;gap:12px;">
-            <img src="/static/img/logo_emblem.png" style="width:44px;height:44px;border-radius:12px;">
+            <img src="/static/img/aeromesh_emblem.png" style="width:44px;height:44px;object-fit:contain;">
             <div>
               <h2 style="font-size:20px;font-weight:800;margin:0;color:#fff;">AeroMESH Unified Node Control Center</h2>
               <div style="font-size:12.5px;color:#94a3b8;" id="rm-hw-summary">Detecting local GPU, Wi-Fi &amp; Tailscale IPs...</div>
