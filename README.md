@@ -361,7 +361,7 @@ Because 5 is an **odd number**, the default Windows NT TCP stack (`TcpAckFrequen
 - Segments 1 & 2 arrive $\to$ Cumulative ACK dispatched immediately.
 - Segments 3 & 4 arrive $\to$ Cumulative ACK dispatched immediately.
 - Segment 5 arrives $\to$ Windows waits up to **200 milliseconds** for segment 6 before sending an ACK timer expiry!
-- The sender is blocked waiting for ACK, throttling inference throughput to exactly **$\sim 5$ tokens per second**.
+- The sender is blocked waiting for ACK, throttling inference throughput to exactly **~5 tokens per second**.
 
 #### The Win32 WSAIoctl Solution:
 AeroMESH injects low-level Win32 socket configuration calls on every coordinator and worker connection (`crates/aeromesh-core/src/transport.rs`):
@@ -415,8 +415,8 @@ For fallback CUDA RPC modes (`--mode rpc`), AeroMESH includes a pre-priming util
 
 To prevent numerical runaway before generation begins, `aeromesh_core::inspect_activations` validates all incoming and outgoing activation matrices:
 - Traps and halts on `NaN` or `Inf` floating point values.
-- Warns on dead tensors (Frobenius norm $\|A\|_F < 1e-7$).
-- Enforces strict context window bounds: prompts exceeding $n_{\text{ctx}} - \text{max\_tokens}$ are rejected early with an OpenAI-compatible 422 error.
+- Warns on dead tensors (Frobenius norm $\|A\|_F < 10^{-7}$).
+- Enforces strict context window bounds: prompts exceeding `n_ctx - max_tokens` are rejected early with an OpenAI-compatible 422 error.
 
 ---
 
@@ -484,7 +484,7 @@ Before any activation frames are streamed, nodes complete a mutual cryptographic
 | **Base Model** | `test.gguf` (3.19 GB, Q8_0) | 28 Transformer Layers, $d_{\text{model}} = 3072$ |
 | **Pipeline Partition** | Stage 1: `0..13` • Stage 2: `14..27` + Head | Full CUDA GPU Offload (`ngl = 999`) |
 | **Sustained Throughput** | **24.9 tok/s** (~40.1 ms / token) | Verified in Web UI & Coordinator telemetry |
-| **Activation Codec** | `Int8PerRow` (Outlier-Preserving INT8) | $3072\text{ B} + 4\text{ B scale} + 48\text{ B outliers}$ |
+| **Activation Codec** | `Int8PerRow` (Outlier-Preserving INT8) | 3,072 B + 4 B scale + 48 B outliers |
 | **Per-Token Wire Payload** | **3.05 KB / token** (3,124 B + 44 B header) | **74.6% reduction** vs 12.0 KB FP32 |
 | **Persistent SSD Overhead** | **0.0 MB** | Ephemeral stage auto-deleted upon VRAM load |
 | **Model Weights on Wire** | **0.0 MB** | Pre-positioned base GGUF architecture |
@@ -496,7 +496,7 @@ Before any activation frames are streamed, nodes complete a mutual cryptographic
 | **Hardware Node** | RTX 4060 Laptop (8 GB VRAM) | RTX 4060 Laptop (8 GB VRAM) |
 | **Layer Allocation** | Layers `0..22` (23 layers) | Layers `23..47` (25 layers) + Output Norm + LM Head |
 | **Allocated VRAM** | **4.12 GB** (Fits safely in 8 GB) | **4.85 GB** (Fits safely in 8 GB) |
-| **Wire Payload / Step** | **5.05 KB / token** ($5120 + 52\text{ B}$) | **35 B + UTF-8** (`TokenResponseFrame`) |
+| **Wire Payload / Step** | **5.05 KB / token** (5,120 B + 52 B) | **35 B + UTF-8** (`TokenResponseFrame`) |
 | **Network Link** | Tailscale Direct WireGuard (UDP 41641) | `SIO_TCP_SET_ACK_FREQUENCY = 1` |
 | **Direct Ping (RTT)** | **1.14 ms** | **1.14 ms** |
 | **Persistent SSD Bloat** | **0.0 MB** | **0.0 MB** |
@@ -782,7 +782,7 @@ AeroMESH implements defense-in-depth security:
 1. **Loopback Binding Guard**: The web gateway and coordinator bind strictly to `127.0.0.1` by default. Non-loopback bindings require explicit API tokens.
 2. **Hop-by-Hop Header Stripping**: The FastAPI gateway strips all RFC 7230 hop-by-hop headers and caller-supplied `Authorization` headers, injecting its internal credentials safely.
 3. **Constant-Time Verification**: API tokens and worker secrets are verified using constant-time SHA-256 XOR accumulation (`constant_time_eq_str` and `constant_time_eq_32`) to prevent timing side-channel attacks.
-4. **Bounded Frame Deserialization**: The protocol enforces strict 128 MB frame ceilings, 131,072 max sequence length, and checks that payload lengths strictly match $S \times d \times \text{dtype}$.
+4. **Bounded Frame Deserialization**: The protocol enforces strict 128 MB frame ceilings, 131,072 max sequence length, and checks that payload lengths strictly match expected byte counts ($S \times d$ elements).
 5. **Client Sanitization**: All markdown and HTML rendering in the web interface is sanitized via DOMPurify with Subresource Integrity (SRI) pinned assets.
 
 ---
