@@ -1938,3 +1938,135 @@ mod tests {
         }
     }
 }
+
+// ============================================================================
+// DISTRIBUTED DIFFUSION / DiT WIRE PROTOCOL EXTENSION (ALAT + TEMPORAL DELTA)
+// ============================================================================
+pub const LATENT_RESP_MAGIC: [u8; 4] = *b"ALAT";
+pub const MAX_LATENT_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LatentResponseFrame {
+    pub session_id: u64,
+    pub step_index: u16,
+    pub total_steps: u16,
+    pub latent_channels: u16,
+    pub is_final_image: bool,
+    pub eval_time_ms: f32,
+    pub payload: Bytes,
+}
+
+impl LatentResponseFrame {
+    pub const HEADER_SIZE: usize = 29;
+
+    pub fn encode(&self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(Self::HEADER_SIZE + self.payload.len());
+        buf.extend_from_slice(&LATENT_RESP_MAGIC);
+        buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
+        buf.extend_from_slice(&self.session_id.to_be_bytes());
+        buf.extend_from_slice(&self.step_index.to_be_bytes());
+        buf.extend_from_slice(&self.total_steps.to_be_bytes());
+        buf.extend_from_slice(&self.latent_channels.to_be_bytes());
+        buf.extend_from_slice(&[if self.is_final_image { 1u8 } else { 0u8 }]);
+        buf.extend_from_slice(&self.eval_time_ms.to_bits().to_be_bytes());
+        buf.extend_from_slice(&(self.payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&self.payload);
+        buf.freeze()
+    }
+
+    pub fn decode_bytes(raw: &[u8]) -> Result<Self> {
+        ensure!(
+            raw.len() >= Self::HEADER_SIZE,
+            "LatentResponseFrame buffer too short: {}",
+            raw.len()
+        );
+        ensure!(
+            raw[0..4] == LATENT_RESP_MAGIC,
+            "Invalid latent response magic"
+        );
+        let version = u16::from_be_bytes([raw[4], raw[5]]);
+        ensure!(
+            version == PROTOCOL_VERSION,
+            "Unsupported latent response protocol version: {}",
+            version
+        );
+        let session_id = u64::from_be_bytes(raw[6..14].try_into().unwrap());
+        let step_index = u16::from_be_bytes([raw[14], raw[15]]);
+        let total_steps = u16::from_be_bytes([raw[16], raw[17]]);
+        let latent_channels = u16::from_be_bytes([raw[18], raw[19]]);
+        let is_final_image = raw[20] != 0;
+        let eval_time_ms = f32::from_bits(u32::from_be_bytes(raw[21..25].try_into().unwrap()));
+        let payload_len = u32::from_be_bytes(raw[25..29].try_into().unwrap()) as usize;
+        ensure!(
+            payload_len <= MAX_LATENT_PAYLOAD_BYTES && raw.len() == Self::HEADER_SIZE + payload_len,
+            "Invalid LatentResponseFrame payload length: {}",
+            payload_len
+        );
+        Ok(Self {
+            session_id,
+            step_index,
+            total_steps,
+            latent_channels,
+            is_final_image,
+            eval_time_ms,
+            payload: Bytes::copy_from_slice(&raw[Self::HEADER_SIZE..]),
+        })
+    }
+}
+
+/// Computes temporal residual delta (h_curr - h_prev) for Diffusion Transformer (DiT)
+/// steps and quantizes the residual with Outlier-Preserving Int8PerRow.
+pub fn quantize_temporal_delta_int8(
+    session_id: u64,
+    step_id: u64,
+    layer_index: u16,
+    seq_len: usize,
+    hidden_dim: usize,
+    curr_matrix: &[f32],
+    prev_matrix: Option<&[f32]>,
+) -> Result<ActivationFrame> {
+    ensure!(
+        curr_matrix.len() == seq_len * hidden_dim,
+        "curr_matrix size mismatch"
+    );
+    let delta: Vec<f32> = if let Some(prev) = prev_matrix {
+        ensure!(prev.len() == curr_matrix.len(), "prev_matrix size mismatch");
+        curr_matrix
+            .iter()
+            .zip(prev.iter())
+            .map(|(&c, &p)| c - p)
+            .collect()
+    } else {
+        curr_matrix.to_vec()
+    };
+
+    Ok(ActivationFrame::from_f32_matrix_quantized(
+        session_id,
+        step_id,
+        seq_len as u32,
+        0,
+        layer_index,
+        hidden_dim as u32,
+        &delta,
+        ActivationDtype::Int8PerRow,
+        0,
+    ))
+}
+
+/// Reconstructs current DiT activation matrix from a quantized temporal residual frame.
+pub fn dequantize_temporal_delta_int8(
+    frame: &ActivationFrame,
+    prev_matrix: Option<&[f32]>,
+) -> Result<Vec<f32>> {
+    let mut delta = frame.to_f32_vec()?;
+    if let Some(prev) = prev_matrix {
+        ensure!(
+            prev.len() == delta.len(),
+            "prev_matrix length mismatch during delta reconstruction"
+        );
+        for (d, &p) in delta.iter_mut().zip(prev.iter()) {
+            *d += p;
+        }
+    }
+    Ok(delta)
+}

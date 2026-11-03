@@ -582,7 +582,12 @@ fn write_stage_gguf(
                 size_bytes: t.size_bytes,
                 is_identity_norm: !is_final_stage,
             });
-        } else if !is_final_stage && (t.name == "output.weight" || t.name == "output.bias") {
+        } else if !is_final_stage
+            && (t.name == "output.weight"
+                || t.name == "output.bias"
+                || t.name.starts_with("final_layer.")
+                || t.name.starts_with("vae."))
+        {
             continue;
         } else {
             // Global tensors (token_embd, output, etc.)
@@ -863,6 +868,24 @@ pub fn ggml_tensor_size_bytes(ggml_type: u32, element_count: u64) -> u64 {
     }
 }
 
+/// Parses Diffusion Transformer (Flux.1 / SD3.5) layer indices alongside standard LLM `blk.N` tensors.
+/// Flux.1 has 19 double_blocks (0..18) and 38 single_blocks (mapped to 19..56).
+pub fn extract_diffusion_layer_index(tensor_name: &str) -> Option<usize> {
+    if let Some(rest) = tensor_name.strip_prefix("double_blocks.") {
+        let idx_str = rest.split('.').next()?;
+        return idx_str.parse::<usize>().ok();
+    }
+    if let Some(rest) = tensor_name.strip_prefix("single_blocks.") {
+        let idx_str = rest.split('.').next()?;
+        return idx_str.parse::<usize>().ok().map(|i| i + 19);
+    }
+    if let Some(rest) = tensor_name.strip_prefix("joint_blocks.") {
+        let idx_str = rest.split('.').next()?;
+        return idx_str.parse::<usize>().ok();
+    }
+    None
+}
+
 pub struct InPlaceStageGuard {
     pub effective_path: PathBuf,
     ephemeral_path: Option<PathBuf>,
@@ -936,7 +959,8 @@ impl InPlaceStageGuard {
             let ggml_type = cursor.read_u32::<LittleEndian>()?;
             let offset = cursor.read_u64::<LittleEndian>()?;
             let size_bytes = ggml_tensor_size_bytes(ggml_type, element_count);
-            let layer_index = extract_layer_index(&name);
+            let layer_index =
+                extract_layer_index(&name).or_else(|| extract_diffusion_layer_index(&name));
             tensors.push(SourceTensor {
                 name,
                 dimensions,

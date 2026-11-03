@@ -1,3 +1,9 @@
+window.getApiUrl = window.getApiUrl || function(path) {
+  const isHttp = window.location.protocol === 'http:' || window.location.protocol === 'https:';
+  const base = String(window.AEROMESH_API_BASE || (isHttp ? window.location.origin : 'http://127.0.0.1:7860')).replace(/\/+$/, '');
+  const p = String(path || '').startsWith('/') ? path : '/' + path;
+  return base + p;
+};
 /**
  * AeroMESH • Full-Spread Dark Claymorphism Chat Application
  * Features: Dynamic Backend Probing (Zero Hardcoding), SSE Streaming, DeepSeek-R1 <think> Accordion, KaTeX Math, Highlight.js
@@ -11,6 +17,14 @@
   const MAX_CONCURRENT_CHATS = 2;
   let conversations = [];
   let currentChatId = null;
+
+  // Resolve API Base dynamically to guarantee compatibility with native webviews (with_html / custom scheme / file://)
+  function getApiUrl(path) {
+    const base = window.AEROMESH_API_BASE || 
+      ((window.location.protocol === 'http:' || window.location.protocol === 'https:') ? window.location.origin : 'http://127.0.0.1:7860');
+    if (!path.startsWith('/')) path = '/' + path;
+    return base.replace(/\/+$/, '') + path;
+  }
 
   // Active concurrent streaming sessions: Map<chatId, streamState>
   const activeStreams = new Map();
@@ -92,6 +106,7 @@
     loadConversations();
     setupEventListeners();
     configureMarked();
+    initDockResizeObserver();
 
     await fetchModels();
     await fetchClusterStatus();
@@ -278,7 +293,7 @@
   // --- DYNAMIC BACKEND FETCHING (ZERO HARDCODING) ---
   async function fetchModels() {
     try {
-      const resp = await fetch('/v1/models');
+      const resp = await fetch(getApiUrl('/v1/models'));
       if (resp.ok) {
         const data = await resp.json();
         availableModels = data.data || [];
@@ -322,7 +337,7 @@
         renderModelDropdown();
 
         try {
-          const resp = await fetch('/api/model/switch', {
+          const resp = await fetch(getApiUrl('/api/model/switch'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: m.id })
@@ -356,7 +371,7 @@
 
   async function fetchClusterStatus() {
     try {
-      const resp = await fetch('/api/cluster/status');
+      const resp = await fetch(getApiUrl('/api/cluster/status'));
       if (resp.ok) {
         const data = await resp.json();
         setClusterState(mapClusterState(data), data);
@@ -441,7 +456,7 @@
       elements.clusterStatsDynamic.innerHTML = `
         <div class="cluster-stats-row">
           <span>Status:</span>
-          <span style="color: var(--accent-orange); font-weight: 600;">⚠️ Coordinator up, no workers</span>
+          <span style="color: var(--accent-orange); font-weight: 600; display: inline-flex; align-items: center; gap: 4px;"><i data-lucide="alert-triangle" style="width: 12px; height: 12px;"></i>Coordinator up, no workers</span>
         </div>
         <div class="cluster-stats-row">
           <span>Worker${workers.length > 1 ? 's' : ''}:</span>
@@ -477,7 +492,7 @@
       elements.sidebarStatusDot.classList.remove('offline');
       if (state === 'online_generating') {
         elements.sidebarStatusDot.classList.add('generating');
-        elements.clusterStatusLabel.textContent = '⚡ Inferring (P2P)';
+        elements.clusterStatusLabel.textContent = 'Inferring (P2P)';
       } else {
         elements.sidebarStatusDot.classList.remove('generating');
         elements.clusterStatusLabel.textContent = 'Mesh Online';
@@ -494,7 +509,7 @@
         <div class="cluster-stats-row">
           <span>Status:</span>
           <span style="color: ${workerDisconnected ? 'var(--accent-orange)' : 'var(--accent-mint)'}; font-weight: 600;">
-            ${workerDisconnected ? '⚠️ Worker Disconnected' : (state === 'online_generating' ? `⚡ Inferring (${totalNodes} Nodes)` : 'Active (Idle)')}
+            ${workerDisconnected ? 'Worker Disconnected' : (state === 'online_generating' ? `Inferring (${totalNodes} Nodes)` : 'Active (Idle)')}
           </span>
         </div>
         <div class="cluster-stats-row">
@@ -729,7 +744,7 @@
     let markdown = `# ${chat.title}\n\n*Created: ${new Date(chat.createdAt).toLocaleString()}*\n*Model: ${activeModel}*\n\n---\n\n`;
 
     chat.messages.forEach((msg) => {
-      const role = msg.role === 'user' ? '### 👤 User' : '### ⚡ AeroMesh Cluster';
+      const role = msg.role === 'user' ? '### User' : '### AeroMesh Cluster';
       markdown += `${role}\n\n${msg.content}\n\n---\n\n`;
     });
 
@@ -866,7 +881,7 @@
     } else {
       const avatar = document.createElement('div');
       avatar.className = 'message-avatar assistant-avatar';
-      avatar.innerHTML = '<img src="/static/img/logo_emblem.png" alt="AeroMESH" class="avatar-logo-img">';
+      avatar.innerHTML = '<img src="/static/img/aeromesh_emblem.png" alt="AeroMESH" class="avatar-logo-img">';
 
       const card = document.createElement('div');
       card.className = 'assistant-card';
@@ -936,13 +951,14 @@
       telemetryTag.className = 'telemetry-tag';
       if (metrics) {
         if (metrics.isDistributed || (metrics.wireMB && parseFloat(metrics.wireMB) > 0)) {
-          telemetryTag.innerHTML = `<span>⚡ ${metrics.tokPerSec || '—'} tok/s</span> • <span>🌐 ${metrics.wireMB || '0.00'} MB Wire</span> • <span>📦 ${metrics.perTokenKB || 'not reported'}</span> • <span class="badge-direct-wireguard"><i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> Direct WireGuard</span>`;
+          telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${metrics.tokPerSec || '—'} tok/s</span> • <span><i data-lucide="network" style="width: 11px; height: 11px;"></i> ${metrics.wireMB || '0.00'} MB Wire</span> • <span><i data-lucide="box" style="width: 11px; height: 11px;"></i> ${metrics.perTokenKB || 'not reported'}</span> • <span class="badge-direct-wireguard"><i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> Direct WireGuard</span>`;
         } else {
-          telemetryTag.innerHTML = `<span>⚡ ${metrics.tokPerSec || '—'} tok/s</span> • <span>0.0 MB Wire (SHM)</span>`;
+          telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${metrics.tokPerSec || '—'} tok/s</span> • <span>0.0 MB Wire (SHM)</span>`;
         }
       } else {
-        telemetryTag.innerHTML = `<span>⚡ Zero-Weight Mesh</span>`;
+        telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> Zero-Weight Mesh</span>`;
       }
+      if (window.lucide) lucide.createIcons();
 
       actions.appendChild(btnGroup);
       actions.appendChild(telemetryTag);
@@ -963,7 +979,7 @@
 
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar assistant-avatar';
-    avatar.innerHTML = '<img src="/static/img/logo_emblem.png" alt="AeroMESH" class="avatar-logo-img">';
+    avatar.innerHTML = '<img src="/static/img/aeromesh_emblem.png" alt="AeroMESH" class="avatar-logo-img">';
 
     const card = document.createElement('div');
     card.className = 'assistant-card';
@@ -1020,7 +1036,7 @@
 
     const telemetryTag = document.createElement('div');
     telemetryTag.className = 'telemetry-tag';
-    telemetryTag.innerHTML = `<span>⚡ Streaming activations...</span>`;
+    telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> Streaming activations...</span>`;
 
     actions.appendChild(btnGroup);
     actions.appendChild(telemetryTag);
@@ -1067,9 +1083,9 @@
 
         if (liveStats) {
           if (liveStats.isDistributed) {
-            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(liveStats.tokPerSec)} tok/s</span> • <span>🌐 ${escapeHtml(liveStats.wireMB || 'unknown')} MB wire</span> • <span>📦 ${escapeHtml(liveStats.perTokenKB)}</span>`;
+            telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${escapeHtml(liveStats.tokPerSec)} tok/s</span> • <span><i data-lucide="network" style="width: 11px; height: 11px;"></i> ${escapeHtml(liveStats.wireMB || 'unknown')} MB wire</span> • <span><i data-lucide="box" style="width: 11px; height: 11px;"></i> ${escapeHtml(liveStats.perTokenKB)}</span>`;
           } else {
-            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(liveStats.tokPerSec)} tok/s</span> • <span>0 MB wire (shared memory)</span>`;
+            telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${escapeHtml(liveStats.tokPerSec)} tok/s</span> • <span>0 MB wire (shared memory)</span>`;
           }
           if (window.lucide) lucide.createIcons();
         }
@@ -1089,21 +1105,22 @@
           // Terminal state for an aborted or failed generation: replace the
           // live label so the card does not claim to still be streaming.
           const label = metrics.reason === 'Stopped' ? 'Stopped by user' : 'Stream failed';
-          telemetryTag.innerHTML = `<span>⚠️ ${escapeHtml(label)}</span>`;
+          telemetryTag.innerHTML = `<span><i data-lucide="alert-triangle" style="width: 11px; height: 11px;"></i> ${escapeHtml(label)}</span>`;
         } else if (metrics) {
           const perToken = escapeHtml(metrics.perTokenKB || 'not reported');
           const wire = metrics.wireMB === null || metrics.wireMB === undefined
             ? 'unknown'
             : `${escapeHtml(metrics.wireMB)} MB wire`;
           if (metrics.isDistributed) {
-            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(metrics.tokPerSec)} tok/s</span> • <span>🌐 ${wire}</span> • <span>📦 ${perToken}</span>`;
+            telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${escapeHtml(metrics.tokPerSec)} tok/s</span> • <span><i data-lucide="network" style="width: 11px; height: 11px;"></i> ${wire}</span> • <span><i data-lucide="box" style="width: 11px; height: 11px;"></i> ${perToken}</span>`;
           } else {
-            telemetryTag.innerHTML = `<span>⚡ ${escapeHtml(metrics.tokPerSec)} tok/s</span> • <span>0 MB wire (shared memory)</span>`;
+            telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${escapeHtml(metrics.tokPerSec)} tok/s</span> • <span>0 MB wire (shared memory)</span>`;
           }
         }
 
         copyBtn.onclick = () => copyToClipboard(finalContent, copyBtn);
         if (window.lucide) lucide.createIcons();
+        scrollToBottom(true);
       }
     };
   }
@@ -1180,8 +1197,48 @@
     });
   }
 
-  function scrollToBottom() {
-    elements.chatViewport.scrollTop = elements.chatViewport.scrollHeight;
+  function scrollToBottom(smooth = false) {
+    if (!elements.chatViewport) return;
+    if (!smooth) {
+      elements.chatViewport.scrollTop = elements.chatViewport.scrollHeight;
+    }
+    requestAnimationFrame(() => {
+      if (!elements.chatViewport) return;
+      if (smooth) {
+        elements.chatViewport.scrollTo({
+          top: elements.chatViewport.scrollHeight,
+          behavior: 'smooth'
+        });
+      } else {
+        elements.chatViewport.scrollTop = elements.chatViewport.scrollHeight;
+      }
+    });
+  }
+  window.scrollToBottom = scrollToBottom;
+
+  function initDockResizeObserver() {
+    const dock = document.querySelector('.bottom-input-anchor') || document.querySelector('.composer-wrap');
+    if (!dock) return;
+
+    function updateDockHeight() {
+      const rect = dock.getBoundingClientRect();
+      if (rect.height > 40) {
+        document.documentElement.style.setProperty('--composer-dock-height', `${Math.ceil(rect.height)}px`);
+      }
+    }
+
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(() => {
+        updateDockHeight();
+      });
+      ro.observe(dock);
+      const composerWrap = document.querySelector('.composer-wrap');
+      if (composerWrap && composerWrap !== dock) {
+        ro.observe(composerWrap);
+      }
+    }
+    window.addEventListener('resize', updateDockHeight);
+    updateDockHeight();
   }
 
   // --- CONCURRENCY MANAGEMENT & STREAM ABORT ---
@@ -1220,7 +1277,7 @@
     }
     activeStreams.delete(chatId);
     try {
-      fetch('/api/chat/abort', { method: 'POST' }).catch(() => {});
+      fetch(getApiUrl('/api/chat/abort'), { method: 'POST' }).catch(() => {});
     } catch (e) {}
 
     if (chatId === currentChatId) {
@@ -1266,6 +1323,7 @@
 
     // Render User Message directly
     appendMessageElement('user', messageText);
+    scrollToBottom(true);
 
     const targetChatId = currentChatId;
     const assistantMessageIndex = chat.messages.length;
@@ -1299,6 +1357,7 @@
 
     const abortController = new AbortController();
     const liveCard = createLiveAssistantRow();
+    scrollToBottom(true);
 
     const streamInfo = {
       chatId: targetChatId,
@@ -1333,7 +1392,7 @@
     ];
 
     try {
-      const response = await fetch('/api/chat/stream', {
+      const response = await fetch(getApiUrl('/api/chat/stream'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -1417,7 +1476,7 @@
               try {
                 reader.cancel();
                 abortController.abort();
-                fetch('/api/chat/abort', { method: 'POST' }).catch(() => {});
+                fetch(getApiUrl('/api/chat/abort'), { method: 'POST' }).catch(() => {});
               } catch (_) {}
               break;
             }
@@ -1493,9 +1552,20 @@
 
   function adjustTextareaHeight() {
     const textarea = elements.chatInput;
+    if (!textarea) return;
     textarea.style.height = 'auto';
-    const newHeight = Math.min(textarea.scrollHeight, 180);
+    const newHeight = Math.min(textarea.scrollHeight, 220);
     textarea.style.height = (newHeight > 24 ? newHeight : 24) + 'px';
+    if (elements.sendBtn && !elements.sendBtn.classList.contains('stop-btn-clay')) {
+      elements.sendBtn.classList.toggle('active', textarea.value.trim().length > 0);
+    }
+    const dock = document.querySelector('.bottom-input-anchor');
+    if (dock) {
+      const rect = dock.getBoundingClientRect();
+      if (rect.height > 40) {
+        document.documentElement.style.setProperty('--composer-dock-height', `${Math.ceil(rect.height)}px`);
+      }
+    }
   }
 
   // --- EVENT LISTENERS ---
@@ -1603,4 +1673,523 @@
   }
 
   window.addEventListener('DOMContentLoaded', init);
+})();
+
+
+
+
+// ============================================================================
+// DISTRIBUTED 4-STEP DiT IMAGE GENERATION CONTROLLER (ALAT + INT8-DELTA)
+// ============================================================================
+(function initAeroMeshImagePipeline() {
+  window.__ditImageMode = false;
+
+  function renderLatentCanvas(canvas, prompt, seedHex, stepRatio) {
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    const seed = parseInt((seedHex || 'a3f91c82b401').slice(0, 8), 16) || 1337;
+    let s = seed;
+    const rand = () => {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+
+    const h1 = Math.floor(rand() * 360);
+    const h2 = (h1 + 65 + Math.floor(rand() * 90)) % 360;
+    const h3 = (h2 + 110) % 360;
+
+    const bgGrad = ctx.createLinearGradient(0, 0, W, H);
+    bgGrad.addColorStop(0, `hsl(${h1}, 62%, 10%)`);
+    bgGrad.addColorStop(0.55, `hsl(${h2}, 58%, 16%)`);
+    bgGrad.addColorStop(1, `hsl(${h3}, 66%, 8%)`);
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    for (let i = 0; i < 7; i++) {
+      const cx = rand() * W;
+      const cy = rand() * H;
+      const r = (0.18 + rand() * 0.35) * W;
+      const g = ctx.createRadialGradient(cx, cy, 4, cx, cy, r);
+      const hue = (h1 + i * 38) % 360;
+      g.addColorStop(0, `hsla(${hue}, 88%, 64%, ${0.26 * stepRatio})`);
+      g.addColorStop(0.5, `hsla(${(hue + 30) % 360}, 78%, 48%, ${0.12 * stepRatio})`);
+      g.addColorStop(1, 'transparent');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  async function runDistributedImageStream(promptText) {
+    const hero = document.getElementById('hero-state');
+    if (hero) hero.style.display = 'none';
+    const container = document.getElementById('messages-container');
+    const viewport = document.getElementById('chat-viewport');
+    if (!container) return;
+
+    function scrollChatUp(smooth = false) {
+      if (typeof window.scrollToBottom === 'function') {
+        window.scrollToBottom(smooth);
+      } else if (viewport) {
+        if (smooth) viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
+        else viewport.scrollTop = viewport.scrollHeight;
+      }
+    }
+
+    const userRow = document.createElement('div');
+    userRow.className = 'message-row user-row';
+    const userBubble = document.createElement('div');
+    userBubble.className = 'user-bubble';
+    userBubble.textContent = `[Image Mode • Distributed DiT] ${promptText}`;
+    userRow.appendChild(userBubble);
+    container.appendChild(userRow);
+    scrollChatUp(true);
+
+    const asstRow = document.createElement('div');
+    asstRow.className = 'message-row';
+    asstRow.innerHTML = `
+      <div class="message-avatar assistant-avatar">
+        <img src="/static/img/aeromesh_emblem.png" alt="AeroMESH" class="avatar-logo-img">
+      </div>
+      <div class="assistant-card">
+        <div class="dit-pipeline-box">
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;gap:8px;flex-wrap:wrap;">
+            <strong style="color:#38bdf8;" class="dit-status-title">Probing Coordinator & Worker Mesh...</strong>
+            <span style="font-family:monospace;color:#34d399;" class="dit-wire-badge">0.00 MB Wire • 0.0 MB Weights</span>
+          </div>
+          <div class="dit-step-track"><div class="dit-step-fill" style="width:8%;"></div></div>
+          <div style="font-size:11.5px;color:var(--text-muted);font-family:monospace;" class="dit-stage-detail">
+            Stage 0 Mesh Conditioning ➔ INT8-Delta WireGuard ➔ Stage 2 CUDA Denoising + FP16 VAE
+          </div>
+          <div style="font-size:11px;color:#94a3b8;font-style:italic;display:none;" class="dit-cond-preview"></div>
+        </div>
+        <div class="dit-canvas-wrap">
+          <canvas width="768" height="768" style="filter:blur(16px);"></canvas>
+        </div>
+        <div class="message-actions">
+          <div class="action-buttons-group">
+            <button type="button" class="clay-action-pill dit-download-btn" style="display:none;">
+              <span>Download 768×768 PNG</span>
+            </button>
+          </div>
+          <div class="telemetry-tag dit-footer-telemetry">
+            <span>Running Distributed Image Pipeline...</span>
+          </div>
+        </div>
+      </div>
+    `;
+    container.appendChild(asstRow);
+    scrollChatUp(true);
+
+    const statusTitle = asstRow.querySelector('.dit-status-title');
+    const wireBadge = asstRow.querySelector('.dit-wire-badge');
+    const stepFill = asstRow.querySelector('.dit-step-fill');
+    const stageDetail = asstRow.querySelector('.dit-stage-detail');
+    const condPreview = asstRow.querySelector('.dit-cond-preview');
+    const canvas = asstRow.querySelector('canvas');
+    const downloadBtn = asstRow.querySelector('.dit-download-btn');
+    const footerTelemetry = asstRow.querySelector('.dit-footer-telemetry');
+
+    renderLatentCanvas(canvas, promptText, '7f4e9a12', 0.3);
+    scrollChatUp(true);
+
+    try {
+      const resp = await fetch(getApiUrl('/api/image/stream'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: promptText, steps: 6, width: 768, height: 768, stream: true }),
+      });
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const payloadStr = line.slice(6).trim();
+          if (!payloadStr || payloadStr === '[DONE]') continue;
+          const evt = JSON.parse(payloadStr);
+
+          if (evt.type === 'dit_mesh_conditioning') {
+            statusTitle.textContent = `Stage 0: 2-Node Mesh Conditioning (Coord ${evt.coordinator_layers} ➔ Worker ${evt.worker_node})`;
+            stageDetail.textContent = `Transport: ${evt.transport} (RTT: ${evt.rtt_ms} ms) • Streaming INT8 Prompt Activations...`;
+            scrollChatUp(false);
+          } else if (evt.type === 'dit_step') {
+            const pct = Math.round((evt.step / evt.total_steps) * 100);
+            stepFill.style.width = `${pct}%`;
+            const meshTag = evt.mesh_active ? '2-Node Mesh' : 'Local GPU';
+            statusTitle.textContent = `${meshTag} • Denoising Step ${evt.step}/${evt.total_steps} (σ=${evt.sigma_curr} ➔ ${evt.sigma_next})`;
+            wireBadge.textContent = `${evt.accum_wire_mb} MB Wire • 0.0 MB Weights`;
+            stageDetail.textContent = `${evt.stage1_blocks} ➔ [${evt.step_wire_mb} MB INT8-Delta] ➔ ${evt.stage2_blocks}`;
+            if (evt.conditioning && evt.conditioning !== promptText) {
+              condPreview.style.display = 'block';
+              condPreview.textContent = `Mesh-Conditioned Prompt: "${evt.conditioning}"`;
+            }
+            const blurPx = Math.max(2, Math.round((1 - evt.step / evt.total_steps) * 16));
+            canvas.style.filter = `blur(${blurPx}px)`;
+            renderLatentCanvas(canvas, promptText, promptText, evt.step / evt.total_steps);
+
+            const sidebarWire = document.getElementById('cluster-wire-transfer');
+            if (sidebarWire) sidebarWire.textContent = `${evt.accum_wire_mb} MB Wire`;
+            scrollChatUp(false);
+          } else if (evt.type === 'dit_complete') {
+            canvas.style.filter = 'none';
+            const meshModeLabel = evt.mesh_active
+              ? `2-Node Mesh (${evt.worker_node})`
+              : `Standalone GPU`;
+            if (evt.b64_png) {
+              const img = new Image();
+              img.onload = () => {
+                canvas.width = img.width || 768;
+                canvas.height = img.height || 768;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                scrollChatUp(true);
+              };
+              img.src = `data:image/png;base64,${evt.b64_png}`;
+              statusTitle.textContent = `CUDA Diffusion Complete (${evt.width}×${evt.height} • ${evt.model_name}) • ${meshModeLabel}`;
+            } else {
+              renderLatentCanvas(canvas, promptText, evt.seed, 1.0);
+              statusTitle.textContent = `DiT Synthesis Complete (${evt.sd_error || 'Procedural Fallback'})`;
+            }
+            footerTelemetry.innerHTML = `<span>${evt.steps} Steps in ${evt.elapsed_s}s</span> &bull; <span>${evt.accum_wire_mb} MB Total Wire</span> &bull; <span>0.0 MB Weights</span>`;
+            downloadBtn.style.display = 'inline-flex';
+            downloadBtn.onclick = () => {
+              const a = document.createElement('a');
+              a.href = canvas.toDataURL('image/png');
+              a.download = `aeromesh-dit-${evt.seed || 'render'}.png`;
+              a.click();
+            };
+            scrollChatUp(true);
+            setTimeout(() => scrollChatUp(true), 120);
+          }
+        }
+      }
+    } catch (err) {
+      statusTitle.textContent = `DiT Pipeline Error: ${err.message || err}`;
+    }
+  }
+
+  window.addEventListener('click', (e) => {
+    const pill = e.target.closest && e.target.closest('#pill-image-mode');
+    if (pill) {
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      window.__ditImageMode = !window.__ditImageMode;
+      pill.classList.toggle('active', window.__ditImageMode);
+      const chatInput = document.getElementById('chat-input');
+      if (chatInput) {
+        chatInput.placeholder = window.__ditImageMode
+          ? 'Describe an image to generate across Coordinator + Worker...'
+          : 'Ask anything or prompt the AeroMesh cluster...';
+          // ngl i hate gemini 3.8 flash.. mf broke my code
+      }
+      return;
+    }
+
+    const sendBtn = e.target.closest && e.target.closest('#send-btn');
+    if (sendBtn && window.__ditImageMode) {
+      const chatInput = document.getElementById('chat-input');
+      if (chatInput && chatInput.value.trim()) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        const prompt = chatInput.value.trim();
+        chatInput.value = '';
+        runDistributedImageStream(prompt);
+      }
+    }
+  }, true);
+
+  window.addEventListener('keydown', (e) => {
+    if (!window.__ditImageMode) return;
+    if (e.target && e.target.id === 'chat-input' && e.key === 'Enter' && !e.shiftKey) {
+      const val = e.target.value.trim();
+      if (val) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        e.target.value = '';
+        runDistributedImageStream(val);
+      }
+    }
+  }, true);
+})();
+
+
+// ============================================================================
+// AEROMESH UNIFIED ROLE LAUNCHER & WORKER CONSOLE
+// ============================================================================
+(function initAeroMeshRoleLauncher() {
+  let logPollTimer = null;
+
+  function createLauncherModal() {
+    if (document.getElementById('aeromesh-role-modal')) return;
+
+    const topRight = document.querySelector('.top-right-group');
+    if (topRight && !document.getElementById('btn-node-role')) {
+      const btn = document.createElement('button');
+      btn.id = 'btn-node-role';
+      btn.className = 'clay-btn';
+      btn.style.cssText = 'padding:5px 12px;font-size:12px;border-color:rgba(26,136,255,0.55);color:#1a88ff;display:inline-flex;align-items:center;gap:6px;';
+      btn.innerHTML = '<i data-lucide="zap" style="width: 13px; height: 13px;"></i><span>Node Role</span>';
+      btn.onclick = () => openRoleModal();
+      topRight.insertBefore(btn, topRight.firstChild);
+      if (window.lucide) lucide.createIcons();
+    }
+
+    const overlay = document.createElement('div');
+    overlay.id = 'aeromesh-role-modal';
+    overlay.style.cssText = [
+      'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;',
+      'background:rgba(6,8,12,0.88);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);padding:20px;'
+    ].join('');
+
+    overlay.innerHTML = `
+      <div style="width:100%;max-width:860px;background:#16161a;border:1px solid rgba(255,255,255,0.14);border-radius:20px;padding:26px;box-shadow:0 28px 70px rgba(0,0,0,0.85);color:#f4f4f6;display:flex;flex-direction:column;gap:18px;max-height:92vh;overflow-y:auto;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <img src="/static/img/aeromesh_emblem.png" onerror="this.src='/static/img/logo_emblem.png'" style="width:40px;height:40px;object-fit:contain;">
+            <div>
+              <h2 style="font-size:19px;font-weight:700;margin:0;color:#fff;">AeroMESH Unified Node Control Center</h2>
+              <div style="font-size:12.5px;color:#a1a1aa;" id="rm-hw-summary">Loading hardware summary...</div>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button id="rm-stop-btn" class="clay-btn" style="padding:7px 14px;font-size:12px;color:#ff4756;border-color:rgba(255,71,86,0.4);display:none;align-items:center;gap:6px;"><i data-lucide="square" style="width: 12px; height: 12px;"></i><span>Stop Active Node</span></button>
+            <button id="rm-close-btn" class="clay-btn" style="padding:7px 14px;font-size:12px;border-color:rgba(26,136,255,0.45);color:#1a88ff;display:inline-flex;align-items:center;gap:6px;"><span>Enter Studio</span><i data-lucide="arrow-right" style="width: 13px; height: 13px;"></i></button>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:14px;background:#121214;padding:14px 16px;border-radius:14px;border:1px solid rgba(255,255,255,0.08);">
+          <div>
+            <label style="font-size:11px;font-weight:700;color:#1a88ff;text-transform:uppercase;">1. Select Local GGUF Model</label>
+            <select id="rm-model-select" style="width:100%;margin-top:6px;padding:9px 12px;border-radius:10px;background:#18181b;color:#fff;border:1px solid rgba(255,255,255,0.16);font-size:13px;"></select>
+            <div style="font-size:11.5px;color:#16c456;margin-top:6px;" id="rm-img-model-label"></div>
+          </div>
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <label style="font-size:11px;font-weight:700;color:#16c456;text-transform:uppercase;">2. Discovered Wi-Fi &amp; Tailscale Workers (:50052)</label>
+              <button id="rm-rescan-btn" class="clay-btn" style="padding:3px 10px;font-size:11px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="refresh-cw" style="width: 11px; height: 11px;"></i><span>Rescan Network</span></button>
+            </div>
+            <div id="rm-peers-list" style="margin-top:6px;font-size:12px;color:#a1a1aa;max-height:60px;overflow-y:auto;">Ready to scan</div>
+            <input id="rm-custom-peers" type="text" placeholder="Or enter worker IP:50052 (comma-separated)..." style="width:100%;margin-top:6px;padding:7px 10px;border-radius:8px;background:#18181b;color:#fff;border:1px solid rgba(255,255,255,0.14);font-size:12px;">
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;">
+          <div class="suggestion-card" id="rm-card-auto" style="cursor:pointer;border:1px solid rgba(26,136,255,0.45);background:rgba(26,136,255,0.08);">
+            <div class="suggestion-tag" style="color:#1a88ff;display:inline-flex;align-items:center;gap:6px;"><i data-lucide="server" style="width: 13px; height: 13px;"></i><span>ROLE 1 • COORDINATOR + UI</span></div>
+            <div style="font-weight:700;font-size:15px;color:#fff;margin:2px 0;">Start as Coordinator</div>
+            <div style="font-size:12px;color:#a1a1aa;line-height:1.45;">Runs Stage 1 (lower layers), connects to discovered Wi-Fi/Tailscale Workers, and opens the Chat + Image Studio.</div>
+          </div>
+
+          <div class="suggestion-card" id="rm-card-worker" style="cursor:pointer;border:1px solid rgba(255,159,10,0.45);background:rgba(255,159,10,0.08);">
+            <div class="suggestion-tag" style="color:#ff9f0a;display:inline-flex;align-items:center;gap:6px;"><i data-lucide="zap" style="width: 13px; height: 13px;"></i><span>ROLE 2 • WORKER NODE (:50052)</span></div>
+            <div style="font-weight:700;font-size:15px;color:#fff;margin:2px 0;">Start as Worker Node</div>
+            <div style="font-size:12px;color:#a1a1aa;line-height:1.45;">Turns this laptop into a dedicated GPU Worker listening on port 50052 with live packet &amp; VRAM telemetry.</div>
+          </div>
+
+          <div class="suggestion-card" id="rm-card-all" style="cursor:pointer;border:1px solid rgba(22,196,86,0.45);background:rgba(22,196,86,0.08);">
+            <div class="suggestion-tag" style="color:#16c456;display:inline-flex;align-items:center;gap:6px;"><i data-lucide="network" style="width: 13px; height: 13px;"></i><span>ROLE 3 • FULL LOCAL MESH</span></div>
+            <div style="font-weight:700;font-size:15px;color:#fff;margin:2px 0;">Start Full Local Mesh</div>
+            <div style="font-size:12px;color:#a1a1aa;line-height:1.45;">Starts both Worker (:50052) + Coordinator (:8080) on this PC via Zero-Copy Shared Memory and enters Studio.</div>
+          </div>
+        </div>
+
+        <div style="background:#0c0c0e;border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:12px 14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <span style="font-size:12px;font-weight:700;color:#1a88ff;font-family:monospace;" id="rm-console-title">NODE STATUS: IDLE — Click one of the 3 Role Cards above to launch!</span>
+            <span style="font-size:11px;color:#16c456;font-family:monospace;font-weight:700;" id="rm-active-role-badge">Role: IDLE</span>
+          </div>
+          <pre id="rm-live-logs" style="height:140px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#d4d4d8;margin:0;white-space:pre-wrap;line-height:1.45;">[AeroMesh Studio] Ready. Select your model above and click a Role Card to launch.</pre>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    if (window.lucide) lucide.createIcons();
+
+    document.getElementById('rm-close-btn').onclick = () => closeRoleModal();
+    document.getElementById('rm-rescan-btn').onclick = () => scanPeersIntoModal();
+    document.getElementById('rm-stop-btn').onclick = async () => {
+      await fetch(window.getApiUrl('/api/node/stop'), { method: 'POST' });
+      stopLogPolling();
+      await refreshNodeState();
+    };
+
+    document.getElementById('rm-card-auto').onclick = () => startNodeRole('coordinator');
+    document.getElementById('rm-card-worker').onclick = () => startNodeRole('worker');
+    document.getElementById('rm-card-all').onclick = () => startNodeRole('all');
+  }
+
+  async function scanPeersIntoModal() {
+    const listEl = document.getElementById('rm-peers-list');
+    const customInput = document.getElementById('rm-custom-peers');
+    if (listEl) listEl.textContent = 'Scanning Wi-Fi LAN & Tailscale...';
+    try {
+      const r = await fetch(window.getApiUrl('/api/cluster/discover'));
+      if (!r.ok) return;
+      const d = await r.json();
+      const peers = d.discovered_workers || [];
+      if (peers.length === 0) {
+        if (listEl) listEl.innerHTML = '<span style="color:#71717a;">0 remote workers on :50052 (use Role 3 for Single-PC Mesh, or start Role 2 on another laptop).</span>';
+      } else {
+        if (listEl) {
+          listEl.innerHTML = peers.map(p => `<div style="color:#16c456;font-family:monospace;">✔ ${p.endpoint} (${p.type} • ${p.rtt_ms}ms)</div>`).join('');
+        }
+        if (customInput && !customInput.value.trim()) {
+          customInput.value = peers.map(p => p.endpoint).join(',');
+        }
+      }
+    } catch (_) {
+      if (listEl) listEl.textContent = 'Local Mode Ready';
+    }
+  }
+
+  async function refreshNodeState() {
+    try {
+      const r = await fetch(window.getApiUrl('/api/node/state'));
+      if (!r.ok) return null;
+      const st = await r.json();
+
+      const hw = document.getElementById('rm-hw-summary');
+      if (hw) {
+        hw.innerHTML = `GPU: <strong style="color:#fff;">${st.gpu || 'NVIDIA CUDA GPU'}</strong> &bull; Wi-Fi IP: <code style="color:#1a88ff;">${st.wifi_ip || '127.0.0.1'}:50052</code> &bull; Tailscale IP: <code style="color:#16c456;">${st.tailscale_ip || 'Local'}:50052</code>`;
+      }
+
+      const sel = document.getElementById('rm-model-select');
+      const models = Array.isArray(st.models) ? st.models : [];
+      if (sel && sel.options.length !== models.length) {
+        const prev = sel.value;
+        sel.innerHTML = '';
+        models.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m;
+          opt.textContent = m;
+          if (m === prev || (!prev && m === 'test.gguf')) opt.selected = true;
+          sel.appendChild(opt);
+        });
+      }
+
+      const imgLbl = document.getElementById('rm-img-model-label');
+      if (imgLbl) {
+        const imgModels = Array.isArray(st.image_models) ? st.image_models : [];
+        imgLbl.textContent = imgModels.length > 0
+          ? `✔ CUDA Image Model Ready: ${imgModels[0]}`
+          : '✔ LLM Cluster Engine Ready';
+      }
+
+      const logsEl = document.getElementById('rm-live-logs');
+      if (logsEl && Array.isArray(st.logs) && st.logs.length > 0) {
+        logsEl.textContent = st.logs.join('\n');
+        logsEl.scrollTop = logsEl.scrollHeight;
+      }
+
+      const badge = document.getElementById('rm-active-role-badge');
+      const title = document.getElementById('rm-console-title');
+      const stopBtn = document.getElementById('rm-stop-btn');
+      if (badge) badge.textContent = `Role: ${(st.role || 'idle').toUpperCase()}`;
+      if (stopBtn) stopBtn.style.display = st.running ? 'inline-flex' : 'none';
+      if (title) {
+        if (st.role === 'worker' && st.running) {
+          title.textContent = `[ACTIVE] WORKER NODE ACTIVE ON PORT 50052 — Share IP ${st.tailscale_ip !== 'Not Connected' ? st.tailscale_ip : st.wifi_ip}:50052`;
+        } else if (st.running) {
+          title.textContent = `[ACTIVE] ${st.role.toUpperCase()} RUNNING — Click 'Enter Studio' at top right`;
+        } else {
+          title.textContent = 'NODE STATUS: IDLE — Click one of the 3 Role Cards above to launch!';
+        }
+      }
+      return st;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function startLogPolling() {
+    if (!logPollTimer) {
+      logPollTimer = setInterval(refreshNodeState, 1200);
+    }
+  }
+
+  function stopLogPolling() {
+    if (logPollTimer) {
+      clearInterval(logPollTimer);
+      logPollTimer = null;
+    }
+  }
+
+  async function startNodeRole(role) {
+    const sel = document.getElementById('rm-model-select');
+    const customInput = document.getElementById('rm-custom-peers');
+    const model = (sel && sel.value) ? sel.value : 'test.gguf';
+    const peers = (customInput && customInput.value) ? customInput.value.trim() : '';
+    const title = document.getElementById('rm-console-title');
+    if (title) title.textContent = `⏳ Starting ${role.toUpperCase()} (${model})... Watch live logs below:`;
+
+    try {
+      startLogPolling();
+      await fetch(window.getApiUrl('/api/node/start'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role, model, peers }),
+      });
+
+      await refreshNodeState();
+
+      if (role === 'coordinator' || role === 'all') {
+        for (let i = 0; i < 45; i++) {
+          await new Promise(r => setTimeout(r, 700));
+          await refreshNodeState();
+          try {
+            const cs = await fetch(window.getApiUrl('/api/cluster/status'));
+            if (cs.ok) {
+              const cd = await cs.json();
+              if (cd.connected) {
+                if (typeof window.fetchModels === 'function') window.fetchModels();
+                if (typeof window.pollClusterStatus === 'function') window.pollClusterStatus();
+                closeRoleModal();
+                break;
+              }
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (e) {
+      if (title) title.textContent = `❌ Error starting role: ${e.message || e}`;
+    }
+  }
+
+  async function openRoleModal() {
+    createLauncherModal();
+    const modal = document.getElementById('aeromesh-role-modal');
+    if (modal) modal.style.display = 'flex';
+    // Check state and peers ONCE on open (only poll continuously if a node is actively running!)
+    const st = await refreshNodeState();
+    scanPeersIntoModal();
+    if (st && st.running) {
+      startLogPolling();
+    } else {
+      stopLogPolling();
+    }
+  }
+
+  function closeRoleModal() {
+    const modal = document.getElementById('aeromesh-role-modal');
+    if (modal) modal.style.display = 'none';
+    stopLogPolling();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => openRoleModal());
+  } else {
+    openRoleModal();
+  }
 })();
