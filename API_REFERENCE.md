@@ -1,23 +1,39 @@
-# AeroMESH HTTP API Reference (FIX-17)
+# AeroMESH HTTP API & WebSocket/SSE Reference
 
 > **Base URLs**
-> - **Direct Coordinator (Axum)**: `http://127.0.0.1:8080`
-> - **Web Gateway Proxy (FastAPI)**: `http://127.0.0.1:7860` (proxies requests to `:8080` and attaches credentials securely)
+> - **Direct Coordinator Engine (Axum)**: `http://127.0.0.1:8080`
+> - **Web Gateway Proxy (FastAPI)**: `http://127.0.0.1:7860` (proxies to `:8080`, injects bearer credentials securely, hosts SPA)
+> - **Native Desktop Studio**: `http://127.0.0.1:7865` (`AeroMesh-Desktop.exe`)
 >
-> **Authentication**: All endpoints except `/health` require `Authorization: Bearer <AEROMESH_API_KEY>`.
-> Token comparison uses SHA-256 constant-time evaluation (`constant_time_eq_str`) to eliminate timing side-channels. 
-> If `AEROMESH_API_KEY` is not set in the environment, all protected routes return `401 Unauthorized`.
+> **Authentication**: All endpoints except `/health` and static assets require `Authorization: Bearer <AEROMESH_API_KEY>`.
+> Token comparison uses SHA-256 constant-time evaluation (`constant_time_eq_str`) to eliminate execution-time side-channel attacks.
+> If `AEROMESH_API_KEY` is not configured, protected routes fail closed with HTTP `401 Unauthorized`.
+
+---
+
+## Table of Contents
+
+- [1. Unified Error Envelope (OpenAI-Compatible)](#1-unified-error-envelope-openai-compatible)
+- [2. POST /v1/chat/completions & /api/chat/stream](#2-post-v1chatcompletions--apichatstream)
+- [3. POST /api/chat/abort](#3-post-apichatabort)
+- [4. GET /v1/models](#4-get-v1models)
+- [5. POST /api/model/switch (alias /v1/models/load)](#5-post-apimodelswitch-alias-v1modelsload)
+- [6. GET /health & GET /ready (Health Probes)](#6-get-health--get-ready-health-probes)
+- [7. GET /api/cluster/status & /api/cluster/discover](#7-get-apiclusterstatus--apiclusterdiscover)
+- [8. Node Lifecycle Management (/api/node/*)](#8-node-lifecycle-management-apinodestart-stop-state)
+- [9. POST /v1/images/generations & /api/image/stream (Procedural DiT / SD)](#9-post-v1imagesgenerations--apiimagestream)
+- [10. Gateway Reverse Proxy & Header Stripping Architecture](#10-gateway-reverse-proxy--header-stripping-architecture)
 
 ---
 
 ## 1. Unified Error Envelope (OpenAI-Compatible)
 
-Pre-flight validation errors and initialization failures on `/v1/chat/completions` use the standardized envelope:
+Pre-flight validation errors and runtime failures on all `/v1/*` and `/api/*` endpoints strictly follow OpenAI's error envelope:
 
 ```json
 {
   "error": {
-    "message": "Human-readable description",
+    "message": "Human-readable description of error condition",
     "type": "invalid_request_error",
     "param": "temperature",
     "code": "invalid_value"
@@ -26,21 +42,22 @@ Pre-flight validation errors and initialization failures on `/v1/chat/completion
 ```
 
 | HTTP Status | `error.type` | `error.code` | Condition |
-|---|---|---|---|
-| **400** | `invalid_request_error` | `invalid_json` | Malformed JSON request payload |
-| **401** | `authentication_error` | `invalid_api_key` | Missing, malformed, or mismatching Bearer token |
-| **404** | `invalid_request_error` | `not_found` | Requested .gguf file not found in `models/` |
-| **422** | `invalid_request_error` | `missing_required_field` | `messages` array is empty |
-| **422** | `invalid_request_error` | `invalid_value` | Unsupported role, out-of-bounds parameters, or blank model |
+|:---:|:---|:---|:---|
+| **400** | `invalid_request_error` | `invalid_json` | Malformed JSON request body or payload framing error |
+| **401** | `authentication_error` | `invalid_api_key` | Missing, malformed, or invalid Bearer token |
+| **404** | `invalid_request_error` | `not_found` | Requested `.gguf` file not found in local `models/` directory |
+| **422** | `invalid_request_error` | `missing_required_field` | `messages` array is empty or missing required prompt |
+| **422** | `invalid_request_error` | `invalid_value` | Unsupported role, out-of-bounds parameters, or whitespace-only model |
 | **422** | `invalid_request_error` | `empty_content` | Message contains empty or whitespace-only content |
-| **422** | `invalid_request_error` | `context_window_exceeded` | `max_tokens` exceeds model context window `n_ctx` (FIX-24) |
-| **429** | `rate_limit_error` | `rate_limit_exceeded` | Request rate limit exceeded on `/health` (60 req/min) or completions pool (15 req/min) (FIX-08) |
-| **500** | `api_error` | `null` | Engine runtime or C++ FFI evaluation failure |
-| **503** | `model_unavailable` | `model_not_ready` | Pipeline state is Loading, Failed, or Closed |
+| **422** | `invalid_request_error` | `context_window_exceeded` | `prompt_tokens + max_tokens` exceeds model context window `n_ctx` |
+| **429** | `rate_limit_error` | `rate_limit_exceeded` | Rate limit breached on `/health` (60 req/min) or completions (15 req/min) |
+| **500** | `api_error` | `null` | Engine runtime or native C++ FFI evaluation failure |
+| **502** | `api_error` | `backend_unreachable` | FastAPI gateway unable to reach upstream Axum coordinator |
+| **503** | `model_unavailable` | `model_not_ready` | Cluster state is currently Loading, Failed, or Closed |
 
 ---
 
-## 2. POST /v1/chat/completions
+## 2. POST /v1/chat/completions & /api/chat/stream
 
 Primary chat generation endpoint. Routes `/api/chat` and `/api/chat/stream` point to this identical handler.
 
@@ -52,26 +69,27 @@ Primary chat generation endpoint. Routes `/api/chat` and `/api/chat/stream` poin
 ```json
 {
   "model": "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
-  "messages": [
-    { "role": "system", "content": "You are a helpful assistant." },
+  "messages": [{ "role": "system", "content": "You are a helpful assistant." },
     { "role": "user", "content": "Explain zero-weight pipelined inference." }
   ],
-  "max_tokens": 256,
-  "temperature": 0.7,
+  "max_tokens": 512,
+  "temperature": 0.6,
   "top_p": 0.9,
   "stream": true,
   "session_id": 1726400000000
 }
 ```
 
-### Field Constraints & Validation Rules (Returns 422 on breach)
-- **`messages`**: Must contain at least one item. Every message requires a valid role (`system`, `user`, `assistant`, `tool`, `function`) and nonblank content.
-- **`temperature`**: Finite float where $0.0 \le \text{temperature} \le 2.0$ (Default: 0.7).
-- **`top_p`**: Finite float where $0.0 \le \text{top\_p} \le 1.0$ (Default: 0.9).
-- **`max_tokens`**: Integer where $1 \le \text{max\_tokens} \le 32768$ and $\text{max\_tokens} \le n\_ctx$ of the active model (Default: 256).
-- **`model`**: Optional string. If specified and different from the active model, triggers an automatic transactional hot-swap if present in `models/`.
-- **`stream`**: Boolean flag indicating unary response or SSE token streaming (Default: `true`).
-- Single-message inputs containing existing ChatML (`<|im_start|>`) or `[INST]` markers are passed directly without re-templating.
+### Parameter Validation Rules
+- **`messages`**: Array of `ChatMessage` objects. Must contain at least one item.
+  - `role`: Must be one of `"system"`, `"user"`, `"assistant"`, `"tool"`, `"function"`.
+  - `content`: Non-empty string (whitespace-only rejected with 422).
+- **`temperature`**: Finite float where `0.0 <= temperature <= 2.0` (Default: `0.7`).
+- **`top_p`**: Finite float where `0.0 <= top_p <= 1.0` (Default: `0.9`).
+- **`max_tokens`**: Integer where `1 <= max_tokens <= 32768` and `prompt_tokens + max_tokens <= n_ctx` (Default: `256`).
+- **`model`**: Optional string. If specified and different from the active model, triggers a transactional model hot-swap if the target `.gguf` exists in `models/`.
+- **`stream`**: Boolean flag indicating unary JSON response or SSE token streaming (Default: `true`).
+- **`session_id`**: Optional 64-bit integer monotonically identifying the conversation turn.
 
 ### Non-Streaming Response (`"stream": false`)
 ```json
@@ -80,51 +98,64 @@ Primary chat generation endpoint. Routes `/api/chat` and `/api/chat/stream` poin
   "object": "chat.completion",
   "created": 1726400000,
   "model": "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
-  "choices": [
-    {
+  "choices": [{
       "index": 0,
       "message": {
         "role": "assistant",
-        "content": "Zero-weight pipelined inference distributes model layers..."
+        "content": "Zero-weight pipelined inference aggregates distributed GPUs by keeping weights strictly local..."
       },
       "finish_reason": "stop"
     }
-  ]
+  ],
+  "usage": {
+    "prompt_tokens": 18,
+    "completion_tokens": 84,
+    "total_tokens": 102
+  }
 }
 ```
 
 ### Streaming Response (`"stream": true`, `text/event-stream`)
-Chunks are processed via an internal `Utf8StreamAccumulator` to avoid splitting multi-byte UTF-8 codepoints across boundaries. Fields with `None` values (such as `role` and `finish_reason`) are omitted from intermediate chunk serialization via `#[serde(skip_serializing_if = "Option::is_none")]`. The stream terminates upon channel close (EOF).
+Intermediate tokens are emitted via an internal `Utf8StreamAccumulator` ensuring multi-byte UTF-8 codepoints (such as emojis or complex symbols) are never split across SSE chunk boundaries.
 
 ```text
 data: {"id":"chatcmpl-1726400000000","object":"chat.completion.chunk","created":1726400000,"model":"DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf","choices":[{"index":0,"delta":{"content":"Zero"}}]}
 
 data: {"id":"chatcmpl-1726400000000","object":"chat.completion.chunk","created":1726400000,"model":"DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf","choices":[{"index":0,"delta":{"content":"-weight"}}]}
-```
 
-### cURL Examples
+data: {"id":"chatcmpl-1726400000000","object":"chat.completion.chunk","created":1726400000,"model":"DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf","choices":[{"index":0,"delta":{"content":" pipelined"}}]}
 
-#### Unary Non-Streaming Call
-```powershell
-curl.exe -s http://127.0.0.1:8080/v1/chat/completions `
-  -H "Content-Type: application/json" `
-  -H "Authorization: Bearer $env:AEROMESH_API_KEY" `
-  -d "{\"model\":\"DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf\",\"messages\":[{\"role\":\"user\",\"content\":\"Ping\"}],\"stream\":false}"
-```
-
-#### Streaming Call (-N disables output buffering)
-```powershell
-curl.exe -sN http://127.0.0.1:8080/v1/chat/completions `
-  -H "Content-Type: application/json" `
-  -H "Authorization: Bearer $env:AEROMESH_API_KEY" `
-  -d "{\"messages\":[{\"role\":\"user\",\"content\":\"Count 1 to 5\"}],\"stream\":true}"
+data: [DONE]
 ```
 
 ---
 
-## 3. GET /v1/models
+## 3. POST /api/chat/abort
 
-Enumerates all `.gguf` files present in the `models/` directory, identifying the active model via `is_active`.
+Atomically halts active token generation across all cluster nodes and flushes transient context KV states.
+
+**Headers**:
+- `Authorization: Bearer <key>`
+
+### Request
+```powershell
+curl.exe -s -X POST http://127.0.0.1:8080/api/chat/abort `
+  -H "Authorization: Bearer $env:AEROMESH_API_KEY"
+```
+
+### Response (200 OK)
+```json
+{
+  "status": "aborted",
+  "message": "Active generation halted successfully"
+}
+```
+
+---
+
+## 4. GET /v1/models
+
+Lists all monolithic base `.gguf` model files located in the `models/` directory. Internal ephemeral stage slice files (such as `.aeromesh_ephemeral_*`) are automatically filtered out.
 
 ```powershell
 curl.exe -s http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $env:AEROMESH_API_KEY"
@@ -134,8 +165,7 @@ curl.exe -s http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $env:AEROM
 ```json
 {
   "object": "list",
-  "data": [
-    {
+  "data": [{
       "id": "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
       "object": "model",
       "created": 1726400000,
@@ -143,7 +173,7 @@ curl.exe -s http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $env:AEROM
       "is_active": true
     },
     {
-      "id": "qwen2.5-0.5b-instruct.gguf",
+      "id": "test.gguf",
       "object": "model",
       "created": 1726400000,
       "owned_by": "local_disk",
@@ -155,68 +185,58 @@ curl.exe -s http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $env:AEROM
 
 ---
 
-## 4. POST /api/model/switch (alias /v1/models/load)
+## 5. POST /api/model/switch (alias /v1/models/load)
 
-Executes transactional model switching. If loading the target model fails, the previous model remains bound without pointer deallocation or dangling memory references (CRASH-01).
+Executes transactional model switching across the cluster. If loading the target model fails, the previous model context remains active without memory deallocation or dangling native C++ FFI pointers.
 
-### Request
-```powershell
-curl.exe -s -X POST http://127.0.0.1:8080/api/model/switch `
-  -H "Content-Type: application/json" `
-  -H "Authorization: Bearer $env:AEROMESH_API_KEY" `
-  -d "{\"model\":\"qwen2.5-0.5b-instruct.gguf\"}"
+### Request Body
+```json
+{
+  "model": "test.gguf"
+}
 ```
 
 ### Success Response (200 OK)
 ```json
 {
   "status": "ok",
-  "active_model": "qwen2.5-0.5b-instruct.gguf",
-  "total_layers": 24,
-  "hidden_dim": 896
+  "active_model": "test.gguf",
+  "total_layers": 28,
+  "hidden_dim": 3072
 }
 ```
 
-> **Note**: On failure, this endpoint returns a plain text status message accompanied by HTTP 404 (file missing) or HTTP 500 (load failure).
-
 ---
 
-## 5. GET /health (Authentication Exempt)
+## 6. GET /health & GET /ready (Health Probes)
 
-High-frequency readiness and liveness probe for cluster monitors and load balancers. Rate-limited to 60 requests per minute (FIX-08).
+High-frequency readiness and liveness probes for monitoring and load balancers. Rate-limited to 60 requests per minute.
 
 ```powershell
-curl.exe -si http://127.0.0.1:8080/health
+# Probe gateway liveness
+curl.exe -si http://127.0.0.1:7860/health
+
+# Probe end-to-end readiness
+curl.exe -si http://127.0.0.1:7860/ready
 ```
 
-| Coordinator Status | HTTP Code | Returned `state` |
-|---|---|---|
-| `CoordinatorStatus::Ready` | **200** | `online_idle` |
-| Active token generation lock held | **200** | `online_generating` |
-| `CoordinatorStatus::Loading(_)` | **503** | `model_loading` |
-| `CoordinatorStatus::Failed(_)` | **503** | `model_failed` |
-| `CoordinatorStatus::Closed` | **503** | `model_closed` |
-
-### Response Format
-```json
-{
-  "status": "ok",
-  "state": "online_idle",
-  "service": "aeromesh-coordinator"
-}
-```
+| Route | Upstream Condition | Status Code | Returned Body |
+|:---|:---|:---:|:---|
+| `/health` | Gateway process running | **200** | `{"status": "ok", "state": "online_idle"}` |
+| `/ready` | Axum coordinator online | **200** | `{"status": "ready", "backend": "ok"}` |
+| `/ready` | Axum coordinator stopped | **503** | `{"status": "degraded", "backend": "unreachable"}` |
 
 ---
 
-## 6. GET /api/cluster/status
+## 7. GET /api/cluster/status & /api/cluster/discover
 
-Returns telemetry, inter-node latency, and tensor shape metadata consumed by the Claymorphic HUD.
+Returns active cluster topology, Direct WireGuard tunnel quality, inter-node round-trip latency, and wire payload compression metrics.
 
 ```powershell
 curl.exe -s http://127.0.0.1:8080/api/cluster/status -H "Authorization: Bearer $env:AEROMESH_API_KEY"
 ```
 
-### Response Format (Distributed P2P Mode)
+### Response Format (Distributed P2P WireGuard Mode)
 ```json
 {
   "state": "online_idle",
@@ -228,18 +248,18 @@ curl.exe -s http://127.0.0.1:8080/api/cluster/status -H "Authorization: Bearer $
   "is_direct_wireguard": true,
   "rtt_ms": 1.14,
   "link_badge": "Direct WireGuard (P2P Mesh)",
-  "per_token_kb": "5.04 KB/tok",
-  "quantization": "Per-Row INT8 Dynamic Scaling (75% Wire Reduction)",
+  "per_token_kb": "5.05 KB/tok",
+  "quantization": "Outlier-Preserving INT8 (Top-8 FP32 + INT8 Row)",
   "coordinator": {
     "model": "models/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
-    "local_layers": "0..=23",
+    "local_layers": "0..=22",
     "total_layers": 48,
     "hidden_dim": 5120,
     "transport": "Tailscale Direct WireGuard"
   },
   "local_stage": {
     "layer_start": 0,
-    "layer_end": 23
+    "layer_end": 22
   },
   "total_layers": 48,
   "hidden_dim": 5120,
@@ -249,31 +269,61 @@ curl.exe -s http://127.0.0.1:8080/api/cluster/status -H "Authorization: Bearer $
 }
 ```
 
-> **Note**: When operating in standalone single-machine loopback mode, the payload shifts to `"transport": "Intra-Host Shared Memory (SHM)"`, `"link_badge": "SHM Ring Buffer (Loopback)"`, `"rtt_ms": 0.1`, and `"nodes_count": 1`.
+---
+
+## 8. Node Lifecycle Management (/api/node/start, /stop, /state)
+
+Enables remote orchestrators to inspect and command background node processes.
+
+### GET /api/node/state
+Returns local node daemon state, active model, process ID, and port allocations.
+
+### POST /api/node/start
+Starts a local background coordinator or worker node process.
+```json
+{
+  "role": "worker",
+  "model": "models/test.gguf",
+  "port": 50052
+}
+```
+
+### POST /api/node/stop
+Gracefully halts local child node processes.
 
 ---
 
-## 7. Gateway Proxy Architecture (`app.py` :7860)
+## 9. POST /v1/images/generations & /api/image/stream
 
-The FastAPI web gateway (`app.py`) serves the single-page application and acts as an authenticated reverse proxy to the direct Axum coordinator API on port `8080`.
+Procedural Diffusion Transformer (DiT) / Stable Diffusion image generation pipeline.
 
-### Security & Ingress Guards
-- **Loopback Enforcement & Auth**: The `verify_gateway_access` dependency permits loopback clients (`127.0.0.1` / `::1`) by default. External LAN/WAN requests must provide `Authorization: Bearer <AEROMESH_GATEWAY_API_KEY>`; if `AEROMESH_GATEWAY_API_KEY` is not configured, the gateway fails closed (`401 Unauthorized`) for all non-loopback connections.
-- **Credential Stripping & Injection**: Any caller-supplied `Authorization` header is stripped before the gateway injects the canonical `Authorization: Bearer <AEROMESH_API_KEY>` upstream to port `8080`, preventing token collisions or caller impersonation.
-- **Payload Bound**: Request payloads are bounded by a `MAX_REQUEST_BYTES = 2_097_152` (2 MB) ceiling to eliminate memory exhaustion attacks.
+**Headers**:
+- `Content-Type: application/json`
+- `Authorization: Bearer <key>`
 
-### Full Gateway Route Surface
-| Endpoint | Method | Auth | Description |
-|---|---|---|---|
-| `/` | `GET` | Loopback / Gateway Key | Serves the cached single-page chat dashboard (`index.html`) |
-| `/static/*` | `GET` | Public | Static CSS (`liquid_glass.css`), JS (`app.js`, `liquid_mesh.js`), and assets with `Cache-Control: public, max-age=3600` |
-| `/health` | `GET` | Public | Gateway health check returning JSON status and upstream coordinator backend reachability |
-| `/ready` | `GET` | Public | Readiness probe returning `200 OK` when backend coordinator is online, or `503 Service Unavailable` when offline |
-| `/v1/models` | `GET` | Loopback / Gateway Key | Upstream models proxy; falls back to offline model discovery from `models/*.gguf` with `created` and `is_active` fields |
-| `/v1/chat/completions` | `POST` | Loopback / Gateway Key | OpenAI-compatible chat completion proxy with credential injection |
-| `/api/chat` | `POST` | Loopback / Gateway Key | Alias route for `/v1/chat/completions` |
-| `/api/chat/stream` | `POST` | Loopback / Gateway Key | Real-time SSE streaming chat route with infinite read timeout for long generations |
-| `/api/chat/abort` | `POST` | Loopback / Gateway Key | Signals generation abort to Axum backend, triggering instant cancellation of decode loop |
-| `/api/model/switch` | `POST` | Loopback / Gateway Key | Forwards model hot-swap and layer-slice repartition commands upstream |
-| `/api/cluster/status` | `GET` | Loopback / Gateway Key | Telemetry proxy reporting node connectivity, RTT, and tensor dimensions |
-| `/v1/{path:path}` | Any | Loopback / Gateway Key | Catch-all forwarder for arbitrary OpenAI API routes |
+### Request Body
+```json
+{
+  "prompt": "Cyberpunk terminal displaying glowing distributed neural network nodes, 8k resolution, cinematic lighting",
+  "steps": 4,
+  "width": 512,
+  "height": 512,
+  "stream": true
+}
+```
+
+### SSE Streaming Events
+When `stream: true`, the endpoint streams status events as the distributed mesh conditions the prompt and generates intermediate latents:
+1. `event: dit_mesh_conditioning` (Coordinator layer split and prompt enhancement)
+2. `event: dit_generation_progress` (Denoising step counter)
+3. `event: dit_output` (Final base64 encoded PNG image)
+
+---
+
+## 10. Gateway Reverse Proxy & Header Stripping Architecture
+
+The Python FastAPI gateway (`app.py` :7860) enforces strict HTTP proxy isolation:
+- **`MAX_REQUEST_BYTES = 8388608` (8 MB)**: Prevents denial-of-service memory exhaustion on large prompts or images.
+- **RFC 7230 Hop-by-Hop Filter**: Strips `Connection`, `Keep-Alive`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailers`, `Transfer-Encoding`, and `Upgrade` headers.
+- **Upstream Credential Injection**: Strips any caller-supplied `Authorization` header, injecting the canonical `Authorization: Bearer <AEROMESH_API_KEY>` secret before forwarding to the Axum backend on `:8080`.
+- **Unbuffered SSE Passthrough**: Injects `Cache-Control: no-cache` and `X-Accel-Buffering: no` with an infinite read timeout (`httpx.Timeout(read=None)`).

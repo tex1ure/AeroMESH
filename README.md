@@ -29,25 +29,24 @@
   </p>
 
   <p align="center">
-    <a href="#quickstart-in-60-seconds"> Quickstart</a> •
-    <a href="#system-architecture"> Architecture</a> •
-    <a href="#screenshots--ui-showcase"> Screenshots</a> •
-    <a href="#core-engineering-deep-dives"> Deep Dives</a> •
-    <a href="#empirical-benchmarks--real-hardware-telemetry"> Benchmarks</a> •
-    <a href="#binary-wire-protocol-specification-protocol-v4"> Protocol Spec</a> •
-    <a href="#cli-command-reference"> CLI Reference</a> •
-    <a href="#rest-api--web-interface"> API Spec</a>
+    <a href="#quickstart-in-60-seconds">Quickstart</a> •
+    <a href="#system-architecture">Architecture</a> •
+    <a href="#screenshots--ui-showcase">Screenshots</a> •
+    <a href="#core-engineering-deep-dives">Deep Dives</a> •
+    <a href="#empirical-benchmarks--real-hardware-telemetry">Benchmarks</a> •
+    <a href="#binary-wire-protocol-specification-protocol-v4">Protocol Spec</a> •
+    <a href="#cli-command-reference">CLI Reference</a> •
+    <a href="#rest-api--web-interface">API Spec</a>
   </p>
 
-  <a href="docs/screenshots/01-chat-workspace.png">
-    <img src="docs/screenshots/01-chat-workspace.png" alt="AeroMESH Workspace" width="94%" style="border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 12px 40px rgba(0,0,0,0.6);" />
+  <a href="docs/screenshots/03-streaming-inference.jpg"><img src="docs/screenshots/03-streaming-inference.jpg" alt="AeroMESH Live Distributed Streaming at 41.7 tok/s" width="94%" style="border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 12px 40px rgba(0,0,0,0.6);" />
   </a>
 
 </div>
 
 ---
 
-##  Table of Contents
+## Table of Contents
 
 - [Executive Summary & The Problem](#executive-summary--the-problem)
 - [Architectural Comparison: AeroMESH vs Traditional Systems](#architectural-comparison)
@@ -104,7 +103,7 @@
 
 ---
 
-##  Executive Summary & The Problem
+## Executive Summary & The Problem
 
 State-of-the-art open-weight LLMs (such as DeepSeek-R1 14B, Qwen-2.5 14B/32B, and Llama-3.1 70B) exceed the dedicated Video RAM (VRAM) of standard consumer hardware. A typical gaming laptop or creative workstation packs between **6 GB and 8 GB of VRAM** (e.g., NVIDIA GeForce RTX 4060, RTX 3070 Laptop, RTX 2060). Running a quantized 14-billion parameter model requires at least **9.0 GB to 10.5 GB of VRAM**—triggering catastrophic host memory paging, thrashing system RAM, and collapsing inference speeds down to 0.1 tokens per second.
 
@@ -113,7 +112,7 @@ Existing distributed inference frameworks fail to solve this problem over consum
 - **Stock llama.cpp GGML RPC** broadcasts entire multi-gigabyte model weights across the network upon initialization or node restart, saturating consumer uplinks and causing 5–15 minute cold-start delays.
 - **Weight-Streaming & Naive Slicers (Exo, Petals)** either stream multi-gigabyte layers continuously during generation or permanently duplicate `_stage1.gguf` and `_stage2.gguf` slice files onto local SSDs, wasting 15–30 GB of storage per model.
 
-###  The AeroMESH Breakthrough: Zero-Weight Pipeline Inference
+### The AeroMESH Breakthrough: Zero-Weight Pipeline Inference
 
 AeroMESH changes the distributed boundary by introducing **Deterministic Symmetric Slicing with Compressed Intermediate Activation Streaming**:
 
@@ -124,7 +123,7 @@ AeroMESH changes the distributed boundary by introducing **Deterministic Symmetr
 
 ---
 
-##  Architectural Comparison
+## Architectural Comparison
 
 | Dimension / Metric | AeroMESH (Protocol v4) | llama.cpp RPC | Exo / Petals | Tensor Parallelism (vLLM) |
 |---|---|---|---|---|
@@ -139,56 +138,68 @@ AeroMESH changes the distributed boundary by introducing **Deterministic Symmetr
 
 ---
 
-##  Screenshots & UI Showcase
+## Screenshots & UI Showcase
 
-AeroMESH features an integrated, dependency-free dark **Claymorphic Liquid Glass SPA** (`static/index.html`) engineered with zero external NPM bundles. It offers sub-millisecond SSE token streaming, LaTeX math typesetting via KaTeX, code block syntax highlighting, and an active cluster topology telemetry HUD.
+AeroMESH features an integrated, high-performance dark **Claymorphic Liquid Glass SPA** (`static/index.html`) engineered with zero external NPM runtime bundles. It combines real-time P2P WireGuard telemetry, sub-millisecond SSE token streaming, syntax highlighting, LaTeX math formatting via KaTeX, and multi-modal distributed Diffusion (DiT) synthesis.
+
+### 1. Live Distributed Streaming & Multi-Modal Diffusion
 
 <table>
   <tr>
-    <th width="50%" align="center"><b>Chat Workspace &amp; Reasoning Accordion</b></th>
-    <th width="50%" align="center"><b>Real-Time Token Streaming &amp; Math Rendering</b></th>
+    <th width="50%" align="center"><b>Real-Time Distributed Streaming (41.7 tok/s)</b></th>
+    <th width="50%" align="center"><b>Distributed 2-Node Diffusion (DiT) Studio</b></th>
   </tr>
   <tr>
     <td align="center">
-      <a href="docs/screenshots/01-chat-workspace.png">
-        <img src="docs/screenshots/01-chat-workspace.png" alt="AeroMESH Chat Workspace" width="100%" />
+      <a href="docs/screenshots/03-streaming-inference.jpg"><img src="docs/screenshots/03-streaming-inference.jpg" alt="AeroMESH Streaming Response at 41.7 tok/s" width="100%" />
       </a>
       <br />
-      <sub><b>Figure 1:</b> Chat workspace with model selector, DeepSeek-R1 <code>&lt;think&gt;</code> accordion, and instant generation stop control.</sub>
+      <sub><b>Figure 1: Real-Time Distributed LLM Token Generation.</b> Generating high-throughput CUDA tensor core code across two RTX 4060 laptops over Wi-Fi. Telemetry shows <b>41.7 tok/s</b>, <b>0.46 MB total wire transfer</b>, and <b>3.09 KB/tok</b> Outlier-INT8 payload with active abort control.</sub>
     </td>
     <td align="center">
-      <a href="docs/screenshots/03-streaming-response.png">
-        <img src="docs/screenshots/03-streaming-response.png" alt="AeroMESH Streaming Response" width="100%" />
+      <a href="docs/screenshots/05-distributed-diffusion.jpg"><img src="docs/screenshots/05-distributed-diffusion.jpg" alt="AeroMESH Distributed Diffusion Pipeline" width="100%" />
       </a>
       <br />
-      <sub><b>Figure 2:</b> Sub-millisecond SSE token streaming with KaTeX LaTeX math formatting and Highlight.js syntax highlighting.</sub>
-    </td>
-  </tr>
-  <tr>
-    <th width="50%" align="center"><b>Zero-Weight Model Slicer &amp; VRAM Allocator</b></th>
-    <th width="50%" align="center"><b>Cluster Telemetry &amp; Topology HUD</b></th>
-  </tr>
-  <tr>
-    <td align="center">
-      <a href="docs/screenshots/02-model-loading.png">
-        <img src="docs/screenshots/02-model-loading.png" alt="Model Slicing Panel" width="100%" />
-      </a>
-      <br />
-      <sub><b>Figure 3:</b> Dynamic layer partitioner assigning layers across nodes with zero SSD duplication (0.0 MB overhead).</sub>
-    </td>
-    <td align="center">
-      <a href="docs/screenshots/04-cluster-hud.png">
-        <img src="docs/screenshots/04-cluster-hud.png" alt="Cluster HUD Telemetry" width="100%" />
-      </a>
-      <br />
-      <sub><b>Figure 4:</b> Live cluster telemetry HUD displaying Direct WireGuard link status, round-trip ping (1.14 ms), and wire compression metrics.</sub>
+      <sub><b>Figure 2: Distributed 2-Node DiT / Stable Diffusion.</b> Stage 1 (Coordinator) executes prompt conditioning and UNet upper blocks; Stage 2 (Worker) evaluates lower blocks and VAE decode (<code>DreamShaper_8_pruned.safetensors</code>) with <b>0.0 MB weights on wire</b>.</sub>
     </td>
   </tr>
 </table>
 
+### 2. Node Control Center & Live Topology HUD
+
+<table>
+  <tr>
+    <th width="50%" align="center"><b>Unified Node Control Center &amp; Launcher</b></th>
+    <th width="50%" align="center"><b>Cluster Topology &amp; WireGuard Telemetry</b></th>
+  </tr>
+  <tr>
+    <td align="center">
+      <a href="docs/screenshots/01-node-control-center.jpg"><img src="docs/screenshots/01-node-control-center.jpg" alt="AeroMESH Node Control Center" width="100%" />
+      </a>
+      <br />
+      <sub><b>Figure 3: Unified Node Control Center.</b> Live GPU VRAM probe (RTX 4060 8GB), local Wi-Fi / Tailscale IP discovery, and 1-click role launch buttons (Role 1 Coordinator, Role 2 Dedicated Worker, Role 3 Full Local Mesh).</sub>
+    </td>
+    <td align="center">
+      <a href="docs/screenshots/04-cluster-topology.jpg"><img src="docs/screenshots/04-cluster-topology.jpg" alt="AeroMESH Cluster Topology Modal" width="100%" />
+      </a>
+      <br />
+      <sub><b>Figure 4: Cluster Topology &amp; Link Telemetry.</b> Modal displaying active P2P Direct WireGuard link (<b>1.14 ms RTT</b>), layer allocation split (Stage 1: <code>0..13</code>, Stage 2: <code>14..27</code> + LM head), and 3.09 KB/tok wire rate.</sub>
+    </td>
+  </tr>
+</table>
+
+### 3. Liquid Glass Chat Workspace & Central Hub
+
+<div align="center">
+  <a href="docs/screenshots/02-chat-workspace.png"><img src="docs/screenshots/02-chat-workspace.png" alt="AeroMESH Liquid Glass Chat Workspace" width="100%" style="border-radius: 8px; border: 1px solid rgba(255,255,255,0.1);" />
+  </a>
+  <br />
+  <sub><b>Figure 5: Central Workspace &amp; Quick Prompt Matrix.</b> Clean desktop interface showing 1-click starter prompts, model selector (<code>test.gguf</code>), multi-modal action bar (Reasoning trace, Image Mode DiT, Max Tokens, Reset KV), and persistent real-time telemetry sidebar.</sub>
+</div>
+
 ---
 
-##  System Architecture
+## System Architecture
 
 ### Distributed Cluster Topology
 
@@ -283,7 +294,7 @@ sequenceDiagram
 
 ---
 
-##  Core Engineering Deep Dives
+## Core Engineering Deep Dives
 
 ### 1. Ephemeral VRAM Stage Loading & The Identity RMSNorm Solution
 
@@ -420,7 +431,7 @@ To prevent numerical runaway before generation begins, `aeromesh_core::inspect_a
 
 ---
 
-##  Binary Wire Protocol Specification (Protocol v4)
+## Binary Wire Protocol Specification (Protocol v4)
 
 AeroMESH communicates over TCP using binary frames encoded with **Big-Endian byte order** for all multi-byte integers.
 
@@ -470,7 +481,7 @@ Before any activation frames are streamed, nodes complete a mutual cryptographic
 
 ---
 
-##  Empirical Benchmarks & Real Hardware Telemetry
+## Empirical Benchmarks & Real Hardware Telemetry
 
 **Benchmark Environment**:
 - **Coordinator (Node A)**: Laptop with NVIDIA GeForce RTX 4060 Laptop GPU (8 GB VRAM), Intel Core i7-13700H, Windows 11 x64.
@@ -483,9 +494,9 @@ Before any activation frames are streamed, nodes complete a mutual cryptographic
 |:---|:---:|:---|
 | **Base Model** | `test.gguf` (3.19 GB, Q8_0) | 28 Transformer Layers, $d_{\text{model}} = 3072$ |
 | **Pipeline Partition** | Stage 1: `0..13` • Stage 2: `14..27` + Head | Full CUDA GPU Offload (`ngl = 999`) |
-| **Sustained Throughput** | **24.9 tok/s** (~40.1 ms / token) | Verified in Web UI & Coordinator telemetry |
+| **Sustained Throughput** | **24.9 – 41.7 tok/s** (~24.0 – 40.1 ms / token) | Verified in Web UI & Coordinator telemetry (peak 41.7 tok/s) |
 | **Activation Codec** | `Int8PerRow` (Outlier-Preserving INT8) | 3,072 B + 4 B scale + 48 B outliers |
-| **Per-Token Wire Payload** | **3.05 KB / token** (3,124 B + 44 B header) | **74.6% reduction** vs 12.0 KB FP32 |
+| **Per-Token Wire Payload** | **3.05 – 3.09 KB / token** (3,124 B + 44 B header) | **74.6% reduction** vs 12.0 KB FP32 |
 | **Persistent SSD Overhead** | **0.0 MB** | Ephemeral stage auto-deleted upon VRAM load |
 | **Model Weights on Wire** | **0.0 MB** | Pre-positioned base GGUF architecture |
 
@@ -512,7 +523,7 @@ Before any activation frames are streamed, nodes complete a mutual cryptographic
 
 ---
 
-##  Hardware & Model Compatibility
+## Hardware & Model Compatibility
 
 ### Hardware Requirements
 
@@ -535,7 +546,7 @@ Before any activation frames are streamed, nodes complete a mutual cryptographic
 
 ---
 
-##  Quickstart in 60 Seconds
+## Quickstart in 60 Seconds
 
 ### Prerequisites
 
@@ -589,7 +600,7 @@ Stop-Process -Name "aeromesh" -Force -ErrorAction SilentlyContinue
 
 ---
 
-##  Cluster Deployment Modes
+## Cluster Deployment Modes
 
 ### Mode A: Interactive All-in-One Launcher (`start.ps1`)
 
@@ -666,7 +677,7 @@ This launches `AeroMesh-Desktop.exe` which embeds the entire coordinator, worker
 
 ---
 
-##  CLI Command Reference
+## CLI Command Reference
 
 The unified `aeromesh` CLI manages all cluster nodes, model inspections, and network diagnostics:
 
@@ -707,7 +718,7 @@ aeromesh serve --model models/test.gguf --peers 100.64.0.11:50052 --port 8080
 
 ---
 
-##  REST API & Web Interface
+## REST API & Web Interface
 
 The coordinator exposes an OpenAI-compliant REST API compatible with official SDKs:
 
@@ -737,8 +748,7 @@ client = openai.OpenAI(
 
 response = client.chat.completions.create(
     model="DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
-    messages=[
-        {"role": "system", "content": "You are a helpful distributed AI assistant."},
+    messages=[{"role": "system", "content": "You are a helpful distributed AI assistant."},
         {"role": "user", "content": "Explain how Outlier-Preserving INT8 quantization works in KaTeX format."}
     ],
     temperature=0.6,
@@ -759,7 +769,7 @@ AeroMESH includes an integrated diffusion pipeline (`POST /v1/images/generations
 
 ---
 
-##  Configuration & Security Architecture
+## Configuration & Security Architecture
 
 ### Environment Variables (`.env`)
 
@@ -787,7 +797,7 @@ AeroMESH implements defense-in-depth security:
 
 ---
 
-##  Troubleshooting & Operational Runbook
+## Troubleshooting & Operational Runbook
 
 ### 1. `Access is denied (os error 5)` during `cargo build`
 - **Cause**: An active instance of `aeromesh.exe` is currently running in the background.
@@ -817,7 +827,7 @@ AeroMESH implements defense-in-depth security:
 
 ---
 
-##  Project Directory Layout
+## Project Directory Layout
 
 ```
 AeroMESH/
@@ -872,7 +882,7 @@ AeroMESH/
 
 ---
 
-##  Roadmap & Engineering Milestones
+## Roadmap & Engineering Milestones
 
 - [x] **Zero-Weight Pipeline Slicing (`InPlaceStageGuard`)**: 0.0 MB disk overhead via ephemeral VRAM loading.
 - [x] **Identity RMSNorm Injection**: Elimination of the double-normalization distortion on non-terminal stages.
@@ -881,14 +891,14 @@ AeroMESH/
 - [x] **Windows Job Object Containment**: Automatic kernel reclamation of child GPU processes on coordinator exit.
 - [x] **Liquid Glass Claymorphic SPA**: Integrated dark UI with KaTeX math and DeepSeek-R1 `<think>` accordion.
 - [x] **Unified Windows Desktop Studio (`AeroMesh-Desktop.exe`)**: Standalone frameless desktop experience.
-- [ ] **Dynamic Pipeline Rebalancing**: Auto-adjusting layer boundary splits in real-time based on live GPU thermal and VRAM telemetry.
-- [ ] **Local P2P BitTorrent Pre-Seeding**: Automated peer-to-peer distribution of base GGUF models across local mesh nodes.
-- [ ] **Speculative Cross-Node Decoding**: Small draft model running on Node A with large target model verification on Node B.
-- [ ] **Cross-Platform Process Isolation**: POSIX `cgroups v2` and macOS sandbox containment abstractions.
+- [] **Dynamic Pipeline Rebalancing**: Auto-adjusting layer boundary splits in real-time based on live GPU thermal and VRAM telemetry.
+- [] **Local P2P BitTorrent Pre-Seeding**: Automated peer-to-peer distribution of base GGUF models across local mesh nodes.
+- [] **Speculative Cross-Node Decoding**: Small draft model running on Node A with large target model verification on Node B.
+- [] **Cross-Platform Process Isolation**: POSIX `cgroups v2` and macOS sandbox containment abstractions.
 
 ---
 
-##  Contributing & Development
+## Contributing & Development
 
 Contributions to AeroMESH are welcome! Please review our [CONTRIBUTING.md](CONTRIBUTING.md) guide and [SECURITY.md](SECURITY.md) guidelines before submitting pull requests.
 
@@ -908,7 +918,7 @@ Contributions to AeroMESH are welcome! Please review our [CONTRIBUTING.md](CONTR
 
 ---
 
-##  License & Acknowledgments
+## License & Acknowledgments
 
 AeroMESH is free and open-source software distributed under the terms of the **Apache License (Version 2.0)**. See the [LICENSE](LICENSE) file for complete terms.
 
