@@ -34,44 +34,18 @@
     before app.js runs, and DOMPurify must be available before any model output
     is rendered.
   -->
-  <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"
-          integrity="sha384-hJnF5AwidE18GSWTAGHv3ByzzvfNZ1Tcx5y1UUV3WkauuMCEzBJBMSwSt/PUPXnM"
-          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <meta name="aeromesh-session-token" content="">
 
-  <!-- marked: Markdown parsing -->
-  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
-          integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
-          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-
-  <!-- marked-highlight: restores syntax highlighting (removed from marked core in v5) -->
-  <script src="https://cdn.jsdelivr.net/npm/marked-highlight@2.2.1/lib/index.umd.js"
-          integrity="sha384-BjBE0bY2PIGsLgdqaC1+iwO397c7jxwJdNszWabXYxrbMXBTS9QCPxXJElH8xOE/"
-          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-
-  <!-- DOMPurify: sanitizes model output before it reaches the DOM -->
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"
-          integrity="sha384-eEu5CTj3qGvu9PdJuS+YlkNi7d2XxQROAFYOr59zgObtlcux1ae1Il3u7jvdCSWu"
-          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-
-  <!-- Highlight.js for syntax highlighting -->
-  <link rel="stylesheet"
-        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css"
-        integrity="sha384-oaMLBGEzBOJx3UHwac0cVndtX5fxGQIfnAeFZ35RTgqPcYlbprH9o9PUV/F8Le07"
-        crossorigin="anonymous" referrerpolicy="no-referrer">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"
-          integrity="sha384-F/bZzf7p3Joyp5psL90p/p89AZJsndkSoGwRpXcZhleCWhd8SnRuoYo4d0yirjJp"
-          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-
-  <!-- KaTeX for LaTeX math support -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"
-        integrity="sha384-n8MVd4RsNIU0tAv4ct0nTaAbDJwPJzDEaqSD1odI+WdtXRGWt2kTvGFasHpSy3SV"
-        crossorigin="anonymous" referrerpolicy="no-referrer">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"
-          integrity="sha384-XjKyOOlGwcjNTAIQHIpgOno0Hl1YQqzUOEleOLALmuqehneUG+vnGctmUb0ZY0l8"
-          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
-          integrity="sha384-+VBxd3r6XgURycqtZ117nYw44OOcIax56Z4dCRWbxyPt0Koah1uHoK0o4+/RRE05"
-          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <!-- Offline Bundled Vendor Libraries (Zero External CDN Dependencies) -->
+  <script src="/static/vendor/js/lucide.min.js"></script>
+  <script src="/static/vendor/js/marked.min.js"></script>
+  <script src="/static/vendor/js/marked-highlight.min.js"></script>
+  <script src="/static/vendor/js/dompurify.min.js"></script>
+  <link rel="stylesheet" href="/static/vendor/css/atom-one-dark.min.css">
+  <script src="/static/vendor/js/highlight.min.js"></script>
+  <link rel="stylesheet" href="/static/vendor/css/katex.min.css">
+  <script defer src="/static/vendor/js/katex.min.js"></script>
+  <script defer src="/static/vendor/js/auto-render.min.js"></script>
 
   <!-- AeroMESH Kimi Desktop Design System -->
   <link rel="stylesheet" href="/static/css/liquid_glass.css?v=kimi5">
@@ -313,6 +287,221 @@
 <!-- ====================================================================
      DYNAMIC CLUSTER TELEMETRY & TOPOLOGY MODAL
      ==================================================================== -->
+<!-- ====================================================================
+     FIRST-RUN ONBOARDING WIZARD MODAL (Kimi Dark Matte + Lucide Only)
+     ==================================================================== -->
+<div class="modal-backdrop" id="onboarding-modal" style="display: none;">
+  <div class="clay-modal onboarding-modal-card">
+    <div class="modal-header onboarding-header-bar">
+      <div class="modal-title onboarding-modal-title">
+        <img src="/static/img/aeromesh_emblem.png" alt="AeroMESH Logo" style="width: 22px; height: 22px; object-fit: contain;">
+        <span>AeroMESH Unified Onboarding Wizard</span>
+      </div>
+      <button class="modal-close-btn" id="btn-close-onboarding" title="Close Wizard" style="display: none;">
+        <i data-lucide="x"></i>
+      </button>
+    </div>
+
+    <!-- Stepper Navigation -->
+    <div class="onboarding-stepper">
+      <div class="step-indicator active" id="step-dot-1">
+        <span class="step-num">1</span>
+        <span class="step-label">Diagnostics</span>
+      </div>
+      <div class="step-line" id="step-line-1"></div>
+      <div class="step-indicator" id="step-dot-2">
+        <span class="step-num">2</span>
+        <span class="step-label">Models (Opt-In)</span>
+      </div>
+      <div class="step-line" id="step-line-2"></div>
+      <div class="step-indicator" id="step-dot-3">
+        <span class="step-num">3</span>
+        <span class="step-label">Role Launch</span>
+      </div>
+    </div>
+
+    <!-- STEP 1: Environment & Dependency Check -->
+    <div id="onboarding-step-1" class="onboarding-step-panel">
+      <div class="panel-header-box">
+        <h3 class="panel-title">System & Runtime Verification</h3>
+        <p class="panel-desc">Auto-verifying CUDA runtime, GPU VRAM, token credentials, and network mesh interfaces.</p>
+      </div>
+      
+      <div class="diag-grid">
+        <div class="diag-card">
+          <div class="diag-icon-box"><i data-lucide="cpu"></i></div>
+          <div class="diag-info">
+            <div class="diag-label">GPU Acceleration</div>
+            <div class="diag-val" id="diag-gpu-val">Detecting GPU...</div>
+          </div>
+          <div class="diag-status" id="diag-gpu-status"><i data-lucide="loader" class="spin"></i></div>
+        </div>
+
+        <div class="diag-card">
+          <div class="diag-icon-box"><i data-lucide="hard-drive"></i></div>
+          <div class="diag-info">
+            <div class="diag-label">Dedicated VRAM</div>
+            <div class="diag-val" id="diag-vram-val">Checking VRAM capacity...</div>
+          </div>
+          <div class="diag-status" id="diag-vram-status"><i data-lucide="loader" class="spin"></i></div>
+        </div>
+
+        <div class="diag-card">
+          <div class="diag-icon-box"><i data-lucide="shield-check"></i></div>
+          <div class="diag-info">
+            <div class="diag-label">Cluster Credentials</div>
+            <div class="diag-val" id="diag-sec-val">CSPRNG Secrets Active</div>
+          </div>
+          <div class="diag-status ready"><i data-lucide="check-circle-2"></i></div>
+        </div>
+
+        <div class="diag-card">
+          <div class="diag-icon-box"><i data-lucide="network"></i></div>
+          <div class="diag-info">
+            <div class="diag-label">Local & Mesh Network</div>
+            <div class="diag-val" id="diag-net-val">Resolving interfaces...</div>
+          </div>
+          <div class="diag-status" id="diag-net-status"><i data-lucide="loader" class="spin"></i></div>
+        </div>
+      </div>
+
+      <div class="onboarding-footer-row">
+        <div></div>
+        <button id="btn-onboarding-step1-next" class="clay-btn primary" style="padding: 9px 18px; font-weight: 600;">
+          <span>Continue to Model Selection</span> <i data-lucide="arrow-right" style="width: 15px; height: 15px; margin-left: 6px;"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- STEP 2: Opt-In Lightweight Model Picker -->
+    <div id="onboarding-step-2" class="onboarding-step-panel" style="display: none;">
+      <div class="panel-header-box">
+        <h3 class="panel-title">Curated Starter Models (Opt-In)</h3>
+        <p class="panel-desc">Zero forced downloads. Download a lightweight curated model or skip to use your existing local GGUF models.</p>
+      </div>
+
+      <div class="model-opt-grid">
+        <!-- Option A: Qwen 2.5 1.5B -->
+        <div class="model-opt-card" id="card-model-qwen">
+          <div class="opt-card-header">
+            <span class="opt-badge">Ultra-Fast • Low VRAM</span>
+            <span class="opt-size">~0.98 GB</span>
+          </div>
+          <div class="opt-model-name">Qwen 2.5 1.5B Instruct</div>
+          <div class="opt-model-desc">Q4_K_M quantized. Excellent reasoning & tool capability; loads in under 1 second on modern laptop GPUs.</div>
+          <div class="download-progress-container" id="progress-container-qwen" style="display: none;">
+            <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-bar-qwen"></div></div>
+            <div class="progress-stats">
+              <span id="progress-stat-qwen">0% (0.0 MB/s)</span>
+              <span id="progress-eta-qwen">ETA: --</span>
+            </div>
+          </div>
+          <button class="clay-btn btn-dl-model" data-model="qwen-2.5-1.5b" id="btn-dl-qwen" style="width: 100%; margin-top: 8px;">
+            <i data-lucide="download" style="width: 14px; height: 14px; margin-right: 6px;"></i>
+            <span>Download Qwen 1.5B</span>
+          </button>
+        </div>
+
+        <!-- Option B: Llama 3.2 3B -->
+        <div class="model-opt-card" id="card-model-llama">
+          <div class="opt-card-header">
+            <span class="opt-badge balanced">Recommended Reasoning</span>
+            <span class="opt-size">~2.02 GB</span>
+          </div>
+          <div class="opt-model-name">Llama 3.2 3B Instruct</div>
+          <div class="opt-model-desc">Q4_K_M quantized. High-precision instruction following and conversational depth for 4GB-8GB GPUs.</div>
+          <div class="download-progress-container" id="progress-container-llama" style="display: none;">
+            <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-bar-llama"></div></div>
+            <div class="progress-stats">
+              <span id="progress-stat-llama">0% (0.0 MB/s)</span>
+              <span id="progress-eta-llama">ETA: --</span>
+            </div>
+          </div>
+          <button class="clay-btn btn-dl-model" data-model="llama-3.2-3b" id="btn-dl-llama" style="width: 100%; margin-top: 8px;">
+            <i data-lucide="download" style="width: 14px; height: 14px; margin-right: 6px;"></i>
+            <span>Download Llama 3.2 3B</span>
+          </button>
+        </div>
+
+        <!-- Option C: DreamShaper 8 -->
+        <div class="model-opt-card" id="card-model-dream">
+          <div class="opt-card-header">
+            <span class="opt-badge diffusion">Optional CUDA Diffusion</span>
+            <span class="opt-size">~1.99 GB</span>
+          </div>
+          <div class="opt-model-name">DreamShaper 8 Pruned</div>
+          <div class="opt-model-desc">FP16 Safetensors. Photorealistic 512x512 image generation via local CUDA diffusion engine.</div>
+          <div class="download-progress-container" id="progress-container-dream" style="display: none;">
+            <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-bar-dream"></div></div>
+            <div class="progress-stats">
+              <span id="progress-stat-dream">0% (0.0 MB/s)</span>
+              <span id="progress-eta-dream">ETA: --</span>
+            </div>
+          </div>
+          <button class="clay-btn btn-dl-model" data-model="dreamshaper-8" id="btn-dl-dream" style="width: 100%; margin-top: 8px;">
+            <i data-lucide="download" style="width: 14px; height: 14px; margin-right: 6px;"></i>
+            <span>Download DreamShaper 8</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="onboarding-footer-row">
+        <button id="btn-onboarding-step2-back" class="clay-btn" style="padding: 8px 14px;">
+          <i data-lucide="arrow-left" style="width: 14px; height: 14px; margin-right: 6px;"></i> <span>Back</span>
+        </button>
+        <button id="btn-onboarding-skip-models" class="clay-btn primary" style="padding: 8px 18px; font-weight: 600;">
+          <i data-lucide="skip-forward" style="width: 14px; height: 14px; margin-right: 6px;"></i> <span>Skip / Use Existing Local Models</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- STEP 3: Cluster Role Launch -->
+    <div id="onboarding-step-3" class="onboarding-step-panel" style="display: none;">
+      <div class="panel-header-box">
+        <h3 class="panel-title">Select Initial Cluster Role</h3>
+        <p class="panel-desc">Choose how this workstation will participate in the distributed AeroMESH cluster.</p>
+      </div>
+
+      <div class="role-launch-grid">
+        <div class="role-launch-card" data-role="coordinator">
+          <div class="role-icon-box"><i data-lucide="server"></i></div>
+          <div class="role-card-title">Coordinator Node + UI</div>
+          <p class="role-card-desc">Runs Stage 1 lower layers, discovers worker nodes across Wi-Fi / Tailscale, and hosts the Studio Chat interface.</p>
+          <button class="clay-btn primary btn-launch-role" data-role="coordinator" style="width: 100%; margin-top: 10px;">
+            <span>Launch as Coordinator</span> <i data-lucide="chevron-right" style="width: 14px; height: 14px; margin-left: 6px;"></i>
+          </button>
+        </div>
+
+        <div class="role-launch-card" data-role="worker">
+          <div class="role-icon-box"><i data-lucide="cpu"></i></div>
+          <div class="role-card-title">Dedicated Worker Node (:50052)</div>
+          <p class="role-card-desc">Turns this workstation into an inference worker waiting for streaming activation slices from another coordinator machine.</p>
+          <button class="clay-btn btn-launch-role" data-role="worker" style="width: 100%; margin-top: 10px;">
+            <span>Launch as Worker</span> <i data-lucide="chevron-right" style="width: 14px; height: 14px; margin-left: 6px;"></i>
+          </button>
+        </div>
+
+        <div class="role-launch-card" data-role="all">
+          <div class="role-icon-box"><i data-lucide="layers"></i></div>
+          <div class="role-card-title">Full Local Mesh (SHM Zero-Copy)</div>
+          <p class="role-card-desc">Spawns Coordinator and Worker locally communicating over ultra-low-latency Shared Memory IPC.</p>
+          <button class="clay-btn primary btn-launch-role" data-role="all" style="width: 100%; margin-top: 10px;">
+            <span>Launch Full Local Mesh</span> <i data-lucide="chevron-right" style="width: 14px; height: 14px; margin-left: 6px;"></i>
+          </button>
+        </div>
+      </div>
+
+      <div class="onboarding-footer-row">
+        <button id="btn-onboarding-step3-back" class="clay-btn" style="padding: 8px 14px;">
+          <i data-lucide="arrow-left" style="width: 14px; height: 14px; margin-right: 6px;"></i> <span>Back to Models</span>
+        </button>
+        <div></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <div class="modal-backdrop" id="telemetry-modal">
   <div class="clay-modal">
     <div class="modal-header">
@@ -328,7 +517,7 @@
     <p style="font-size: 13px; color: var(--text-muted);" id="modal-description">
       Dynamic cluster node status and layer slice allocation queried directly from the backend coordinator:
     </p> 
-    <!-- ngl i love simple icons instead of these crappy emojis 😭 (proceeds to add an emoji in the comment lmaao) -->
+    <!-- ngl i love simple icons instead of these crappy emojis  (proceeds to add an emoji in the comment lmaao) -->
 
     <div class="cluster-diagram" id="modal-nodes-container">
       <!-- Dynamically filled by JS from /api/cluster/status -->

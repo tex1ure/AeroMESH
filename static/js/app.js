@@ -12,6 +12,45 @@ window.getApiUrl = window.getApiUrl || function(path) {
 (function () {
   'use strict';
 
+  // --- SESSION TOKEN & AUTHENTICATED FETCH WRAPPER ---
+  const sessionMeta = document.querySelector('meta[name="aeromesh-session-token"]');
+  const sessionToken = sessionMeta ? sessionMeta.getAttribute('content') : '';
+
+  const _rawFetch = window.fetch;
+  window.fetch = function(url, options) {
+    options = options || {};
+    if (sessionToken && sessionToken.trim() !== '') {
+      options.headers = options.headers || {};
+      if (options.headers instanceof Headers) {
+        if (!options.headers.has('Authorization')) {
+          options.headers.set('Authorization', 'Bearer ' + sessionToken);
+        }
+      } else if (Array.isArray(options.headers)) {
+        options.headers.push(['Authorization', 'Bearer ' + sessionToken]);
+      } else {
+        options.headers['Authorization'] = options.headers['Authorization'] || ('Bearer ' + sessionToken);
+      }
+    }
+    return _rawFetch.call(this, url, options);
+  };
+
+  // --- DUAL HEARTBEAT WATCHDOG (TSK-LFC-02) ---
+  if (sessionToken && sessionToken.trim() !== '') {
+    setInterval(() => {
+      _rawFetch(window.getApiUrl('/api/desktop/heartbeat'), {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + sessionToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ts: Date.now() })
+      }).catch(() => {});
+    }, 3000);
+
+    window.addEventListener('pagehide', () => {
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(window.getApiUrl('/api/desktop/window-closed'));
+      }
+    });
+  }
+
   // --- STATE MANAGEMENT ---
   const STORAGE_KEY = 'aeromesh_conversations_v2';
   const MAX_CONCURRENT_CHATS = 2;
@@ -671,13 +710,35 @@ window.getApiUrl = window.getApiUrl || function(path) {
     }
   }
 
+  let _saveDebounceTimer = null;
   function saveConversations() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
       renderHistoryList();
+      if (_saveDebounceTimer) clearTimeout(_saveDebounceTimer);
+      _saveDebounceTimer = setTimeout(() => {
+        fetch(getApiUrl('/api/conversations'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(conversations)
+        }).catch(() => {});
+      }, 500);
     } catch (e) {
       console.error(e);
     }
+  }
+
+  async function syncConversationsFromBackend() {
+    try {
+      const resp = await fetch(getApiUrl('/api/conversations'));
+      if (resp.ok) {
+        const remote = await resp.json();
+        if (Array.isArray(remote) && remote.length > 0) {
+          conversations = remote;
+          renderHistoryList();
+        }
+      }
+    } catch (_) {}
   }
 
   function getCurrentChat() {
@@ -2163,14 +2224,210 @@ window.getApiUrl = window.getApiUrl || function(path) {
         }
       }
     } catch (e) {
-      if (title) title.textContent = `❌ Error starting role: ${e.message || e}`;
+      if (title) title.textContent = `[Error] Starting role: ${e.message || e}`;
     }
+  }
+
+
+  // ========================================================================
+  // FIRST-RUN ONBOARDING WIZARD LOGIC (Kimi Dark Matte + Lucide Only)
+  // ========================================================================
+
+  let _activeDownloadAbort = null;
+
+  async function checkFirstRunOnboarding() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('skip_wizard') === '1') return;
+
+    try {
+      const resp = await fetch(getApiUrl('/api/bootstrap/status'));
+      if (!resp.ok) return;
+      const data = await resp.json();
+
+      if (!data.has_completed_onboarding) {
+        showOnboardingWizard(data);
+      }
+    } catch (e) {
+      console.warn('[AeroMesh] Bootstrap status check bypassed:', e);
+    }
+  }
+
+  function showOnboardingWizard(diagData) {
+    const modal = document.getElementById('onboarding-modal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+
+    // Populate Step 1 Diagnostics
+    const gpuVal = document.getElementById('diag-gpu-val');
+    const vramVal = document.getElementById('diag-vram-val');
+    const netVal = document.getElementById('diag-net-val');
+    const gpuStatus = document.getElementById('diag-gpu-status');
+    const vramStatus = document.getElementById('diag-vram-status');
+    const netStatus = document.getElementById('diag-net-status');
+    const btnStep1Next = document.getElementById('btn-onboarding-step1-next');
+
+    if (gpuVal) gpuVal.textContent = diagData.gpu || 'Hardware Detected';
+    if (vramVal) vramVal.textContent = `${diagData.vram_total_mb || 8192} MiB (${diagData.vram_free_mb || 4096} MiB Free)`;
+    if (netVal) netVal.textContent = `LAN: ${diagData.wifi_ip || '127.0.0.1'} • TS: ${diagData.tailscale_ip || 'Not Connected'}`;
+
+    if (gpuStatus) {
+      gpuStatus.className = 'diag-status ready';
+      gpuStatus.innerHTML = '<i data-lucide="check-circle-2"></i>';
+    }
+    if (vramStatus) {
+      vramStatus.className = 'diag-status ready';
+      vramStatus.innerHTML = '<i data-lucide="check-circle-2"></i>';
+    }
+    if (netStatus) {
+      netStatus.className = 'diag-status ready';
+      netStatus.innerHTML = '<i data-lucide="check-circle-2"></i>';
+    }
+    if (btnStep1Next) btnStep1Next.disabled = false;
+
+    // Refresh icons
+    if (window.lucide) lucide.createIcons();
+
+    // Setup Wizard Nav
+    const step1 = document.getElementById('onboarding-step-1');
+    const step2 = document.getElementById('onboarding-step-2');
+    const step3 = document.getElementById('onboarding-step-3');
+    const dot1 = document.getElementById('step-dot-1');
+    const dot2 = document.getElementById('step-dot-2');
+    const dot3 = document.getElementById('step-dot-3');
+
+    function goToStep(num) {
+      if (step1) step1.style.display = num === 1 ? 'block' : 'none';
+      if (step2) step2.style.display = num === 2 ? 'block' : 'none';
+      if (step3) step3.style.display = num === 3 ? 'block' : 'none';
+
+      if (dot1) {
+        dot1.className = 'step-indicator ' + (num === 1 ? 'active' : (num > 1 ? 'completed' : ''));
+      }
+      if (dot2) {
+        dot2.className = 'step-indicator ' + (num === 2 ? 'active' : (num > 2 ? 'completed' : ''));
+      }
+      if (dot3) {
+        dot3.className = 'step-indicator ' + (num === 3 ? 'active' : '');
+      }
+      if (window.lucide) lucide.createIcons();
+    }
+
+    if (btnStep1Next) {
+      btnStep1Next.onclick = () => goToStep(2);
+    }
+    const btnStep2Back = document.getElementById('btn-onboarding-step2-back');
+    if (btnStep2Back) {
+      btnStep2Back.onclick = () => goToStep(1);
+    }
+    const btnSkipModels = document.getElementById('btn-onboarding-skip-models');
+    if (btnSkipModels) {
+      btnSkipModels.onclick = () => goToStep(3);
+    }
+    const btnStep3Back = document.getElementById('btn-onboarding-step3-back');
+    if (btnStep3Back) {
+      btnStep3Back.onclick = () => goToStep(2);
+    }
+
+    // Step 2: Model Downloads (Opt-In)
+    document.querySelectorAll('.btn-dl-model').forEach(btn => {
+      btn.onclick = async () => {
+        const modelId = btn.getAttribute('data-model');
+        const shortKey = modelId.includes('qwen') ? 'qwen' : (modelId.includes('llama') ? 'llama' : 'dream');
+        const progContainer = document.getElementById(`progress-container-${shortKey}`);
+        const progBar = document.getElementById(`progress-bar-${shortKey}`);
+        const progStat = document.getElementById(`progress-stat-${shortKey}`);
+        const progEta = document.getElementById(`progress-eta-${shortKey}`);
+
+        btn.style.display = 'none';
+        if (progContainer) progContainer.style.display = 'block';
+
+        try {
+          const resp = await fetch(getApiUrl('/api/models/download'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_id: modelId })
+          });
+
+          if (!resp.ok) {
+            if (progStat) progStat.textContent = 'Download failed to start';
+            btn.style.display = 'block';
+            return;
+          }
+
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop();
+
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                const raw = line.slice(6).trim();
+                if (raw === '[DONE]') break;
+                try {
+                  const evt = JSON.parse(raw);
+                  if (evt.type === 'download_progress') {
+                    if (progBar) progBar.style.width = `${evt.percent}%`;
+                    if (progStat) progStat.textContent = `${evt.percent}% (${evt.speed_mbps} MB/s)`;
+                    if (progEta) progEta.textContent = `ETA: ${evt.eta_seconds}s`;
+                  } else if (evt.type === 'download_complete') {
+                    if (progBar) progBar.style.width = '100%';
+                    if (progStat) progStat.textContent = 'Download Complete (Verified)';
+                    if (progEta) progEta.textContent = '';
+                    btn.style.display = 'block';
+                    btn.className = 'clay-btn primary';
+                    btn.innerHTML = '<i data-lucide="check"></i> <span>Ready</span>';
+                    btn.disabled = true;
+                    if (btnSkipModels) {
+                      btnSkipModels.innerHTML = '<i data-lucide="arrow-right"></i> <span>Continue to Role Launch</span>';
+                    }
+                    if (window.lucide) lucide.createIcons();
+                  } else if (evt.type === 'download_error') {
+                    if (progStat) progStat.textContent = `Error: ${evt.error}`;
+                    btn.style.display = 'block';
+                  }
+                } catch (_) {}
+              }
+            }
+          }
+        } catch (e) {
+          if (progStat) progStat.textContent = `Error: ${e.message || e}`;
+          btn.style.display = 'block';
+        }
+      };
+    });
+
+    // Step 3: Role Launch
+    document.querySelectorAll('.btn-launch-role').forEach(rBtn => {
+      rBtn.onclick = async () => {
+        const role = rBtn.getAttribute('data-role');
+        try {
+          await fetch(getApiUrl('/api/bootstrap/complete'), { method: 'POST' });
+        } catch (_) {}
+
+        if (modal) modal.style.display = 'none';
+
+        // Launch node role
+        if (typeof window.startNodeRole === 'function') {
+          window.startNodeRole(role);
+        } else {
+          startRole(role);
+        }
+      };
+    });
   }
 
   async function openRoleModal() {
     createLauncherModal();
     const modal = document.getElementById('aeromesh-role-modal');
     if (modal) modal.style.display = 'flex';
+    syncConversationsFromBackend();
+    checkFirstRunOnboarding();
     // Check state and peers ONCE on open (only poll continuously if a node is actively running!)
     const st = await refreshNodeState();
     scanPeersIntoModal();

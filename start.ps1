@@ -395,9 +395,7 @@ function Invoke-AeroMeshBootstrap {
     # 3. Check Diffusion Model in models\
     $sdModels = @(Get-ChildItem -Path "models" -Filter "*.safetensors" -File -ErrorAction SilentlyContinue)
     if ($sdModels.Count -eq 0) {
-        Write-Host "  [*] No .safetensors image model found in models\ -> Auto-downloading DreamShaper 8 (1.99 GB FP16)..." -ForegroundColor Cyan
-        curl.exe -L -C - "https://huggingface.co/Lykon/DreamShaper/resolve/main/DreamShaper_8_pruned.safetensors" -o "models\DreamShaper_8_pruned.safetensors"
-        $sdModels = @(Get-ChildItem -Path "models" -Filter "*.safetensors" -File -ErrorAction SilentlyContinue)
+        Write-Host "  [-] No .safetensors image model found in models\ (Zero forced downloads active; opt-in via Desktop Studio or add manually)." -ForegroundColor DarkGray
     }
     if ($sdModels.Count -gt 0) {
         Write-Host "  [OK] Active Image Model:      models\$($sdModels[0].Name)" -ForegroundColor Green

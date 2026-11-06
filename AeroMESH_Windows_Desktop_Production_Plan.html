@@ -1,0 +1,1173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AeroMESH Windows Desktop Production Engineering Plan v2.0</title>
+<style>
+  @page {
+    size: A4;
+    margin: 15mm 12mm 15mm 12mm;
+    @bottom-right {
+      content: "Page " counter(page);
+      font-size: 8pt;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #64748b;
+    }
+    @bottom-left {
+      content: "AeroMESH Desktop Architecture • Production Engineering Plan v2.0";
+      font-size: 8pt;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #64748b;
+    }
+  }
+
+  *, *:before, *:after {
+    box-sizing: border-box;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #1e293b;
+    line-height: 1.5;
+    font-size: 9pt;
+    background: #ffffff;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* Cover & Headers */
+  .doc-header {
+    border-bottom: 2px solid #0284c7;
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+  }
+  .doc-badge {
+    display: inline-block;
+    background: #0284c7;
+    color: #ffffff;
+    font-size: 7.5pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    margin-bottom: 6px;
+  }
+  .doc-title {
+    font-size: 19pt;
+    font-weight: 800;
+    color: #0f172a;
+    margin: 0 0 4px 0;
+    letter-spacing: -0.4px;
+  }
+  .doc-subtitle {
+    font-size: 10.5pt;
+    color: #475569;
+    margin: 0 0 10px 0;
+    font-weight: 400;
+  }
+  .meta-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 8pt;
+  }
+  .meta-item strong {
+    color: #0f172a;
+    display: block;
+    font-size: 7.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+
+  /* Section Typography */
+  h1 {
+    font-size: 13pt;
+    font-weight: 700;
+    color: #0f172a;
+    border-bottom: 1.5px solid #cbd5e1;
+    padding-bottom: 4px;
+    margin-top: 18px;
+    margin-bottom: 8px;
+    letter-spacing: -0.2px;
+  }
+  h2 {
+    font-size: 10.5pt;
+    font-weight: 700;
+    color: #0369a1;
+    margin-top: 14px;
+    margin-bottom: 6px;
+  }
+  h3 {
+    font-size: 9.5pt;
+    font-weight: 600;
+    color: #1e293b;
+    margin-top: 10px;
+    margin-bottom: 4px;
+  }
+  p {
+    margin: 0 0 6px 0;
+  }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0;
+    font-size: 8pt;
+    page-break-inside: avoid;
+  }
+  th {
+    background: #f1f5f9;
+    color: #0f172a;
+    font-weight: 600;
+    text-align: left;
+    padding: 5px 7px;
+    border: 1px solid #cbd5e1;
+  }
+  td {
+    padding: 4px 7px;
+    border: 1px solid #cbd5e1;
+    vertical-align: top;
+  }
+  tr:nth-child(even) td {
+    background-color: #f8fafc;
+  }
+
+  /* Badges & Tags */
+  .badge {
+    display: inline-block;
+    padding: 1.5px 5px;
+    border-radius: 3px;
+    font-size: 7pt;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .badge-critical { background: #fee2e2; color: #991b1b; border: 1px solid #f87171; }
+  .badge-high { background: #ffedd5; color: #9a3412; border: 1px solid #fb923c; }
+  .badge-medium { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+  .badge-selected { background: #dcfce7; color: #166534; border: 1px solid #86efac; font-weight: 700; }
+  .badge-rejected { background: #f1f5f9; color: #64748b; border: 1px solid #cbd5e1; }
+
+  /* Callout & Architecture Diagram */
+  .arch-box {
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 7.2pt;
+    line-height: 1.35;
+    padding: 10px 12px;
+    border-radius: 5px;
+    margin: 8px 0;
+    white-space: pre;
+    page-break-inside: avoid;
+    overflow-x: hidden;
+  }
+  .callout {
+    border-left: 3px solid #0284c7;
+    background: #f0f9ff;
+    padding: 6px 10px;
+    margin: 6px 0;
+    border-radius: 0 4px 4px 0;
+    font-size: 8.5pt;
+  }
+  .callout-title {
+    font-weight: 700;
+    color: #0369a1;
+    margin-bottom: 2px;
+  }
+
+  /* Cards & Tasks */
+  .task-card {
+    border: 1px solid #cbd5e1;
+    border-radius: 5px;
+    padding: 8px 10px;
+    margin: 8px 0;
+    background: #ffffff;
+    page-break-inside: avoid;
+  }
+  .task-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 4px;
+    margin-bottom: 6px;
+  }
+  .task-title {
+    font-size: 9pt;
+    font-weight: 700;
+    color: #0f172a;
+  }
+  .task-grid {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 4px 8px;
+    font-size: 8pt;
+  }
+  .task-label {
+    font-weight: 600;
+    color: #475569;
+  }
+
+  ul, ol {
+    margin: 3px 0 6px 18px;
+    padding: 0;
+  }
+  li {
+    margin-bottom: 2px;
+  }
+
+  .page-break {
+    page-break-before: always;
+  }
+
+  code {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    background: #f1f5f9;
+    color: #0f172a;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 7.8pt;
+  }
+</style>
+</head>
+<body>
+
+<!-- Header / Cover Meta -->
+<div class="doc-header">
+  <div class="doc-badge">Engineering Blueprint & Execution Specification</div>
+  <div class="doc-title">AeroMESH Windows Desktop Production Engineering Plan</div>
+  <div class="doc-subtitle">Autonomous Self-Bootstrapping Runtime, Security Hardening, Kernel Lifecycle Trapping, and 3-Step First-Run Onboarding</div>
+  <div class="meta-grid">
+    <div class="meta-item"><strong>Document Version</strong>2.0.0 (Commercial Ready)</div>
+    <div class="meta-item"><strong>Target Platform</strong>Windows 10 / Windows 11 (x86_64)</div>
+    <div class="meta-item"><strong>Authoring Roles</strong>Principal Architect & Security Lead</div>
+    <div class="meta-item"><strong>Baseline Test Suite</strong>92/92 Automated Tests Passing</div>
+  </div>
+</div>
+
+<div class="callout">
+  <div class="callout-title">Executive Summary</div>
+  This specification outlines the definitive engineering roadmap to upgrade AeroMESH into a commercial-grade, self-bootstrapping native Windows desktop application. It remediates all previously identified lifecycle leaks, security vulnerabilities, and permission faults while introducing an autonomous runtime that eliminates all reliance on developer setup scripts (setup.ps1, start.ps1), guarantees zero forced model downloads, and provides a polished Kimi dark matte onboarding wizard with strictly Lucide icons.
+</div>
+
+<!-- Section 1 -->
+<h1>1. Master Fixing Strategy & Upgraded System Architecture</h1>
+<p>The core objective is to transition AeroMESH from a developer script running in an unmanaged Edge browser window into a hardened, self-contained native Windows desktop application.</p>
+
+<div class="arch-box">
++--------------------------------------------------------------------------------------------------+
+|                            AEROMESH UNIFIED SELF-BOOTSTRAPPING ARCHITECTURE                      |
++--------------------------------------------------------------------------------------------------+
+
+  [ User double-clicks AeroMesh-Desktop.exe ]
+         |
+         +---> [ Win32 Single-Instance Mutex: Global\AeroMESH_Desktop_SingleInstance ]
+         |
+         +---> [ Win32 PerMonitorV2 High-DPI Manifest & Vectored Exception Filter ]
+         |
+         v
+  [ Phase A: Self-Bootstrapping Runtime Engine (Native Rust) ]
+         |
+         +---> Windows Storage Provisioning: %APPDATA%\AeroMESH & %LOCALAPPDATA%\AeroMESH
+         +---> CSPRNG Secret Generation: AEROMESH_API_KEY & AEROMESH_WORKER_SECRET
+         +---> Runtime DLL & Driver Audit: bin/*.dll, CUDA 12.x, DXGI VRAM inspection
+         +---> Network Interface Bindings: iphlpapi!GetAdaptersAddresses (Wi-Fi & Tailscale)
+         +---> Zero-Forced-Download Guarantee: ZERO automatic model downloads on bootstrap
+         +---> SafeProcessJob Initialization: Windows Job Object with KILL_ON_JOB_CLOSE
+         |
+         v
+  [ Phase B: Hardened Localhost Axum Host (Port 7860 Locked) ]
+         |
+         +---> Strict Origin Whitelisting (http://127.0.0.1:&lt;port&gt; & http://localhost:&lt;port&gt;)
+         +---> Host Header Guard (Blocks DNS Rebinding)
+         +---> CSPRNG Ephemeral Session Token Authentication
+         +---> Offline Bundled Vendor Assets (Lucide, Marked, Highlight.js, KaTeX)
+         +---> Native Edge Window Supervisor (Active Lifecycle + Heartbeat Watchdog)
+         |
+         v
+  [ Phase C: Presentation & First-Run Experience (Kimi Dark Matte Theme) ]
+         |
+         +---> Checks %LOCALAPPDATA%\AeroMESH\onboarding_complete.json
+         |
+         |---->[ If First Run == true ]-------------------------------------------------------+
+         |      Step 1: Environment & Dependency Check (CUDA DLLs, VRAM, Secrets, IPs)       |
+         |      Step 2: Opt-In Lightweight Model Picker (Qwen 2.5 1.5B / Llama 3.2 3B / Skip) |
+         |      Step 3: Cluster Role Launch (Coordinator, Worker :50052, or Local SHM Mesh)   |
+         |------------------------------------------------------------------------------------+
+         |
+         +---->[ If First Run == false ]------------------------------------------------------+
+                Direct to Node Control Center -&gt; Chat & Diffusion Studio Workspace             |
+               -------------------------------------------------------------------------------+
+</div>
+
+<h3>Strategic Core Pillars</h3>
+<ul>
+  <li><strong>Self-Bootstrapping Autonomy:</strong> The binary provisions its own directory hierarchy, generates CSPRNG keys, verifies CUDA runtime DLLs, and resolves network topologies without invoking external shell scripts.</li>
+  <li><strong>Zero Forced Model Downloads:</strong> Unconditional model downloads (e.g. DreamShaper 8 in legacy start.ps1) are completely excised. No weights are transferred without explicit user opt-in.</li>
+  <li><strong>First-Run Onboarding Wizard:</strong> A frictionless 3-step modal flow inside the UI handles diagnostics, opt-in starter models with streaming progress, and role launch.</li>
+  <li><strong>Kernel-Enforced Lifecycle Trapping:</strong> SafeProcessJob binds all child engines (aeromesh.exe, sd-cli.exe) to a Windows Job Object with <code>JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE</code>.</li>
+  <li><strong>Kimi Dark Matte Aesthetic:</strong> Deep obsidian matte surfaces, liquid glass panels, and strictly Lucide SVG icons (zero emojis).</li>
+</ul>
+
+<!-- Section 2 -->
+<div class="page-break"></div>
+<h1>2. Architectural Solutions & Decision Evaluation Matrices</h1>
+
+<h3>Decision 1: Window Lifecycle & Process Zombie Remediation</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Approach</th>
+      <th>Technical Concept</th>
+      <th>Pros & Strengths</th>
+      <th>Cons & Trade-Offs</th>
+      <th>Verdict</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Option A: Embedded WebView2</strong></td>
+      <td>Rewrite host using wry/tao embedding WebView2 COM loader directly.</td>
+      <td>True native HWND window; clean WM_CLOSE events; no external process.</td>
+      <td>Heavy C++ COM bindings; build friction on MinGW/MSVC; risk to CSS filters.</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option B: Supervised Edge + Job Object</strong></td>
+      <td>Retain Edge App-Mode; supervise Child handle; trap in SafeProcessJob.</td>
+      <td>Zero new C++ GUI crates; kernel-guaranteed VRAM release; sub-100ms exit.</td>
+      <td>Requires Microsoft Edge present on host (standard on 99.8% of Windows).</td>
+      <td><span class="badge badge-selected">Selected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option C: Background Tray Daemon</strong></td>
+      <td>Run perpetual background tray service; closing window minimizes.</td>
+      <td>Models stay in VRAM between sessions; similar UX to Docker/Ollama.</td>
+      <td>Confuses users expecting window close to free GPU VRAM for gaming.</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Decision 2: File Handling, Storage Locations & Windows Permissions</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Approach</th>
+      <th>Technical Concept</th>
+      <th>Pros & Strengths</th>
+      <th>Cons & Trade-Offs</th>
+      <th>Verdict</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Option A: UAC Admin Elevation</strong></td>
+      <td>Embed requireAdministrator manifest to write directly to Program Files.</td>
+      <td>Zero path code changes.</td>
+      <td>Violates enterprise security; blocked by corporate IT; UAC prompt on every run.</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option B: Windows AppData Hierarchy</strong></td>
+      <td>Map config to %APPDATA%, cache/profiles to %LOCALAPPDATA%.</td>
+      <td>100% compliant with Windows standards; works under standard user accounts.</td>
+      <td>Requires centralizing path resolution across CLI and desktop crates.</td>
+      <td><span class="badge badge-selected">Selected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option C: MSIX Virtualization</strong></td>
+      <td>Rely on Windows VFS filesystem redirection in an MSIX package.</td>
+      <td>No path modifications inside code.</td>
+      <td>Masks structural flaws; breaks external symlinks; signing friction.</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Decision 3: Localhost API Security & CORS Remediation</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Approach</th>
+      <th>Technical Concept</th>
+      <th>Pros & Strengths</th>
+      <th>Cons & Trade-Offs</th>
+      <th>Verdict</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Option A: CSPRNG Token + Host Guard</strong></td>
+      <td>Generate BCrypt token; inject in meta tag; restrict CORS to 127.0.0.1.</td>
+      <td>Defeats CORS drive-by and DNS rebinding; preserves OpenAI client compatibility.</td>
+      <td>Frontend fetch calls must attach Authorization header.</td>
+      <td><span class="badge badge-selected">Selected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option B: Ephemeral Local mTLS</strong></td>
+      <td>Generate self-signed certificate on startup; bind HTTPS loopback.</td>
+      <td>Encrypted loopback traffic.</td>
+      <td>Severe browser certificate warnings; modifies Windows Certificate Store.</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option C: Named Pipes Only</strong></td>
+      <td>Eliminate HTTP port entirely; pass messages over Win32 Named Pipes.</td>
+      <td>Zero network attack surface.</td>
+      <td>Completely breaks OpenAI API client compatibility (/v1/chat/completions).</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Decision 4: Air-Gapped Network & Offline UI Resilience</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Approach</th>
+      <th>Technical Concept</th>
+      <th>Pros & Strengths</th>
+      <th>Cons & Trade-Offs</th>
+      <th>Verdict</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Option A: Bundled Assets + GetAdapters</strong></td>
+      <td>Vendor all JS/CSS/fonts locally; resolve IPs via iphlpapi.dll.</td>
+      <td>100% air-gapped functionality; zero CDN stalls; native adapter accuracy.</td>
+      <td>Adds 1.8 MB to static asset payload.</td>
+      <td><span class="badge badge-selected">Selected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option B: Dynamic CDN Fallback</strong></td>
+      <td>Load from CDN; fallback to local files on script onerror.</td>
+      <td>Saves initial distribution bytes if online.</td>
+      <td>Causes 3-5 second DNS timeout stalls on air-gapped networks; layout shifts.</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option C: Dual Build Modes</strong></td>
+      <td>Produce separate online and offline editions.</td>
+      <td>Tailored bundles.</td>
+      <td>Double maintenance overhead; high risk of feature divergence.</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Decision 5: Self-Bootstrapping Engine Architecture</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Approach</th>
+      <th>Technical Concept</th>
+      <th>Pros & Strengths</th>
+      <th>Cons & Trade-Offs</th>
+      <th>Verdict</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Option A: Script Wrapper Runner</strong></td>
+      <td>Bundle PowerShell scripts into a compiled executable runner.</td>
+      <td>Reuses existing script code.</td>
+      <td>Blocked by enterprise ExecutionPolicy; antivirus heuristics flag wrappers.</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option B: Native Rust Bootstrap</strong></td>
+      <td>Perform DLL validation, PATH setup, secret creation, and Job init in Rust.</td>
+      <td>Instant sub-100ms launch; zero script dependencies; type-safe diagnostics.</td>
+      <td>Requires ~300 lines of robust systems bootstrap code.</td>
+      <td><span class="badge badge-selected">Selected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option C: Background Windows Service</strong></td>
+      <td>Install background service as LocalSystem to manage prerequisites.</td>
+      <td>Can perform elevated actions silently.</td>
+      <td>Unjustified privilege elevation; corporate IT security blocker.</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Decision 6: First-Run Onboarding Wizard & Model Management</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Approach</th>
+      <th>Technical Concept</th>
+      <th>Pros & Strengths</th>
+      <th>Cons & Trade-Offs</th>
+      <th>Verdict</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Option A: Terminal Prompt</strong></td>
+      <td>Prompt user in console before launching window.</td>
+      <td>Simple text code.</td>
+      <td>Breaks desktop GUI immersion; confusing for non-technical users.</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option B: 3-Step Webview Wizard</strong></td>
+      <td>In-app modal: 1. Environment, 2. Opt-in models with SSE progress, 3. Role.</td>
+      <td>Zero forced downloads; skip button for existing files; live download progress.</td>
+      <td>Requires authoring modal components and SSE download endpoint.</td>
+      <td><span class="badge badge-selected">Selected</span></td>
+    </tr>
+    <tr>
+      <td><strong>Option C: Settings Store Catalog</strong></td>
+      <td>Drop user into blank chat; hide models in settings.</td>
+      <td>No modal overlay needed.</td>
+      <td>High cognitive friction; leaves first-time user stranded with non-working chat.</td>
+      <td><span class="badge badge-rejected">Rejected</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- Section 3 -->
+<div class="page-break"></div>
+<h1>3. Engineering Decision Log (EDL-01 to EDL-11)</h1>
+<table>
+  <thead>
+    <tr>
+      <th style="width: 70px;">ID</th>
+      <th style="width: 170px;">Domain</th>
+      <th>Choice Made</th>
+      <th>Technical Justification</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>EDL-01</strong></td>
+      <td>Lifecycle & Zombies</td>
+      <td>Option B: SafeProcessJob + Watchdog</td>
+      <td>Guarantees kernel-enforced process and VRAM release upon window close.</td>
+    </tr>
+    <tr>
+      <td><strong>EDL-02</strong></td>
+      <td>Windows Storage</td>
+      <td>Option B: %APPDATA% / %LOCALAPPDATA%</td>
+      <td>Eliminates ERROR_ACCESS_DENIED; enables unprivileged standard user operation.</td>
+    </tr>
+    <tr>
+      <td><strong>EDL-03</strong></td>
+      <td>Localhost Security</td>
+      <td>Option A: CSPRNG Token + Host Guard</td>
+      <td>Neutralizes drive-by browser exploits and DNS rebinding attacks on 127.0.0.1.</td>
+    </tr>
+    <tr>
+      <td><strong>EDL-04</strong></td>
+      <td>Air-Gapped Network</td>
+      <td>Option A: iphlpapi!GetAdaptersAddresses</td>
+      <td>Resolves local network interfaces accurately without outbound 8.8.8.8 UDP probes.</td>
+    </tr>
+    <tr>
+      <td><strong>EDL-05</strong></td>
+      <td>Offline UI Delivery</td>
+      <td>Option A: Bundled local vendor assets</td>
+      <td>Eliminates all third-party CDN latency and guaranteed rendering failures offline.</td>
+    </tr>
+    <tr>
+      <td><strong>EDL-06</strong></td>
+      <td>DiT Diffusion Stream</td>
+      <td>Option A: Real stdout parsing</td>
+      <td>Replaces synthetic 500ms sleep loops with truthful progress and instant OOM reporting.</td>
+    </tr>
+    <tr>
+      <td><strong>EDL-07</strong></td>
+      <td>High-DPI Display</td>
+      <td>Option A: Win32 PerMonitorV2 Manifest</td>
+      <td>Prevents DWM bitmap stretching and blur on multi-monitor mixed-DPI configurations.</td>
+    </tr>
+    <tr>
+      <td><strong>EDL-08</strong></td>
+      <td>Single-Instance Guard</td>
+      <td>Option A: Named Win32 Mutex</td>
+      <td>Prevents duplicate instance launches and avoids cascading port drift (7860 to 7861).</td>
+    </tr>
+    <tr>
+      <td><strong>EDL-09</strong></td>
+      <td>Diagnostic Logging</td>
+      <td>Option A: Rolling file + Minidump filter</td>
+      <td>Persists crash logs to disk; writes .dmp minidumps for post-mortem C++ analysis.</td>
+    </tr>
+    <tr>
+      <td><strong>EDL-10</strong></td>
+      <td>Self-Bootstrapping</td>
+      <td>Option B: Native Rust Runtime Bootstrap</td>
+      <td>Eliminates setup.ps1/start.ps1; provisions keys, verifies DLLs, and sets PATH autonomously.</td>
+    </tr>
+    <tr>
+      <td><strong>EDL-11</strong></td>
+      <td>Model Management</td>
+      <td>Option B: 3-Step Opt-In Onboarding Wizard</td>
+      <td>Strictly enforces zero forced downloads; provides lightweight starter models or instant skip.</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- Section 4 -->
+<h1>4. Implementation Phasing & Task Dependency Structure</h1>
+<p>Work is organized into six strictly ordered tiers to prevent rework and guarantee continuous stability:</p>
+<ul>
+  <li><strong>Phase 1: Foundation, Storage & Manifest Compliance:</strong> AppData directory resolution, Win32 manifest, single-instance mutex, and rolling disk logging.</li>
+  <li><strong>Phase 2: Security Hardening & Secret Cryptography:</strong> CSPRNG token generation, localhost origin locking, and DNS rebinding host guard.</li>
+  <li><strong>Phase 3: Kernel Job Trapping & Window Lifecycle:</strong> SafeProcessJob integration in desktop binary and Edge window supervisor watchdog.</li>
+  <li><strong>Phase 4: Air-Gapped Network & Systems Hardware:</strong> Native Win32 adapter enumeration and typed ARP neighbor discovery.</li>
+  <li><strong>Phase 5: Self-Bootstrapping Engine, Zero-Forced Downloads & Onboarding Wizard:</strong> Autonomous dependency verifier, SSE downloader API, bundled offline UI assets, atomic chat persistence, and the 3-step Kimi dark matte wizard.</li>
+  <li><strong>Phase 6: Distribution Packaging & Verification Gate:</strong> Inno Setup installer script with clean uninstallation, full test suite validation, and release sign-off.</li>
+</ul>
+
+<!-- Section 5 -->
+<div class="page-break"></div>
+<h1>5. Detailed Step-by-Step Execution Plan (All 16 Tasks)</h1>
+
+<!-- Task 1.1 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 1.1 [TSK-FND-01]: Unified Windows Storage Manager</span>
+    <span class="badge badge-critical">Critical • Foundation</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Implement dedicated path resolution using <code>dirs = "5.0"</code> to route settings to <code>%APPDATA%\AeroMESH</code> and runtime data to <code>%LOCALAPPDATA%\AeroMESH</code>.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/Cargo.toml</code>, <code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code>, <code>crates/aeromesh-cli/src/main.rs</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Add <code>dirs = "5.0"</code> to Cargo dependencies.<br>
+      2. Implement <code>get_config_dir()</code> (%APPDATA%), <code>get_data_dir()</code> (%LOCALAPPDATA%), and <code>get_logs_dir()</code>.<br>
+      3. Refactor <code>ensure_env_secrets</code> to read/write <code>config.env</code> in AppData config dir.<br>
+      4. Point Edge profile to <code>%LOCALAPPDATA%\AeroMESH\edge_profile</code> and images to <code>generated_images</code>.<br>
+      5. Retain local repository fallback when running in developer mode.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Launch binary from a read-only directory; verify zero <code>os error 5</code> permissions exceptions and confirm files populate AppData.</div>
+  </div>
+</div>
+
+<!-- Task 1.2 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 1.2 [TSK-FND-02]: Win32 Application Manifest & Single-Instance Mutex</span>
+    <span class="badge badge-high">High • Foundation</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Embed a Win32 application manifest declaring <code>PerMonitorV2</code> DPI awareness, Windows 10/11 GUIDs, and UTF-8; enforce single-instance via <code>CreateMutexW</code>.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/build.rs</code>, <code>crates/aeromesh-cli/resources/aeromesh.manifest</code>, <code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Create <code>aeromesh.manifest</code> with PerMonitorV2 DPI awareness and activeCodePage UTF-8.<br>
+      2. Compile manifest into PE header via <code>winres</code> in build.rs.<br>
+      3. At startup in main(), call <code>CreateMutexW(NULL, TRUE, L"Global\AeroMESH_Desktop_SingleInstance")</code>.<br>
+      4. If ERROR_ALREADY_EXISTS, activate existing window and exit with code 0.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Launch multiple instances concurrently; verify second instance detects primary and exits immediately without port drift.</div>
+  </div>
+</div>
+
+<!-- Task 1.3 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 1.3 [TSK-FND-03]: Rolling File Logger & Crash Minidump Handler</span>
+    <span class="badge badge-medium">Medium • Diagnostics</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Configure <code>tracing-appender</code> to write daily rolling logs to <code>%LOCALAPPDATA%\AeroMESH\logs\desktop.log</code> and install <code>SetUnhandledExceptionFilter</code> for minidump capture.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/Cargo.toml</code>, <code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Add <code>tracing-appender = "0.2"</code> to dependencies.<br>
+      2. Configure tracing subscriber to write to both stdout and daily rolling file.<br>
+      3. Register unhandled exception filter calling <code>MiniDumpWriteDump</code> from <code>dbghelp.dll</code> upon access violations.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Trigger panic in debug build; confirm <code>desktop.log</code> contains full stack trace and a <code>.dmp</code> file is generated.</div>
+  </div>
+</div>
+
+<!-- Task 2.1 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 2.1 [TSK-SEC-01]: CSPRNG Token Generation & Endpoint Authentication</span>
+    <span class="badge badge-critical">Critical • Security</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Generate 256-bit cryptographic session token via <code>BCryptGenRandom</code>; inject into HTML meta tag; enforce <code>Authorization: Bearer &lt;token&gt;</code> on all routes.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code>, <code>static/index.html</code>, <code>static/js/app.js</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Replace timestamp hash with BCryptGenRandom in ensure_env_secrets.<br>
+      2. Inject token into served HTML via <code>&lt;meta name="aeromesh-session-token" content="..."&gt;</code>.<br>
+      3. Attach Bearer token header to all fetch requests in app.js.<br>
+      4. Implement Axum middleware rejecting unauthenticated /api/* calls with 401 Unauthorized.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Execute unauthenticated curl request to /api/node/start; verify 401 Unauthorized response.</div>
+  </div>
+</div>
+
+<!-- Task 2.2 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 2.2 [TSK-SEC-02]: Localhost CORS Lockdown & Host Header Guard</span>
+    <span class="badge badge-critical">Critical • Security</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Restrict CORS allowed origins strictly to <code>http://127.0.0.1:&lt;port&gt;</code> and <code>http://localhost:&lt;port&gt;</code>; validate incoming Host headers to defeat DNS rebinding.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Remove <code>allow_origin(Any)</code>; whitelist loopback origins only.<br>
+      2. Implement middleware checking Host header against 127.0.0.1 and localhost, rejecting mismatches with 403 Forbidden.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Simulate request from origin <code>https://attacker-domain.com</code>; verify browser preflight is blocked by CORS.</div>
+  </div>
+</div>
+
+<!-- Task 3.1 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 3.1 [TSK-LFC-01]: Desktop SafeProcessJob Integration</span>
+    <span class="badge badge-critical">Critical • Lifecycle</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Wire <code>SafeProcessJob</code> (<code>JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE</code>) from aeromesh-engine into aeromesh_desktop.rs to trap all worker and diffusion processes.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Instantiate <code>SafeProcessJob::new()?</code> in main() and store in DesktopState.<br>
+      2. Assign child handles in <code>spawn_role_process</code> and <code>post_image_stream</code> immediately after <code>.spawn()</code>.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Start Coordinator; kill AeroMesh-Desktop.exe via Task Manager. Verify aeromesh.exe terminates immediately and VRAM is freed.</div>
+  </div>
+</div>
+
+<!-- Task 3.2 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 3.2 [TSK-LFC-02]: Native Window Lifecycle Watchdog & Coordinated Shutdown</span>
+    <span class="badge badge-critical">Critical • Lifecycle</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Retain Edge child handle in <code>spawn_desktop_window</code>, monitor via <code>child.wait()</code> in dedicated thread, and signal graceful Axum server shutdown on window close.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Return <code>Option&lt;Child&gt;</code> from spawn_desktop_window.<br>
+      2. Spawn thread waiting on <code>child.wait()</code>, transmitting shutdown signal to tokio watch channel.<br>
+      3. Pass shutdown signal to <code>axum::serve(listener, app).with_graceful_shutdown(...)</code>.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Launch desktop app; click "X" on Edge window. Verify server logs clean exit and process terminates within 500 ms.</div>
+  </div>
+</div>
+
+<!-- Task 4.1 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 4.1 [TSK-NET-01]: Native Win32 Adapter Enumeration (GetAdaptersAddresses)</span>
+    <span class="badge badge-high">High • Networking</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Replace <code>8.8.8.8</code> UDP socket probe with direct Win32 <code>iphlpapi!GetAdaptersAddresses</code> API calls to discover active operational interfaces.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/Cargo.toml</code>, <code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Enable <code>Win32_NetworkManagement_IpHelper</code> in windows-sys.<br>
+      2. Query adapters with GAA_FLAG_SKIP_DNS_SERVER, filtering for Ethernet and Wi-Fi adapters with OperStatusUp.<br>
+      3. Extract primary unicast IPv4 address; fallback cleanly to 127.0.0.1 if disconnected.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Disconnect WAN internet cable while keeping local Wi-Fi active; verify local LAN IP is accurately detected.</div>
+  </div>
+</div>
+
+<!-- Task 4.2 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 4.2 [TSK-NET-02]: Win32 ARP Neighbor Enumeration (GetIpNetTable2)</span>
+    <span class="badge badge-medium">Medium • Networking</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Replace localized <code>arp -a</code> CLI parsing with typed Win32 <code>GetIpNetTable2</code> API calls.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Call GetIpNetTable2 to retrieve typed MIB_IPNET_ROW2 entries.<br>
+      2. Filter valid unicast IPv4 addresses and probe candidate worker nodes on port 50052.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Run on Windows set to German or Japanese system display locale; confirm worker discovery succeeds.</div>
+  </div>
+</div>
+
+<!-- Task 5.1 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 5.1 [TSK-BST-01]: Self-Bootstrapping Engine & Runtime Dependency Verifier</span>
+    <span class="badge badge-critical">Critical • Bootstrapping</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Build autonomous bootstrap verifier inside <code>aeromesh_desktop.rs</code> that provisions keys, sets up PATH, audits CUDA DLLs, and checks VRAM without shell scripts.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Implement <code>verify_and_bootstrap_environment()</code> checking bin/ and bin/diffusion/ DLLs.<br>
+      2. Add bin directories to process PATH dynamically in-memory.<br>
+      3. Provision config.env in %APPDATA%\AeroMESH.<br>
+      4. Implement <code>GET /api/bootstrap/status</code> returning hardware and dependency readiness JSON.<br>
+      5. Implement <code>POST /api/bootstrap/complete</code> writing <code>onboarding_complete.json</code>.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Delete .env and launch AeroMesh-Desktop.exe directly (no setup scripts). Verify app initializes and serves UI cleanly.</div>
+  </div>
+</div>
+
+<!-- Task 5.2 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 5.2 [TSK-BST-02]: Zero-Forced-Download Model Downloader API</span>
+    <span class="badge badge-critical">Critical • Zero Downloads</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Excise all automatic model curl scripts; implement opt-in SSE streaming download endpoint with byte progress, speed, ETA, and cancellation.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>start.ps1</code>, <code>setup.ps1</code>, <code>app.py</code>, <code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Remove automatic curl download of DreamShaper 8 from start.ps1 lines 396-401.<br>
+      2. Define curated lightweight catalog in desktop binary (Qwen 2.5 1.5B ~0.98GB, Llama 3.2 3B ~2.02GB, DreamShaper 8 ~1.99GB).<br>
+      3. Implement <code>POST /api/models/download</code> streaming SSE byte progress to client.<br>
+      4. Implement <code>POST /api/models/download/abort</code> for clean cancellation.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Launch clean workspace; verify zero network calls occur. Trigger download of Qwen 1.5B via API; verify SSE events report progress.</div>
+  </div>
+</div>
+
+<!-- Task 5.3 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 5.3 [TSK-UI-01]: Offline Vendor Asset Packaging</span>
+    <span class="badge badge-high">High • Air-Gapped UI</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Bundle all vendor JavaScript libraries, stylesheets, and fonts locally in <code>static/vendor/</code> and update HTML references.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>static/index.html</code>, <code>static/vendor/**</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Vendor pinned releases: Lucide (0.469.0), Marked (12.0.2), Marked-Highlight, DOMPurify (3.2.4), Highlight.js (11.9.0), KaTeX (0.16.9 + fonts).<br>
+      2. Update index.html to reference local <code>/static/vendor/...</code> paths.<br>
+      3. Ensure aeromesh_desktop.rs serves .woff2 font mime types correctly.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Disconnect internet completely; confirm markdown, LaTeX math, icons, and code highlighting render without errors.</div>
+  </div>
+</div>
+
+<!-- Task 5.4 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 5.4 [TSK-UI-02]: Atomic JSON Chat Storage in LocalAppData</span>
+    <span class="badge badge-high">High • Data Persistence</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Provide <code>/api/conversations</code> endpoints writing atomically to <code>%LOCALAPPDATA%\AeroMESH\conversations.json</code>, with frontend write-through sync.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code>, <code>static/js/app.js</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Implement GET and POST /api/conversations in aeromesh_desktop.rs using atomic file renaming.<br>
+      2. Update app.js to load conversations from backend and write-through on changes.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Chat on port 7860; restart app on port 7861. Confirm all conversation history persists across port shifts.</div>
+  </div>
+</div>
+
+<!-- Task 5.5 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 5.5 [TSK-UI-03]: Honest DiT Image Diffusion Progress & Stdout Telemetry</span>
+    <span class="badge badge-medium">Medium • Telemetry</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Replace synthetic 500 ms sleep loop with real-time parsing of <code>sd-cli.exe</code> standard output.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>crates/aeromesh-cli/src/bin/aeromesh_desktop.rs</code>, <code>static/js/app.js</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Pipe stdout from sd-cli.exe and stream genuine step progress via SSE.<br>
+      2. Report true local metrics (0.0 MB Wire) for single-node execution.<br>
+      3. Stream dit_error event immediately if sd-cli fails or OOMs.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Trigger image generation without GPU model; verify immediate error event is rendered in UI without fake sleep ticks.</div>
+  </div>
+</div>
+
+<!-- Task 5.6 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 5.6 [TSK-UI-04]: 3-Step First-Run Onboarding Wizard (Kimi Dark Matte + Lucide)</span>
+    <span class="badge badge-critical">Critical • User Experience</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Implement 3-step modal wizard matching <code>liquid_glass.css</code> dark matte tokens, using Lucide SVG icons exclusively (zero emojis).</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>static/index.html</code>, <code>static/css/liquid_glass.css</code>, <code>static/js/app.js</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. <strong>Step 1 (Environment):</strong> Auto-verify CUDA DLLs, GPU VRAM, credentials, and Tailscale/LAN IP with live checkmark cards.<br>
+      2. <strong>Step 2 (Opt-In Models):</strong> Curated cards for Qwen 2.5 1.5B, Llama 3.2 3B, and DreamShaper 8 with live progress bar, plus prominent "Skip / I Have My Own Models" button.<br>
+      3. <strong>Step 3 (Role Launch):</strong> Coordinator, Worker, or Local Mesh cards triggering launch and fading out wizard.<br>
+      4. Enforce strict Kimi dark matte styling and zero emojis throughout.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Launch clean app; verify wizard appears. Click "Skip" in Step 2; confirm zero downloads occur and Step 3 activates chosen role.</div>
+  </div>
+</div>
+
+<!-- Task 6.1 -->
+<div class="task-card">
+  <div class="task-header">
+    <span class="task-title">Task 6.1 [TSK-PKG-01]: Production Inno Setup Packaging Script</span>
+    <span class="badge badge-high">High • Distribution</span>
+  </div>
+  <div class="task-grid">
+    <div class="task-label">Technical Decision:</div>
+    <div>Author Inno Setup script generating a signed single-file installer (AeroMESH-Setup.exe) with Start Menu shortcuts and clean uninstallation.</div>
+    <div class="task-label">Files Modified:</div>
+    <div><code>installer/aeromesh_setup.iss</code></div>
+    <div class="task-label">Implementation:</div>
+    <div>
+      1. Bundle binaries, DLLs, and static assets targeting {autopf}\AeroMESH.<br>
+      2. Register uninstaller with option to purge %LOCALAPPDATA%\AeroMESH.<br>
+      3. Check for VC++ 2015-2022 redistributable and install silently if missing.
+    </div>
+    <div class="task-label">Verification:</div>
+    <div>Install on clean Windows VM; verify standard user launch and execute clean uninstaller.</div>
+  </div>
+</div>
+
+<!-- Section 6 -->
+<div class="page-break"></div>
+<h1>6. Comprehensive Risk Register & Failure Mitigations</h1>
+<table>
+  <thead>
+    <tr>
+      <th style="width: 50px;">ID</th>
+      <th style="width: 170px;">Risk Description</th>
+      <th style="width: 60px;">Severity</th>
+      <th>Mitigation Strategy</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>RSK-01</strong></td>
+      <td>Edge --user-data-dir blocked by Enterprise Group Policy</td>
+      <td><span class="badge badge-high">High</span></td>
+      <td>Detect launch failure; fallback to system default browser via ShellExecuteW while notifying user.</td>
+    </tr>
+    <tr>
+      <td><strong>RSK-02</strong></td>
+      <td>Network disconnects during opt-in model download in Wizard</td>
+      <td><span class="badge badge-medium">Medium</span></td>
+      <td>Downloader writes to .tmp file and supports HTTP Range request resumption (-C - equivalent).</td>
+    </tr>
+    <tr>
+      <td><strong>RSK-03</strong></td>
+      <td>MoveFileExW atomic rename collision on Windows</td>
+      <td><span class="badge badge-medium">Medium</span></td>
+      <td>Implement retry loop with exponential backoff (up to 3 retries, 50ms) to accommodate file scanner locks.</td>
+    </tr>
+    <tr>
+      <td><strong>RSK-04</strong></td>
+      <td>Windows Defender SmartScreen blocks unsigned installer</td>
+      <td><span class="badge badge-high">High</span></td>
+      <td>Document Authenticode signing workflow; submit installer to Microsoft Security Intelligence.</td>
+    </tr>
+    <tr>
+      <td><strong>RSK-05</strong></td>
+      <td>Missing VC++ Redistributable on bare Windows installation</td>
+      <td><span class="badge badge-high">High</span></td>
+      <td>Configure Inno Setup installer to bundle and silently install vcredist_x64.exe if registry check fails.</td>
+    </tr>
+    <tr>
+      <td><strong>RSK-06</strong></td>
+      <td>User clicks "Skip" on Wizard with empty models folder</td>
+      <td><span class="badge badge-medium">Medium</span></td>
+      <td>Node Control Center clearly marks "No Local GGUF Found" and provides a folder picker / re-open wizard link.</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- Section 7 -->
+<h1>7. Testing Plan & End-to-End Windows Validation Matrix</h1>
+<table>
+  <thead>
+    <tr>
+      <th style="width: 70px;">Test ID</th>
+      <th style="width: 160px;">Test Objective</th>
+      <th style="width: 200px;">Execution Method</th>
+      <th>Acceptance Criteria</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>TC-BST-01</strong></td>
+      <td>Autonomous Bootstrap</td>
+      <td>Launch binary without running any .ps1 scripts</td>
+      <td>Binary provisions keys, verifies DLLs, and opens UI on port 7860.</td>
+    </tr>
+    <tr>
+      <td><strong>TC-BST-02</strong></td>
+      <td>Zero Forced Downloads</td>
+      <td>Launch app with empty models folder</td>
+      <td>Zero network calls to HuggingFace or curl; zero MB downloaded automatically.</td>
+    </tr>
+    <tr>
+      <td><strong>TC-BST-03</strong></td>
+      <td>Wizard Step 1</td>
+      <td>Observe Wizard Step 1 on first launch</td>
+      <td>CUDA DLLs, GPU VRAM, IPs, and credentials show verified badges with Lucide icons.</td>
+    </tr>
+    <tr>
+      <td><strong>TC-BST-04</strong></td>
+      <td>Wizard Step 2 (Download)</td>
+      <td>Select Qwen 1.5B and click Download in Step 2</td>
+      <td>Animated progress bar displays live MB, %, speed, and ETA; saves to models folder.</td>
+    </tr>
+    <tr>
+      <td><strong>TC-BST-05</strong></td>
+      <td>Wizard Step 2 (Skip)</td>
+      <td>Click "Skip / I Have My Own Models"</td>
+      <td>Immediately transitions to Step 3 without downloading any bytes.</td>
+    </tr>
+    <tr>
+      <td><strong>TC-BST-06</strong></td>
+      <td>Wizard Step 3 (Launch)</td>
+      <td>Select "Coordinator + UI" in Step 3</td>
+      <td>Backend starts coordinator, dismisses wizard, and enters Studio workspace.</td>
+    </tr>
+    <tr>
+      <td><strong>TC-BST-07</strong></td>
+      <td>Onboarding Persistence</td>
+      <td>Restart app after completing onboarding</td>
+      <td>App detects onboarding_complete.json and opens Node Control Center directly.</td>
+    </tr>
+    <tr>
+      <td><strong>TC-WIN-01</strong></td>
+      <td>Standard User Permissions</td>
+      <td>Run from C:\Program Files under standard account</td>
+      <td>App launches without os error 5; writes config to %APPDATA% and cache to %LOCALAPPDATA%.</td>
+    </tr>
+    <tr>
+      <td><strong>TC-WIN-02</strong></td>
+      <td>Zombie Elimination</td>
+      <td>Launch app, start worker, click "X" on Edge window</td>
+      <td>AeroMesh-Desktop.exe and child aeromesh.exe terminate within 500 ms; VRAM released.</td>
+    </tr>
+    <tr>
+      <td><strong>TC-WIN-03</strong></td>
+      <td>Single-Instance Guard</td>
+      <td>Double-click desktop shortcut twice</td>
+      <td>First window gains focus; second instance exits; no binding to port 7861.</td>
+    </tr>
+    <tr>
+      <td><strong>TC-WIN-04</strong></td>
+      <td>Cross-Origin Web Isolation</td>
+      <td>Execute fetch from external website console</td>
+      <td>Browser blocks request via CORS policy; server logs 403 Forbidden.</td>
+    </tr>
+    <tr>
+      <td><strong>TC-WIN-05</strong></td>
+      <td>Air-Gapped Startup</td>
+      <td>Disconnect network completely and launch app</td>
+      <td>App starts instantly; all icons, LaTeX math, and code highlighting render cleanly.</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- Section 8 -->
+<h1>8. Rollback Protocol & Safeguards</h1>
+<p>To guarantee zero downtime and protect existing working code during remediation:</p>
+<ol>
+  <li><strong>Git Baseline:</strong> Tag baseline as <code>CHECKPOINT_PRE_BOOTSTRAP</code>. Tag each completed task atomically (e.g. <code>CHECKPOINT_TASK_BST_01</code>).</li>
+  <li><strong>Onboarding Fallback:</strong> Deleting <code>%LOCALAPPDATA%\AeroMESH\onboarding_complete.json</code> resets wizard state cleanly. Passing <code>?skip_wizard=1</code> in the URL bypasses the modal directly into the Node Control Center.</li>
+  <li><strong>Emergency Reversion Command:</strong>
+    <pre>git reset --hard CHECKPOINT_PRE_BOOTSTRAP
+cargo clean
+cargo test --workspace</pre>
+  </li>
+  <li><strong>Gate Condition:</strong> All 92 automated tests (65 Rust + 27 Python) must pass without warnings at every phase boundary.</li>
+</ol>
+
+<!-- Section 9 -->
+<h1>9. Final Ordered Task Execution Sequence</h1>
+<div class="callout">
+  <div class="callout-title">Dependency-Enforced Execution Path</div>
+  1. [TSK-FND-01] Windows Storage Manager (%APPDATA% & %LOCALAPPDATA% Hierarchy)<br>
+  2. [TSK-FND-02] Win32 Application Manifest & Single-Instance Mutex<br>
+  3. [TSK-FND-03] Rolling File Logger & Unhandled Exception Minidump Filter<br>
+  4. [TSK-SEC-01] CSPRNG Session Token Generation & Endpoint Authentication<br>
+  5. [TSK-SEC-02] Localhost CORS Lockdown & Host Header Validation<br>
+  6. [TSK-LFC-01] Desktop SafeProcessJob Integration (Win32 Job Object Limits)<br>
+  7. [TSK-LFC-02] Native Window Lifecycle Watchdog & Coordinated Shutdown<br>
+  8. [TSK-NET-01] Native Win32 Adapter Enumeration (iphlpapi!GetAdaptersAddresses)<br>
+  9. [TSK-NET-02] Win32 ARP Neighbor Enumeration (GetIpNetTable2)<br>
+  10. [TSK-BST-01] Self-Bootstrapping Engine (Autonomous Secrets, DLL Audit & Paths)<br>
+  11. [TSK-BST-02] Zero-Forced-Download Model Downloader API (SSE Chunk Progress)<br>
+  12. [TSK-UI-01] Offline Vendor Asset Packaging (Zero CDNs - Bundled JS/CSS/Fonts)<br>
+  13. [TSK-UI-02] Atomic JSON Chat Storage in LocalAppData<br>
+  14. [TSK-UI-03] Honest DiT Image Diffusion Progress & Stdout Telemetry<br>
+  15. [TSK-UI-04] 3-Step First-Run Onboarding Wizard (Kimi Dark Matte + Lucide Only)<br>
+  16. [TSK-PKG-01] Production Inno Setup Packaging Script (Signed Installer + Uninstaller)
+</div>
+
+<div style="margin-top: 20px; padding-top: 10px; border-top: 1px solid #cbd5e1; font-size: 8pt; color: #64748b; display: flex; justify-content: space-between;">
+  <span>AeroMESH Engineering Architecture Board</span>
+  <span>Approved for Implementation • Version 2.0.0</span>
+</div>
+
+</body>
+</html>

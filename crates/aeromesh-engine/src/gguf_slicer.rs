@@ -902,9 +902,28 @@ impl InPlaceStageGuard {
         }
         drop(loader);
 
-        let parent = model_path.parent().unwrap_or_else(|| Path::new("models"));
+        let out_dir = if let Ok(custom) = std::env::var("AEROMESH_CACHE_DIR") {
+            let p = PathBuf::from(custom);
+            let _ = std::fs::create_dir_all(&p);
+            p
+        } else {
+            let p = model_path.parent().unwrap_or_else(|| Path::new("models"));
+            let probe_file = p.join(format!(".aeromesh_probe_write_{}.tmp", std::process::id()));
+            if std::fs::write(&probe_file, b"").is_ok() {
+                let _ = std::fs::remove_file(&probe_file);
+                p.to_path_buf()
+            } else {
+                let fallback = if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                    PathBuf::from(local_app_data).join("AeroMESH").join("cache")
+                } else {
+                    std::env::temp_dir().join("AeroMESH").join("cache")
+                };
+                let _ = std::fs::create_dir_all(&fallback);
+                fallback
+            }
+        };
         let stage_num = if slice.is_last_stage { 2 } else { 1 };
-        let tmp_path = parent.join(format!(
+        let tmp_path = out_dir.join(format!(
             ".aeromesh_ephemeral_s{}_{}_stage{}.gguf",
             slice.layer_start, slice.layer_end, stage_num
         ));

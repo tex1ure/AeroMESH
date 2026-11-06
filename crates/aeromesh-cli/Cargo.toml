@@ -15,6 +15,9 @@ path = "src/bin/aeromesh_desktop.rs"
 
 [dependencies]
 aeromesh-core = { path = "../aeromesh-core" }
+windows-sys = { workspace = true }
+dirs = { workspace = true }
+tracing-appender = { workspace = true }
 aeromesh-engine = { path = "../aeromesh-engine" }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -29,3 +32,6 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 tokio-stream = { workspace = true }
 tower-http = { workspace = true }
+
+[build-dependencies]
+winres = "0.1"

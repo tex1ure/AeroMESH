@@ -1,13 +1,25 @@
 @echo off
-title AeroMESH Desktop App
+title AeroMESH Desktop Studio
 cd /d "%~dp0"
-echo Launching AeroMESH Desktop Window...
+echo ========================================================================
+echo    Launching AeroMESH Unified Desktop Studio (CUDA + Mesh)
+echo ========================================================================
+
 if exist "target\release\AeroMesh-Desktop.exe" (
     start "" "target\release\AeroMesh-Desktop.exe"
-) else if exist "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" (
-    start "" "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --app="http://127.0.0.1:7860" --window-size=1300,860
-) else if exist "C:\Program Files\Google\Chrome\Application\chrome.exe" (
-    start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --app="http://127.0.0.1:7860" --window-size=1300,860
+) else if exist "bin\AeroMesh-Desktop.exe" (
+    start "" "bin\AeroMesh-Desktop.exe"
+) else if exist "AeroMesh-Desktop.exe" (
+    start "" "AeroMesh-Desktop.exe"
+) else if exist "target\debug\AeroMesh-Desktop.exe" (
+    start "" "target\debug\AeroMesh-Desktop.exe"
 ) else (
-    start http://127.0.0.1:7860
+    echo Building AeroMesh-Desktop.exe...
+    cargo build --bin AeroMesh-Desktop
+    if exist "target\debug\AeroMesh-Desktop.exe" (
+        start "" "target\debug\AeroMesh-Desktop.exe"
+    ) else (
+        echo [!] Failed to find or compile AeroMesh-Desktop.exe.
+        pause
+    )
 )
