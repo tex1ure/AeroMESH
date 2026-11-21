@@ -14,6 +14,8 @@ import base64
 import hashlib
 import ipaddress
 import shutil
+import secrets
+import struct
 import uuid
 from urllib.parse import urlparse, quote
 from concurrent.futures import ThreadPoolExecutor
@@ -952,6 +954,8 @@ async def node_state():
         "models_dir": get_models_dirs()[0],
         "models": gguf_models,
         "image_models": image_models,
+        "cluster_fingerprint": _secret_fingerprint(os.environ.get("AEROMESH_WORKER_SECRET", "")),
+        "paired_peers": load_paired_peers(),
         "logs": logs_copy,
     }
 
@@ -2067,6 +2071,718 @@ async def cancel_model_download(request: Request):
             raise HTTPException(status_code=404, detail="Download task not found.")
         _DOWNLOAD_CANCEL[download_id] = True
     return JSONResponse(status_code=200, content={"status": "cancelling", "id": download_id})
+
+
+# ============================================================================
+# ONE-CLICK CLUSTER PAIRING & ENCRYPTED SECRET SYNC (aeromesh-pair-v1)
+# ============================================================================
+DEFAULT_PAIR_PORT = 50053
+PAIR_SESSION_TTL_SECS = 300
+PAIR_MAX_FAILED_ATTEMPTS = 5
+PAIR_PBKDF2_ITERS = 100_000
+PAIR_MAX_LINE_BYTES = 16 * 1024
+
+
+def get_paired_peers_file() -> str:
+    return os.path.join(get_data_dir(), "paired_peers.json")
+
+
+def _secret_fingerprint(secret: str) -> str:
+    s = str(secret or "").strip()
+    if not s:
+        return "UNSET"
+    digest = hashlib.sha256(b"aeromesh-cluster-fingerprint-v1:" + s.encode("utf-8")).digest()
+    h = digest[:4].hex().upper()
+    return f"KEY-{h[:4]}-{h[4:8]}"
+
+
+def _format_pin_display(pin: str) -> str:
+    digits = "".join(ch for ch in str(pin or "") if ch.isdigit())
+    if len(digits) == 6:
+        return f"{digits[:3]}-{digits[3:]}"
+    return digits
+
+
+def _upsert_env_var(key: str, value: str) -> str:
+    clean_key = str(key or "").strip()
+    if not clean_key or not re.fullmatch(r"[A-Za-z0-9_]+", clean_key):
+        raise ValueError(f"Invalid environment variable name '{key}'")
+    if any(c in str(value) for c in ("\n", "\r", "\x00")):
+        raise ValueError("Environment variable value cannot contain control characters")
+
+    env_path = os.path.join(get_data_dir(), ".env")
+    os.makedirs(os.path.dirname(env_path), exist_ok=True)
+
+    lines = []
+    if os.path.isfile(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+
+    prefix = f"{clean_key}="
+    replaced = False
+    new_lines = []
+    for line in lines:
+        if line.lstrip().startswith(prefix):
+            new_lines.append(f"{clean_key}={value}")
+            replaced = True
+        else:
+            new_lines.append(line)
+    if not replaced:
+        new_lines.append(f"{clean_key}={value}")
+
+    tmp_path = env_path + ".tmp"
+    content = "\n".join(new_lines) + "\n"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    if os.name != "nt":
+        try:
+            os.chmod(tmp_path, 0o600)
+        except Exception:
+            pass
+    os.replace(tmp_path, env_path)
+    os.environ[clean_key] = value
+    return env_path
+
+
+def _ensure_worker_secret() -> str:
+    cur = os.environ.get("AEROMESH_WORKER_SECRET", "").strip()
+    if cur:
+        return cur
+    fresh = secrets.token_hex(32)
+    _upsert_env_var("AEROMESH_WORKER_SECRET", fresh)
+    return fresh
+
+
+def _derive_pair_session_keys(pin_digits: str, salt: bytes, host_nonce: bytes, client_nonce: bytes):
+    kdf_salt = salt + host_nonce + client_nonce
+    master = hashlib.pbkdf2_hmac("sha256", pin_digits.encode("utf-8"), kdf_salt, PAIR_PBKDF2_ITERS, dklen=32)
+    auth_key = hashlib.sha256(master + b"aeromesh-pair-v1-auth").digest()
+    enc_key = hashlib.sha256(master + b"aeromesh-pair-v1-enc").digest()
+    mac_key = hashlib.sha256(master + b"aeromesh-pair-v1-mac").digest()
+    return auth_key, enc_key, mac_key
+
+
+def _sha256_ctr_xor(enc_key: bytes, iv: bytes, data: bytes) -> bytes:
+    out = bytearray()
+    counter = 0
+    for off in range(0, len(data), 32):
+        chunk = data[off : off + 32]
+        block = hashlib.sha256(enc_key + iv + struct.pack(">I", counter)).digest()
+        out.extend(b ^ block[i] for i, b in enumerate(chunk))
+        counter = (counter + 1) & 0xFFFFFFFF
+    return bytes(out)
+
+
+def _pair_encrypt_and_mac(enc_key: bytes, mac_key: bytes, plaintext: bytes):
+    iv = secrets.token_bytes(16)
+    ciphertext = _sha256_ctr_xor(enc_key, iv, plaintext)
+    tag = hmac.new(mac_key, iv + ciphertext, hashlib.sha256).digest()
+    return iv, ciphertext, tag
+
+
+def _pair_verify_and_decrypt(enc_key: bytes, mac_key: bytes, iv: bytes, ciphertext: bytes, tag: bytes) -> bytes:
+    if len(iv) != 16 or len(tag) != 32:
+        raise ValueError("Invalid encrypted payload framing.")
+    expected = hmac.new(mac_key, iv + ciphertext, hashlib.sha256).digest()
+    if not hmac.compare_digest(expected, tag):
+        raise ValueError("Cryptographic integrity check failed on synced payload.")
+    return _sha256_ctr_xor(enc_key, iv, ciphertext)
+
+
+def _pair_client_proof(auth_key: bytes, client_nonce: bytes, host_nonce: bytes) -> bytes:
+    return hmac.new(auth_key, b"client-proof:" + client_nonce + host_nonce, hashlib.sha256).digest()
+
+
+def _pair_host_proof(auth_key: bytes, host_nonce: bytes, client_nonce: bytes) -> bytes:
+    return hmac.new(auth_key, b"host-proof:" + host_nonce + client_nonce, hashlib.sha256).digest()
+
+
+def _parse_pair_join_target(invite_code: str, host_raw: str, pin_raw: str):
+    host_part = str(host_raw or "").strip()
+    pin_part = str(pin_raw or "").strip()
+    inv = str(invite_code or "").strip()
+    if inv:
+        if inv.upper().startswith("AERO-"):
+            inv = inv[5:]
+        if "-" not in inv:
+            raise ValueError("Invalid invite code format (expected AERO-<ip>:50053-<6-digit-pin>).")
+        h, p = inv.rsplit("-", 1)
+        host_part = h.strip()
+        pin_part = p.strip()
+
+    pin_digits = "".join(ch for ch in pin_part if ch.isdigit())
+    if len(pin_digits) != 6:
+        raise ValueError("Pairing code must be exactly 6 digits (e.g. 482-915).")
+
+    cleaned = re.sub(r"^https?://", "", host_part).rstrip("/")
+    if not cleaned or "/" in cleaned or " " in cleaned:
+        raise ValueError("Enter a valid peer IP address or hostname.")
+
+    if ":" in cleaned and cleaned.count(":") == 1:
+        h_only, p_str = cleaned.rsplit(":", 1)
+        try:
+            port = int(p_str)
+        except ValueError:
+            raise ValueError("Invalid pairing port number.")
+        host = h_only.strip()
+    else:
+        host = cleaned
+        port = DEFAULT_PAIR_PORT
+
+    if port < 1024 or port > 65535:
+        raise ValueError("Pairing port must be between 1024 and 65535.")
+
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        if ip_obj.version == 4 and str(ip_obj).startswith("169.254."):
+            raise ValueError("Link-local metadata addresses are not permitted for pairing.")
+    except ValueError as exc:
+        if "Link-local" in str(exc):
+            raise
+        if len(host) > 253 or not re.fullmatch(r"[A-Za-z0-9.-]+", host):
+            raise ValueError("Invalid peer hostname.")
+
+    return host, port, pin_digits
+
+
+def load_paired_peers() -> list:
+    path = get_paired_peers_file()
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_paired_peers(peers: list) -> None:
+    path = get_paired_peers_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(peers, f, indent=2)
+
+
+def upsert_paired_peer(peer: dict) -> list:
+    peers = load_paired_peers()
+    ep = peer.get("worker_endpoint", "")
+    pid = peer.get("id", "")
+    replaced = False
+    for idx, cur in enumerate(peers):
+        if cur.get("id") == pid or (ep and cur.get("worker_endpoint") == ep):
+            peers[idx] = peer
+            replaced = True
+            break
+    if not replaced:
+        peers.insert(0, peer)
+    save_paired_peers(peers)
+    return peers
+
+
+def remove_paired_peer(id_or_endpoint: str) -> list:
+    target = str(id_or_endpoint or "").strip()
+    peers = [p for p in load_paired_peers() if p.get("id") != target and p.get("worker_endpoint") != target]
+    save_paired_peers(peers)
+    return peers
+
+
+def _local_node_name() -> str:
+    return (os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or socket.gethostname() or "AeroMesh-Node").strip()
+
+
+def _local_llm_models() -> list:
+    models = []
+    seen = set()
+    for d in get_models_dirs():
+        if os.path.isdir(d):
+            for fname in sorted(os.listdir(d)):
+                if fname.lower().endswith(".gguf") and not _is_slice_file(fname) and not fname.startswith(".aeromesh_"):
+                    if fname not in seen:
+                        seen.add(fname)
+                        models.append(fname)
+    return models
+
+
+def _preferred_worker_endpoint(wifi_ip: str, ts_ip: str) -> str:
+    if ts_ip and ts_ip not in ("Not Connected", "Local") and "." in ts_ip:
+        return f"{ts_ip}:50052"
+    return f"{wifi_ip}:50052"
+
+
+async def _pair_read_json_line(reader: asyncio.StreamReader) -> dict:
+    raw = await asyncio.wait_for(reader.readline(), timeout=8.0)
+    if not raw:
+        raise ValueError("Peer closed connection.")
+    if len(raw) > PAIR_MAX_LINE_BYTES:
+        raise ValueError("Peer message exceeded maximum allowed length.")
+    obj = json.loads(raw.decode("utf-8").strip())
+    if not isinstance(obj, dict):
+        raise ValueError("Malformed JSON from peer.")
+    return obj
+
+
+async def _pair_write_json_line(writer: asyncio.StreamWriter, payload: dict) -> None:
+    raw = (json.dumps(payload) + "\n").encode("utf-8")
+    writer.write(raw)
+    await asyncio.wait_for(writer.drain(), timeout=8.0)
+
+
+class ClusterPairingManager:
+    def __init__(self):
+        self.server: Optional[asyncio.AbstractServer] = None
+        self.pin: str = ""
+        self.port: int = DEFAULT_PAIR_PORT
+        self.salt: bytes = b""
+        self.expires_at: float = 0.0
+        self.failed_attempts: int = 0
+        self.paired_count: int = 0
+        self.active: bool = False
+        self._expiry_task: Optional[asyncio.Task] = None
+
+    def is_active(self) -> bool:
+        if self.active and time.time() >= self.expires_at:
+            self.active = False
+        return self.active
+
+    async def stop(self) -> None:
+        self.active = False
+        if self._expiry_task and not self._expiry_task.done():
+            self._expiry_task.cancel()
+        self._expiry_task = None
+        if self.server is not None:
+            try:
+                self.server.close()
+                await self.server.wait_closed()
+            except Exception:
+                pass
+            self.server = None
+
+    async def start(self, bind_host: str = "0.0.0.0", preferred_port: int = DEFAULT_PAIR_PORT) -> dict:
+        await self.stop()
+        _ensure_worker_secret()
+
+        server = None
+        bound_port = preferred_port
+        for p in range(preferred_port, preferred_port + 6):
+            try:
+                server = await asyncio.start_server(self._handle_client, bind_host, p)
+                bound_port = p
+                break
+            except OSError:
+                continue
+        if server is None:
+            raise RuntimeError(f"Could not bind pairing port {preferred_port}.")
+
+        self.server = server
+        self.port = bound_port
+        self.pin = f"{secrets.randbelow(1_000_000):06d}"
+        self.salt = secrets.token_bytes(16)
+        self.expires_at = time.time() + PAIR_SESSION_TTL_SECS
+        self.failed_attempts = 0
+        self.paired_count = 0
+        self.active = True
+
+        async def _auto_expire():
+            try:
+                await asyncio.sleep(PAIR_SESSION_TTL_SECS)
+                await self.stop()
+            except asyncio.CancelledError:
+                pass
+
+        self._expiry_task = asyncio.create_task(_auto_expire())
+        return self.status_payload()
+
+    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        peer_info = writer.get_extra_info("peername")
+        peer_ip = peer_info[0] if isinstance(peer_info, tuple) and peer_info else "127.0.0.1"
+        try:
+            msg = await _pair_read_json_line(reader)
+            op = str(msg.get("op", ""))
+            now = time.time()
+            if not self.is_active():
+                await _pair_write_json_line(writer, {"ok": False, "error": "Pairing session expired."})
+                return
+
+            wifi_ip = get_local_wifi_ip()
+            ts_ip = get_tailscale_ip()
+            node_name = _local_node_name()
+            gpu = get_gpu_summary()
+            models = _local_llm_models()
+            worker_ep = _preferred_worker_endpoint(wifi_ip, ts_ip)
+            secret = _ensure_worker_secret()
+            fp = _secret_fingerprint(secret)
+
+            if op == "probe":
+                await _pair_write_json_line(writer, {
+                    "ok": True,
+                    "protocol": "aeromesh-pair-v1",
+                    "node_name": node_name,
+                    "gpu": gpu,
+                    "wifi_ip": wifi_ip,
+                    "tailscale_ip": ts_ip,
+                    "pair_port": self.port,
+                    "expires_in": max(0, int(self.expires_at - now)),
+                    "cluster_fingerprint": fp,
+                })
+                return
+
+            if op != "hello":
+                await _pair_write_json_line(writer, {"ok": False, "error": "Expected hello or probe."})
+                return
+
+            client_nonce = bytes.fromhex(str(msg.get("client_nonce", "")))
+            if len(client_nonce) != 16:
+                await _pair_write_json_line(writer, {"ok": False, "error": "Invalid client nonce length."})
+                return
+
+            host_nonce = secrets.token_bytes(16)
+            await _pair_write_json_line(writer, {
+                "ok": True,
+                "protocol": "aeromesh-pair-v1",
+                "host_nonce": host_nonce.hex(),
+                "salt": self.salt.hex(),
+                "node_name": node_name,
+                "gpu": gpu,
+                "wifi_ip": wifi_ip,
+                "tailscale_ip": ts_ip,
+                "worker_endpoint": worker_ep,
+                "models": models,
+                "cluster_fingerprint": fp,
+            })
+
+            verify_msg = await _pair_read_json_line(reader)
+            if verify_msg.get("op") != "verify":
+                await _pair_write_json_line(writer, {"ok": False, "error": "Expected verify step."})
+                return
+
+            proof_bytes = bytes.fromhex(str(verify_msg.get("proof", "")))
+            auth_key, enc_key, mac_key = await asyncio.to_thread(
+                _derive_pair_session_keys, self.pin, self.salt, host_nonce, client_nonce
+            )
+            expected = _pair_client_proof(auth_key, client_nonce, host_nonce)
+            if not hmac.compare_digest(expected, proof_bytes):
+                self.failed_attempts += 1
+                if self.failed_attempts >= PAIR_MAX_FAILED_ATTEMPTS:
+                    await _pair_write_json_line(
+                        writer,
+                        {"ok": False, "error": "Too many invalid attempts. Pairing session locked and closed."},
+                    )
+                    asyncio.create_task(self.stop())
+                else:
+                    rem = max(0, PAIR_MAX_FAILED_ATTEMPTS - self.failed_attempts)
+                    await _pair_write_json_line(
+                        writer,
+                        {"ok": False, "error": f"Invalid pairing code ({rem} attempts left)."},
+                    )
+                return
+
+            secret_payload = json.dumps({"worker_secret": secret, "cluster_fingerprint": fp}).encode("utf-8")
+            iv, ciphertext, tag = _pair_encrypt_and_mac(enc_key, mac_key, secret_payload)
+            host_proof = _pair_host_proof(auth_key, host_nonce, client_nonce)
+
+            peer_wifi = str(msg.get("wifi_ip", "")).strip()
+            if not peer_wifi or peer_wifi == "127.0.0.1":
+                peer_wifi = peer_ip
+            peer_ts = str(msg.get("tailscale_ip", "Not Connected")).strip()
+            peer_ep = str(msg.get("worker_endpoint", "")).strip()
+            if not peer_ep or peer_ep.startswith("127.0.0.1"):
+                peer_ep = _preferred_worker_endpoint(peer_wifi, peer_ts)
+            peer_models = [str(m) for m in (msg.get("models") or []) if isinstance(m, str)][:100]
+            ts_now = int(time.time())
+            upsert_paired_peer({
+                "id": hashlib.sha256(peer_ep.encode("utf-8")).digest()[:6].hex(),
+                "node_name": str(msg.get("node_name", "Remote-Node"))[:80],
+                "gpu": str(msg.get("gpu", "GPU / CPU"))[:120],
+                "wifi_ip": peer_wifi,
+                "tailscale_ip": peer_ts,
+                "worker_endpoint": peer_ep,
+                "models": peer_models,
+                "cluster_fingerprint": fp,
+                "paired_at": ts_now,
+                "last_seen_at": ts_now,
+            })
+            self.paired_count += 1
+
+            await _pair_write_json_line(writer, {
+                "ok": True,
+                "host_proof": host_proof.hex(),
+                "iv": iv.hex(),
+                "ciphertext": ciphertext.hex(),
+                "tag": tag.hex(),
+            })
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    def status_payload(self) -> dict:
+        secret = os.environ.get("AEROMESH_WORKER_SECRET", "").strip()
+        fp = _secret_fingerprint(secret)
+        wifi_ip = get_local_wifi_ip()
+        ts_ip = get_tailscale_ip()
+        local_models = _local_llm_models()
+        now = time.time()
+
+        session_obj = None
+        if self.is_active():
+            primary_host = ts_ip if (ts_ip and ts_ip not in ("Not Connected", "Local") and "." in ts_ip) else wifi_ip
+            session_obj = {
+                "active": True,
+                "pin": self.pin,
+                "pin_formatted": _format_pin_display(self.pin),
+                "port": self.port,
+                "expires_in": max(0, int(self.expires_at - now)),
+                "failed_attempts": self.failed_attempts,
+                "max_attempts": PAIR_MAX_FAILED_ATTEMPTS,
+                "paired_count": self.paired_count,
+                "invite_code": f"AERO-{primary_host}:{self.port}-{self.pin}",
+                "invite_lan": f"AERO-{wifi_ip}:{self.port}-{self.pin}",
+            }
+
+        peers_out = []
+        for p in load_paired_peers():
+            p_models = p.get("models") if isinstance(p.get("models"), list) else []
+            shared = [m for m in p_models if m in local_models]
+            item = dict(p)
+            item["shared_models"] = shared
+            item["secret_synced"] = (p.get("cluster_fingerprint") == fp and fp != "UNSET")
+            peers_out.append(item)
+
+        return {
+            "node_name": _local_node_name(),
+            "gpu": get_gpu_summary(),
+            "wifi_ip": wifi_ip,
+            "tailscale_ip": ts_ip,
+            "worker_endpoint": _preferred_worker_endpoint(wifi_ip, ts_ip),
+            "secret_configured": bool(secret),
+            "cluster_fingerprint": fp,
+            "local_models": local_models,
+            "session": session_obj,
+            "paired_peers": peers_out,
+        }
+
+
+pairing_manager = ClusterPairingManager()
+
+
+async def _join_pairing_host(invite_code: str = "", host_raw: str = "", pin_raw: str = "") -> dict:
+    host, port, pin_digits = _parse_pair_join_target(invite_code, host_raw, pin_raw)
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=6.0)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not connect to pairing host {host}:{port} (ensure 'Host Pairing Session' is open on that PC): {exc}"
+        )
+
+    try:
+        client_nonce = secrets.token_bytes(16)
+        my_wifi = get_local_wifi_ip()
+        my_ts = get_tailscale_ip()
+        await _pair_write_json_line(writer, {
+            "op": "hello",
+            "protocol": "aeromesh-pair-v1",
+            "client_nonce": client_nonce.hex(),
+            "node_name": _local_node_name(),
+            "gpu": get_gpu_summary(),
+            "wifi_ip": my_wifi,
+            "tailscale_ip": my_ts,
+            "worker_endpoint": _preferred_worker_endpoint(my_wifi, my_ts),
+            "models": _local_llm_models(),
+        })
+
+        challenge = await _pair_read_json_line(reader)
+        if not challenge.get("ok"):
+            raise ValueError(challenge.get("error") or "Host rejected pairing hello.")
+
+        host_nonce = bytes.fromhex(str(challenge.get("host_nonce", "")))
+        salt = bytes.fromhex(str(challenge.get("salt", "")))
+        if len(host_nonce) != 16 or len(salt) != 16:
+            raise ValueError("Invalid handshake parameters from host.")
+
+        auth_key, enc_key, mac_key = await asyncio.to_thread(
+            _derive_pair_session_keys, pin_digits, salt, host_nonce, client_nonce
+        )
+        proof = _pair_client_proof(auth_key, client_nonce, host_nonce)
+        await _pair_write_json_line(writer, {"op": "verify", "proof": proof.hex()})
+
+        resp = await _pair_read_json_line(reader)
+        if not resp.get("ok"):
+            raise PermissionError(resp.get("error") or "Pairing code rejected by host.")
+
+        host_proof = bytes.fromhex(str(resp.get("host_proof", "")))
+        expected_hp = _pair_host_proof(auth_key, host_nonce, client_nonce)
+        if not hmac.compare_digest(expected_hp, host_proof):
+            raise ValueError("Mutual host authentication failed. Aborted secret sync.")
+
+        plaintext = _pair_verify_and_decrypt(
+            enc_key,
+            mac_key,
+            bytes.fromhex(str(resp.get("iv", ""))),
+            bytes.fromhex(str(resp.get("ciphertext", ""))),
+            bytes.fromhex(str(resp.get("tag", ""))),
+        )
+        payload = json.loads(plaintext.decode("utf-8"))
+        new_secret = str(payload.get("worker_secret", "")).strip()
+        if len(new_secret) < 16:
+            raise ValueError("Host did not provide a valid cluster secret.")
+
+        _upsert_env_var("AEROMESH_WORKER_SECRET", new_secret)
+        fp = _secret_fingerprint(new_secret)
+
+        host_name = str(challenge.get("node_name") or host)[:80]
+        host_gpu = str(challenge.get("gpu") or "GPU / CPU")[:120]
+        host_wifi = str(challenge.get("wifi_ip") or host)
+        host_ts = str(challenge.get("tailscale_ip") or "Not Connected")
+        host_ep = str(challenge.get("worker_endpoint") or "").strip()
+        if not host_ep or host_ep.startswith("127.0.0.1"):
+            host_ep = f"{host}:50052"
+        host_models = [str(m) for m in (challenge.get("models") or []) if isinstance(m, str)][:100]
+        ts_now = int(time.time())
+        upsert_paired_peer({
+            "id": hashlib.sha256(host_ep.encode("utf-8")).digest()[:6].hex(),
+            "node_name": host_name,
+            "gpu": host_gpu,
+            "wifi_ip": host_wifi,
+            "tailscale_ip": host_ts,
+            "worker_endpoint": host_ep,
+            "models": host_models,
+            "cluster_fingerprint": fp,
+            "paired_at": ts_now,
+            "last_seen_at": ts_now,
+        })
+
+        return {
+            "status": "paired",
+            "paired_with": host_name,
+            "cluster_fingerprint": fp,
+            "pair_status": pairing_manager.status_payload(),
+        }
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
+@app.get("/api/cluster/pair/status", dependencies=[Depends(verify_gateway_access)])
+async def cluster_pair_status():
+    return JSONResponse(status_code=200, content=pairing_manager.status_payload())
+
+
+@app.post("/api/cluster/pair/start", dependencies=[Depends(verify_gateway_access)])
+async def cluster_pair_start():
+    try:
+        st = await pairing_manager.start()
+        return JSONResponse(status_code=200, content={"status": "started", "pair_status": st})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/cluster/pair/stop", dependencies=[Depends(verify_gateway_access)])
+async def cluster_pair_stop():
+    await pairing_manager.stop()
+    return JSONResponse(status_code=200, content={"status": "stopped", "pair_status": pairing_manager.status_payload()})
+
+
+@app.post("/api/cluster/pair/join", dependencies=[Depends(verify_gateway_access)])
+async def cluster_pair_join(request: Request):
+    body = await _read_json_body(request)
+    try:
+        res = await _join_pairing_host(
+            invite_code=str(body.get("invite_code", "")),
+            host_raw=str(body.get("host", "")),
+            pin_raw=str(body.get("pin", "")),
+        )
+        return JSONResponse(status_code=200, content=res)
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/cluster/pair/discover", dependencies=[Depends(verify_gateway_access)])
+async def cluster_pair_discover():
+    candidates = {}
+    my_wifi = get_local_wifi_ip()
+    my_ts = get_tailscale_ip()
+
+    # Check Tailscale peers
+    try:
+        out = subprocess.check_output(["tailscale", "status", "--json"], text=True, timeout=2.0)
+        data = json.loads(out)
+        for peer in (data.get("Peer") or {}).values():
+            if peer.get("Online"):
+                for ip in (peer.get("TailscaleIPs") or []):
+                    if "." in ip and ip != my_ts:
+                        candidates[ip] = "Tailscale"
+    except Exception:
+        pass
+
+    # Check ARP table for passive LAN peers
+    try:
+        out = subprocess.check_output(["arp", "-a"], text=True, timeout=2.0)
+        for m in re.findall(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", out):
+            if m != my_wifi and not m.endswith(".255") and not m.startswith(("224.", "239.", "127.")):
+                candidates.setdefault(m, "Wi-Fi LAN")
+    except Exception:
+        pass
+
+    async def _probe(ip: str, net_type: str):
+        try:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, DEFAULT_PAIR_PORT), timeout=0.45)
+            try:
+                await _pair_write_json_line(writer, {"op": "probe"})
+                info = await _pair_read_json_line(reader)
+                if info.get("ok"):
+                    return {
+                        "host": ip,
+                        "port": DEFAULT_PAIR_PORT,
+                        "network": net_type,
+                        "node_name": info.get("node_name") or "AeroMesh-Host",
+                        "gpu": info.get("gpu") or "GPU / CPU",
+                        "expires_in": info.get("expires_in") or 0,
+                        "cluster_fingerprint": info.get("cluster_fingerprint") or "",
+                    }
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        except Exception:
+            return None
+        return None
+
+    results = await asyncio.gather(*(_probe(ip, net) for ip, net in candidates.items()))
+    hosts = [r for r in results if r is not None]
+    return JSONResponse(status_code=200, content={"pairing_hosts": hosts})
+
+
+@app.post("/api/cluster/pair/rotate", dependencies=[Depends(verify_gateway_access)])
+async def cluster_pair_rotate():
+    await pairing_manager.stop()
+    new_secret = secrets.token_hex(32)
+    _upsert_env_var("AEROMESH_WORKER_SECRET", new_secret)
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "rotated",
+            "cluster_fingerprint": _secret_fingerprint(new_secret),
+            "pair_status": pairing_manager.status_payload(),
+        },
+    )
+
+
+@app.post("/api/cluster/pair/remove", dependencies=[Depends(verify_gateway_access)])
+async def cluster_pair_remove(request: Request):
+    body = await _read_json_body(request)
+    remove_paired_peer(str(body.get("id", "")))
+    return JSONResponse(status_code=200, content={"status": "removed", "pair_status": pairing_manager.status_payload()})
 
 
 # ---------------------------------------------------------------------------

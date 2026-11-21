@@ -134,28 +134,45 @@
   // VIEW & SUB-TAB SWITCHING
   // ---------------------------------------------------------------------------
   function setWorkspaceView(view, subTab) {
-    state.activeView = view === 'models' ? 'models' : 'chat';
-    if (subTab) setSubTab(subTab);
+    const normalized = view === 'models' ? 'models' : (view === 'cluster' ? 'cluster' : 'chat');
+    state.activeView = normalized;
+    if (subTab && normalized === 'models') setSubTab(subTab);
 
-    const isModels = state.activeView === 'models';
-    if (dom.chatViewport) dom.chatViewport.style.display = isModels ? 'none' : '';
-    if (dom.composerAnchor) dom.composerAnchor.style.display = isModels ? 'none' : '';
+    const isChat = normalized === 'chat';
+    const isModels = normalized === 'models';
+    const isCluster = normalized === 'cluster';
+
+    const clusterView = document.getElementById('cluster-pair-view');
+    const navCluster = document.getElementById('nav-tab-cluster');
+
+    if (dom.chatViewport) dom.chatViewport.style.display = isChat ? '' : 'none';
+    if (dom.composerAnchor) dom.composerAnchor.style.display = isChat ? '' : 'none';
     if (dom.hubView) dom.hubView.style.display = isModels ? 'block' : 'none';
+    if (clusterView) clusterView.style.display = isCluster ? 'block' : 'none';
 
     if (dom.navChat) {
-      dom.navChat.classList.toggle('active', !isModels);
-      dom.navChat.setAttribute('aria-selected', String(!isModels));
+      dom.navChat.classList.toggle('active', isChat);
+      dom.navChat.setAttribute('aria-selected', String(isChat));
     }
     if (dom.navModels) {
       dom.navModels.classList.toggle('active', isModels);
       dom.navModels.setAttribute('aria-selected', String(isModels));
     }
+    if (navCluster) {
+      navCluster.classList.toggle('active', isCluster);
+      navCluster.setAttribute('aria-selected', String(isCluster));
+    }
 
     if (isModels) {
       refreshLibrary();
-      // Close the Role Launcher modal if it's currently blocking the screen
       const roleModal = document.getElementById('aeromesh-role-modal');
       if (roleModal) roleModal.style.display = 'none';
+    } else if (isCluster) {
+      const roleModal = document.getElementById('aeromesh-role-modal');
+      if (roleModal) roleModal.style.display = 'none';
+      if (typeof window.refreshClusterPairing === 'function') {
+        window.refreshClusterPairing();
+      }
     }
   }
 
@@ -174,12 +191,18 @@
     }
   }
 
+  window.setWorkspaceView = setWorkspaceView;
+
   window.openModelHub = function (subTab) {
     setWorkspaceView('models', subTab || 'discover');
   };
 
   window.openChatWorkspace = function () {
     setWorkspaceView('chat');
+  };
+
+  window.openClusterPairing = function () {
+    setWorkspaceView('cluster');
   };
 
   // ---------------------------------------------------------------------------

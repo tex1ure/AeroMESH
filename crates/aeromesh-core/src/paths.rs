@@ -255,6 +255,74 @@ pub fn env_search_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// Path to the persistent JSON registry of paired cluster peer nodes.
+pub fn paired_peers_file() -> PathBuf {
+    data_dir().join("paired_peers.json")
+}
+
+/// Atomically creates or updates a single `KEY=VALUE` entry in the writable `.env` file
+/// while preserving all existing keys and comments, and updates the live process environment.
+pub fn upsert_env_var(key: &str, value: &str) -> Result<PathBuf> {
+    let clean_key = key.trim();
+    if clean_key.is_empty()
+        || !clean_key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        bail!("Invalid environment variable name '{}'", key);
+    }
+    if value.contains('\n') || value.contains('\r') || value.contains('\0') {
+        bail!("Environment variable value cannot contain control characters");
+    }
+
+    let env_path = env_file_path();
+    if let Some(parent) = env_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut lines: Vec<String> = if env_path.is_file() {
+        std::fs::read_to_string(&env_path)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let prefix = format!("{}=", clean_key);
+    let mut replaced = false;
+    for line in &mut lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&prefix) {
+            *line = format!("{}={}", clean_key, value);
+            replaced = true;
+        }
+    }
+    if !replaced {
+        lines.push(format!("{}={}", clean_key, value));
+    }
+
+    let content = format!("{}\n", lines.join("\n"));
+    let tmp_path = env_path.with_extension("env.tmp");
+    std::fs::write(&tmp_path, content.as_bytes())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    if let Err(_) = std::fs::rename(&tmp_path, &env_path) {
+        // Fallback overwrite on Windows when target exists
+        std::fs::write(&env_path, content.as_bytes())?;
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+
+    env::set_var(clean_key, value);
+    Ok(env_path)
+}
+
 /// Creates the writable data directory hierarchy if it does not already exist.
 pub fn ensure_data_dirs() -> std::io::Result<()> {
     std::fs::create_dir_all(data_dir())?;

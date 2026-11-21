@@ -107,7 +107,7 @@
         <span>New Chat</span>
       </button>
 
-      <!-- Workspace View Switcher (Chat vs Model Hub) -->
+      <!-- Workspace View Switcher (Chat vs Models vs Cluster Pairing) -->
       <div class="workspace-nav" role="tablist" aria-label="Workspace View">
         <button id="nav-tab-chat" class="workspace-nav-btn active" role="tab" aria-selected="true" type="button">
           <i data-lucide="message-square" style="width: 14px; height: 14px;"></i>
@@ -117,6 +117,11 @@
           <i data-lucide="hard-drive-download" style="width: 14px; height: 14px;"></i>
           <span>Models</span>
           <span id="nav-models-dl-count" class="workspace-nav-count" style="display: none;"></span>
+        </button>
+        <button id="nav-tab-cluster" class="workspace-nav-btn" role="tab" aria-selected="false" type="button">
+          <i data-lucide="link-2" style="width: 14px; height: 14px;"></i>
+          <span>Cluster</span>
+          <span id="nav-cluster-pair-count" class="workspace-nav-count" style="display: none;"></span>
         </button>
       </div>
     </div>
@@ -488,6 +493,180 @@
       </div>
     </section>
 
+    <!-- ==================================================================
+         CLUSTER PAIRING & SECRET SYNC VIEW
+         ================================================================== -->
+    <section id="cluster-pair-view" class="model-hub-view" style="display: none;" aria-label="Cluster Pairing and Secret Sync">
+      <div class="model-hub-inner">
+
+        <!-- Header + Key Fingerprint -->
+        <div class="mh-header">
+          <div>
+            <h1 class="mh-title">Cluster Pairing &amp; Secret Sync</h1>
+            <div class="mh-subtitle">
+              <span>Cluster Key:</span>
+              <code id="cp-key-fingerprint" class="cp-key-code">Checking...</code>
+              <span class="mh-dot">&middot;</span>
+              <span id="cp-local-ips">Loading local endpoints...</span>
+            </div>
+          </div>
+          <div class="mh-header-actions">
+            <button id="cp-rotate-btn" class="mh-btn mh-btn-danger-ghost" type="button" title="Generate a brand-new 256-bit cluster secret and invalidate old pairings">
+              <i data-lucide="key-round" style="width: 14px; height: 14px;"></i>
+              <span>Rotate Cluster Key</span>
+            </button>
+            <button id="cp-refresh-btn" class="mh-btn mh-btn-ghost" type="button" title="Refresh pairing status and peers">
+              <i data-lucide="refresh-cw" style="width: 14px; height: 14px;"></i>
+              <span>Refresh</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Inline Status / Feedback Banner -->
+        <div id="cp-feedback" class="mh-feedback" style="display: none;" role="status"></div>
+
+        <!-- Two-Column Primary Pairing Cards -->
+        <div class="cp-grid-2">
+
+          <!-- LEFT: Host Pairing Session -->
+          <div class="mh-panel cp-card">
+            <div class="cp-card-head">
+              <div>
+                <h2 class="mh-panel-title">Host a Pairing Session</h2>
+                <p class="mh-panel-desc">Share this PC's cluster secret securely with another PC over Wi-Fi or Tailscale using a one-time 6-digit code.</p>
+              </div>
+              <span id="cp-host-status-label" class="cp-status-text">Idle</span>
+            </div>
+
+            <!-- Idle State -->
+            <div id="cp-host-idle" class="cp-host-idle">
+              <div class="cp-info-list">
+                <div class="cp-info-item">
+                  <i data-lucide="shield-check" style="width: 15px; height: 15px; color: var(--accent-green);"></i>
+                  <span>End-to-end encrypted transfer (PBKDF2 + Encrypt-then-MAC) — never sent in plaintext.</span>
+                </div>
+                <div class="cp-info-item">
+                  <i data-lucide="timer" style="width: 15px; height: 15px; color: var(--accent-blue);"></i>
+                  <span>Opens TCP port 50053 temporarily for 5 minutes and auto-locks after 5 wrong guesses.</span>
+                </div>
+                <div class="cp-info-item">
+                  <i data-lucide="cpu" style="width: 15px; height: 15px; color: var(--text-muted);"></i>
+                  <span>Also exchanges GPU specs &amp; installed model lists so nodes verify compatibility automatically.</span>
+                </div>
+              </div>
+              <button id="cp-start-host-btn" class="mh-btn mh-btn-primary cp-full-btn" type="button">
+                <i data-lucide="radio" style="width: 15px; height: 15px;"></i>
+                <span>Start Pairing Session</span>
+              </button>
+            </div>
+
+            <!-- Active Session State -->
+            <div id="cp-host-active" class="cp-host-active" style="display: none;">
+              <div class="cp-pin-box">
+                <div class="cp-pin-label">6-DIGIT PAIRING CODE</div>
+                <div id="cp-pin-display" class="cp-pin-digits">--- ---</div>
+                <div class="cp-pin-meta">
+                  <span id="cp-countdown">05:00 remaining</span>
+                  <span>&middot;</span>
+                  <span id="cp-paired-counter">0 nodes paired</span>
+                  <span>&middot;</span>
+                  <span id="cp-attempts-counter">0/5 failed</span>
+                </div>
+              </div>
+
+              <div class="cp-invite-block">
+                <label class="cp-field-label" for="cp-invite-readonly">One-Click Invite Token (paste on the other PC)</label>
+                <div class="cp-copy-row">
+                  <input id="cp-invite-readonly" class="mh-input cp-mono-input" type="text" readonly>
+                  <button id="cp-copy-invite-btn" class="mh-btn mh-btn-primary" type="button">
+                    <i data-lucide="copy" style="width: 14px; height: 14px;"></i>
+                    <span>Copy Invite</span>
+                  </button>
+                </div>
+                <div id="cp-invite-lan-row" class="cp-lan-alt" style="display: none;">
+                  <span>Same Wi-Fi LAN invite:</span>
+                  <code id="cp-invite-lan-text"></code>
+                  <button id="cp-copy-lan-btn" class="cp-inline-link" type="button">Copy LAN</button>
+                </div>
+              </div>
+
+              <div class="cp-host-actions">
+                <button id="cp-regen-host-btn" class="mh-btn mh-btn-ghost" type="button">
+                  <i data-lucide="refresh-cw" style="width: 14px; height: 14px;"></i>
+                  <span>New Code</span>
+                </button>
+                <button id="cp-stop-host-btn" class="mh-btn mh-btn-danger-ghost" type="button">
+                  <i data-lucide="square" style="width: 13px; height: 13px;"></i>
+                  <span>Stop Session</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- RIGHT: Join an Existing Cluster -->
+          <div class="mh-panel cp-card">
+            <div class="cp-card-head">
+              <div>
+                <h2 class="mh-panel-title">Join an Existing Cluster</h2>
+                <p class="mh-panel-desc">Sync this PC's secret to match a Coordinator or Host PC—paste an invite token or pick a nearby host.</p>
+              </div>
+            </div>
+
+            <!-- Nearby Pairing Hosts Discovery -->
+            <div class="cp-nearby-box">
+              <div class="cp-nearby-head">
+                <span class="cp-field-label" style="margin: 0;">Nearby Pairing Hosts (:50053)</span>
+                <button id="cp-scan-hosts-btn" class="mh-btn mh-btn-ghost mh-btn-sm" type="button">
+                  <i data-lucide="radar" style="width: 13px; height: 13px;"></i>
+                  <span>Scan Network</span>
+                </button>
+              </div>
+              <div id="cp-nearby-list" class="cp-nearby-list">
+                <div class="cp-nearby-empty">Click Scan Network to auto-detect any PC currently hosting a pairing session.</div>
+              </div>
+            </div>
+
+            <!-- Invite Token or Host + PIN Form -->
+            <div class="cp-join-form">
+              <div>
+                <label class="cp-field-label" for="cp-join-invite-input">Quick Paste Invite Token (Optional)</label>
+                <input id="cp-join-invite-input" class="mh-input cp-mono-input" type="text" placeholder="AERO-192.168.1.42:50053-482917" autocomplete="off">
+              </div>
+
+              <div class="cp-join-split">
+                <div>
+                  <label class="cp-field-label" for="cp-join-host-input">Host IP / Tailscale IP</label>
+                  <input id="cp-join-host-input" class="mh-input cp-mono-input" type="text" placeholder="192.168.1.42 or 100.x.y.z" autocomplete="off">
+                </div>
+                <div>
+                  <label class="cp-field-label" for="cp-join-pin-input">6-Digit Code</label>
+                  <input id="cp-join-pin-input" class="mh-input cp-pin-input" type="text" inputmode="numeric" maxlength="7" placeholder="482-915" autocomplete="off">
+                </div>
+              </div>
+
+              <button id="cp-join-submit-btn" class="mh-btn mh-btn-primary cp-full-btn" type="button">
+                <i data-lucide="link-2" style="width: 15px; height: 15px;"></i>
+                <span>Pair &amp; Sync Cluster Secret</span>
+              </button>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Paired Cluster Nodes List -->
+        <div class="mh-section">
+          <div class="mh-section-head">
+            <div>
+              <h2 class="mh-section-title">Paired Cluster Nodes (<span id="cp-peers-count">0</span>)</h2>
+              <p class="mh-section-desc">Saved peers that share your cluster key, along with live model compatibility checks.</p>
+            </div>
+          </div>
+          <div id="cp-peers-list" class="mh-installed-list"></div>
+        </div>
+
+      </div>
+    </section>
+
   </main>
 
 </div>
@@ -531,8 +710,9 @@
 
 <!-- Application Scripts -->
 <script src="/static/js/liquid_mesh.js"></script>
-<script src="/static/js/app.js?v=kimi6"></script>
-<script src="/static/js/model_hub.js?v=kimi6"></script>
+<script src="/static/js/app.js?v=kimi7"></script>
+<script src="/static/js/model_hub.js?v=kimi7"></script>
+<script src="/static/js/cluster_pair.js?v=kimi7"></script>
 
 </body>
 </html>

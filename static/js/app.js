@@ -2019,9 +2019,12 @@ window.getApiUrl = window.getApiUrl || function(path) {
             <div style="font-size:11.5px;color:#16c456;margin-top:6px;" id="rm-img-model-label"></div>
           </div>
           <div>
-            <div style="display:flex;justify-content:space-between;align-items:center;">
-              <label style="font-size:11px;font-weight:700;color:#16c456;text-transform:uppercase;">2. Discovered Wi-Fi &amp; Tailscale Workers (:50052)</label>
-              <button id="rm-rescan-btn" class="clay-btn" style="padding:3px 10px;font-size:11px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="refresh-cw" style="width: 11px; height: 11px;"></i><span>Rescan Network</span></button>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+              <label style="font-size:11px;font-weight:700;color:#16c456;text-transform:uppercase;">2. Wi-Fi &amp; Tailscale Workers (:50052)</label>
+              <div style="display:flex;gap:6px;">
+                <button id="rm-open-pair-btn" class="clay-btn" style="padding:3px 10px;font-size:11px;display:inline-flex;align-items:center;gap:5px;color:#16c456;border-color:rgba(22,196,86,0.4);"><i data-lucide="link-2" style="width: 11px; height: 11px;"></i><span>Pair New PC</span></button>
+                <button id="rm-rescan-btn" class="clay-btn" style="padding:3px 10px;font-size:11px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="refresh-cw" style="width: 11px; height: 11px;"></i><span>Rescan</span></button>
+              </div>
             </div>
             <div id="rm-peers-list" style="margin-top:6px;font-size:12px;color:#a1a1aa;max-height:60px;overflow-y:auto;">Ready to scan</div>
             <input id="rm-custom-peers" type="text" placeholder="Or enter worker IP:50052 (comma-separated)..." style="width:100%;margin-top:6px;padding:7px 10px;border-radius:8px;background:#18181b;color:#fff;border:1px solid rgba(255,255,255,0.14);font-size:12px;">
@@ -2065,6 +2068,10 @@ window.getApiUrl = window.getApiUrl || function(path) {
     document.getElementById('rm-open-hub-btn').onclick = () => {
       closeRoleModal();
       if (typeof window.openModelHub === 'function') window.openModelHub('discover');
+    };
+    document.getElementById('rm-open-pair-btn').onclick = () => {
+      closeRoleModal();
+      if (typeof window.openClusterPairing === 'function') window.openClusterPairing();
     };
     document.getElementById('rm-stop-btn').onclick = async () => {
       await fetch(window.getApiUrl('/api/node/stop'), { method: 'POST' });
@@ -2111,7 +2118,8 @@ window.getApiUrl = window.getApiUrl || function(path) {
       const hw = document.getElementById('rm-hw-summary');
       if (hw) {
         const esc = window.escapeHtml || ((v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
-        hw.innerHTML = `GPU: <strong style="color:#fff;">${esc(st.gpu || 'CPU / Integrated GPU')}</strong> &bull; Wi-Fi IP: <code style="color:#1a88ff;">${esc(st.wifi_ip || '127.0.0.1')}:50052</code> &bull; Tailscale IP: <code style="color:#16c456;">${esc(st.tailscale_ip || 'Local')}:50052</code>`;
+        const fpBadge = st.cluster_fingerprint ? ` &bull; Cluster Key: <code style="color:#f59e0b;">${esc(st.cluster_fingerprint)}</code>` : '';
+        hw.innerHTML = `GPU: <strong style="color:#fff;">${esc(st.gpu || 'CPU / Integrated GPU')}</strong> &bull; Wi-Fi IP: <code style="color:#1a88ff;">${esc(st.wifi_ip || '127.0.0.1')}:50052</code> &bull; Tailscale IP: <code style="color:#16c456;">${esc(st.tailscale_ip || 'Local')}:50052</code>${fpBadge}`;
       }
 
       const sel = document.getElementById('rm-model-select');
@@ -2235,6 +2243,22 @@ window.getApiUrl = window.getApiUrl || function(path) {
     if (modal) modal.style.display = 'none';
     stopLogPolling();
   }
+
+  window.openRoleModalWithPeer = async function (endpoint) {
+    await openRoleModal();
+    const customInput = document.getElementById('rm-custom-peers');
+    if (customInput && endpoint) {
+      const existing = customInput.value
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (!existing.includes(endpoint)) {
+        existing.push(endpoint);
+      }
+      customInput.value = existing.join(',');
+      customInput.focus();
+    }
+  };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => openRoleModal());

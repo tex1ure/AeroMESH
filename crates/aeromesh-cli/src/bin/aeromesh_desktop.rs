@@ -31,6 +31,8 @@ use aeromesh_engine::SafeProcessJob;
 
 #[path = "../model_hub.rs"]
 mod model_hub;
+#[path = "../pairing.rs"]
+mod pairing;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -541,6 +543,9 @@ async fn get_node_state(State(st): State<Arc<DesktopState>>) -> impl IntoRespons
 
     let (gguf_models, image_models) = list_discovered_models();
 
+    let cluster_fp = pairing::secret_fingerprint(&env::var("AEROMESH_WORKER_SECRET").unwrap_or_default());
+    let paired_peers = pairing::load_paired_peers();
+
     Json(json!({
         "role": role,
         "running": running,
@@ -552,6 +557,8 @@ async fn get_node_state(State(st): State<Arc<DesktopState>>) -> impl IntoRespons
         "models_dir": aeromesh_core::models_dir().to_string_lossy(),
         "models": gguf_models,
         "image_models": image_models,
+        "cluster_fingerprint": cluster_fp,
+        "paired_peers": paired_peers,
         "logs": logs
     }))
 }
@@ -1431,6 +1438,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/models/download/cancel", post(model_hub::post_cancel_download))
         .with_state(hub_state);
 
+    let pair_state = pairing::PairingState::default();
+    let pairing_router = Router::new()
+        .route("/api/cluster/pair/status", get(pairing::get_pair_status))
+        .route("/api/cluster/pair/start", post(pairing::post_pair_start))
+        .route("/api/cluster/pair/stop", post(pairing::post_pair_stop))
+        .route("/api/cluster/pair/join", post(pairing::post_pair_join))
+        .route("/api/cluster/pair/discover", get(pairing::get_pair_discover))
+        .route("/api/cluster/pair/rotate", post(pairing::post_pair_rotate_secret))
+        .route("/api/cluster/pair/remove", post(pairing::post_pair_remove))
+        .with_state(pair_state);
+
     let app = Router::new()
         .route("/", get(serve_index))
         .route("/static/*path", get(serve_static))
@@ -1451,6 +1469,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/images/generations", post(post_image_stream))
         .with_state(state)
         .merge(model_hub_router)
+        .merge(pairing_router)
         .layer(cors);
 
     let target_url = format!("http://127.0.0.1:{}", bound_port);
