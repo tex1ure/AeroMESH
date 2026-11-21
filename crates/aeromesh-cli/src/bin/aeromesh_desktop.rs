@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, State},
     http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -28,6 +28,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::{Any, CorsLayer};
 
 use aeromesh_engine::SafeProcessJob;
+
+#[path = "../model_hub.rs"]
+mod model_hub;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -1410,6 +1413,24 @@ async fn main() -> anyhow::Result<()> {
 
     let cors = build_local_cors_layer(bound_port);
 
+    let hub_state = model_hub::ModelHubState::default();
+    let model_hub_router = Router::new()
+        .route("/api/models/library", get(model_hub::get_models_library))
+        .route("/api/models/paths", post(model_hub::post_model_paths))
+        .route("/api/models/import-path", post(model_hub::post_import_model_path))
+        .route("/api/models/browse", post(model_hub::post_browse_path))
+        .route(
+            "/api/models/upload",
+            post(model_hub::post_upload_model).layer(DefaultBodyLimit::disable()),
+        )
+        .route("/api/models/delete", post(model_hub::post_delete_model))
+        .route("/api/models/hf/search", get(model_hub::get_hf_search))
+        .route("/api/models/hf/files", get(model_hub::get_hf_files))
+        .route("/api/models/download", post(model_hub::post_start_download))
+        .route("/api/models/downloads", get(model_hub::get_downloads))
+        .route("/api/models/download/cancel", post(model_hub::post_cancel_download))
+        .with_state(hub_state);
+
     let app = Router::new()
         .route("/", get(serve_index))
         .route("/static/*path", get(serve_static))
@@ -1428,8 +1449,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/chat", post(post_chat_stream))
         .route("/api/image/stream", post(post_image_stream))
         .route("/v1/images/generations", post(post_image_stream))
-        .layer(cors)
-        .with_state(state);
+        .with_state(state)
+        .merge(model_hub_router)
+        .layer(cors);
 
     let target_url = format!("http://127.0.0.1:{}", bound_port);
     if let Some(listener) = bound_listener {

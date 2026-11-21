@@ -106,6 +106,19 @@
         <i data-lucide="plus" style="width: 17px; height: 17px;"></i>
         <span>New Chat</span>
       </button>
+
+      <!-- Workspace View Switcher (Chat vs Model Hub) -->
+      <div class="workspace-nav" role="tablist" aria-label="Workspace View">
+        <button id="nav-tab-chat" class="workspace-nav-btn active" role="tab" aria-selected="true" type="button">
+          <i data-lucide="message-square" style="width: 14px; height: 14px;"></i>
+          <span>Chat</span>
+        </button>
+        <button id="nav-tab-models" class="workspace-nav-btn" role="tab" aria-selected="false" type="button">
+          <i data-lucide="hard-drive-download" style="width: 14px; height: 14px;"></i>
+          <span>Models</span>
+          <span id="nav-models-dl-count" class="workspace-nav-count" style="display: none;"></span>
+        </button>
+      </div>
     </div>
 
     <!-- Search Recessed Box -->
@@ -306,6 +319,175 @@
       </div>
     </div>
 
+    <!-- ====================================================================
+         MODEL HUB / INSTALLER VIEW (LM Studio & Ollama-style Manager)
+         ==================================================================== -->
+    <section id="models-hub-view" class="models-hub-view" aria-label="Model Hub" style="display: none;">
+      <div class="mh-container">
+
+        <div class="mh-header">
+          <div class="mh-header-text">
+            <h1 class="mh-title">Model Hub</h1>
+            <div class="mh-subtitle" id="mh-storage-summary">
+              Scanning local model folders…
+            </div>
+          </div>
+
+          <div class="mh-header-actions">
+            <div class="mh-subtabs" role="tablist" aria-label="Model Hub Sections">
+              <button id="mh-tab-discover" class="mh-subtab active" role="tab" aria-selected="true" type="button">
+                Discover &amp; Install
+              </button>
+              <button id="mh-tab-local" class="mh-subtab" role="tab" aria-selected="false" type="button">
+                Local Library &amp; Paths <span id="mh-installed-count" class="mh-count-text"></span>
+              </button>
+            </div>
+            <button id="mh-refresh-btn" class="clay-btn mh-icon-btn" type="button" title="Refresh local models and downloads">
+              <i data-lucide="refresh-cw" style="width: 14px; height: 14px;"></i>
+              <span>Refresh</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Inline status / feedback banner -->
+        <div id="mh-feedback" class="mh-feedback" style="display: none;" role="status"></div>
+
+        <!-- Active Downloads & Uploads Queue -->
+        <div id="mh-downloads-panel" class="mh-downloads-panel" style="display: none;">
+          <div class="mh-section-head">
+            <h2 class="mh-section-title">Active Transfers</h2>
+          </div>
+          <div id="mh-downloads-list" class="mh-downloads-list"></div>
+        </div>
+
+        <!-- SUB-TAB 1: DISCOVER & INSTALL (Hugging Face + Curated Catalog) -->
+        <div id="mh-pane-discover" class="mh-pane">
+
+          <div class="mh-search-bar-wrap">
+            <div class="mh-search-input-row">
+              <i data-lucide="search" style="width: 16px; height: 16px; color: var(--text-dim); flex-shrink: 0;"></i>
+              <input
+                type="text"
+                id="mh-hf-query"
+                class="mh-text-input"
+                placeholder="Search Hugging Face GGUF models (e.g. Qwen 2.5, DeepSeek R1, Llama 3.2), owner/repo, or paste a .gguf URL…"
+                autocomplete="off"
+              >
+              <button id="mh-hf-search-btn" class="mh-btn-primary" type="button">Search Hub</button>
+              <button id="mh-hf-token-toggle" class="clay-btn mh-btn-ghost" type="button" title="Optional Hugging Face token for gated repositories">
+                <i data-lucide="key-round" style="width: 14px; height: 14px;"></i>
+                <span>Token</span>
+              </button>
+            </div>
+
+            <div id="mh-hf-token-row" class="mh-token-row" style="display: none;">
+              <input
+                type="password"
+                id="mh-hf-token-input"
+                class="mh-text-input"
+                placeholder="Optional hf_… access token (used only for this download request, never saved to disk)"
+                autocomplete="off"
+              >
+            </div>
+          </div>
+
+          <!-- Live Hugging Face Search Results -->
+          <div id="mh-hf-results-section" class="mh-section" style="display: none;">
+            <div class="mh-section-head">
+              <h2 class="mh-section-title" id="mh-hf-results-title">Hugging Face Results</h2>
+              <button id="mh-hf-clear-btn" class="mh-link-btn" type="button">Clear search</button>
+            </div>
+            <div id="mh-hf-results-list" class="mh-repo-list"></div>
+          </div>
+
+          <!-- Curated Recommended Models -->
+          <div class="mh-section">
+            <div class="mh-section-head">
+              <div>
+                <h2 class="mh-section-title">Recommended for AeroMESH</h2>
+                <p class="mh-section-desc">Verified open-weight GGUF builds sized for single 6–8 GB GPUs and 2-node distributed clusters.</p>
+              </div>
+            </div>
+            <div id="mh-catalog-grid" class="mh-catalog-grid"></div>
+          </div>
+        </div>
+
+        <!-- SUB-TAB 2: LOCAL LIBRARY, MANUAL PATHS & DRAG-AND-DROP -->
+        <div id="mh-pane-local" class="mh-pane" style="display: none;">
+
+          <div class="mh-import-grid">
+            <!-- Manual Path & Folder Registration -->
+            <div class="mh-surface">
+              <h2 class="mh-section-title">Add Model by Path or Folder</h2>
+              <p class="mh-section-desc">
+                Point directly to an existing <code>.gguf</code> / <code>.safetensors</code> file or an LM Studio / Ollama models folder—zero disk duplication by default.
+              </p>
+
+              <div class="mh-path-input-group">
+                <input
+                  type="text"
+                  id="mh-manual-path-input"
+                  class="mh-text-input"
+                  placeholder="e.g. D:\AI\Models\Qwen2.5-7B-Q4_K_M.gguf or D:\AI\Models"
+                  autocomplete="off"
+                >
+                <button id="mh-import-path-btn" class="mh-btn-primary" type="button">Add Path</button>
+              </div>
+
+              <div class="mh-path-actions-row">
+                <button id="mh-browse-file-btn" class="clay-btn mh-btn-secondary" type="button">
+                  <i data-lucide="file-plus-2" style="width: 14px; height: 14px;"></i>
+                  <span>Browse Model File</span>
+                </button>
+                <button id="mh-browse-folder-btn" class="clay-btn mh-btn-secondary" type="button">
+                  <i data-lucide="folder-plus" style="width: 14px; height: 14px;"></i>
+                  <span>Browse Folder</span>
+                </button>
+                <label class="mh-checkbox-label">
+                  <input type="checkbox" id="mh-copy-on-import">
+                  <span>Copy file into AeroMESH folder</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Drag & Drop / Upload Zone -->
+            <div class="mh-surface mh-dropzone" id="mh-dropzone" tabindex="0" role="button" aria-label="Drop a GGUF or Safetensors model file to import">
+              <input type="file" id="mh-file-input" accept=".gguf,.safetensors" style="display: none;">
+              <i data-lucide="upload-cloud" style="width: 28px; height: 28px; color: var(--Colors-KMBlue);"></i>
+              <div class="mh-dropzone-title">Drop a .gguf or .safetensors file here</div>
+              <div class="mh-dropzone-sub">Streams straight into AeroMESH's managed folder without buffering in RAM, or click to select from disk.</div>
+              <button id="mh-pick-upload-btn" class="clay-btn mh-btn-secondary" type="button" style="margin-top: 6px;">
+                Choose File to Upload
+              </button>
+            </div>
+          </div>
+
+          <!-- Installed Models List -->
+          <div class="mh-section">
+            <div class="mh-section-head">
+              <div>
+                <h2 class="mh-section-title">Installed Models</h2>
+                <p class="mh-section-desc">Discovered across your managed AeroMESH folder and linked custom directories.</p>
+              </div>
+            </div>
+            <div id="mh-installed-list" class="mh-installed-list"></div>
+          </div>
+
+          <!-- Configured Model Folders -->
+          <div class="mh-section">
+            <div class="mh-section-head">
+              <div>
+                <h2 class="mh-section-title">Watched Model Folders</h2>
+                <p class="mh-section-desc">Shared automatically between AeroMESH Desktop Studio, the CLI coordinator, and worker nodes.</p>
+              </div>
+            </div>
+            <div id="mh-folders-list" class="mh-folders-list"></div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
   </main>
 
 </div>
@@ -349,7 +531,8 @@
 
 <!-- Application Scripts -->
 <script src="/static/js/liquid_mesh.js"></script>
-<script src="/static/js/app.js?v=kimi5"></script>
+<script src="/static/js/app.js?v=kimi6"></script>
+<script src="/static/js/model_hub.js?v=kimi6"></script>
 
 </body>
 </html>

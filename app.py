@@ -13,6 +13,9 @@ import asyncio
 import base64
 import hashlib
 import ipaddress
+import shutil
+import uuid
+from urllib.parse import urlparse, quote
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -46,6 +49,44 @@ def get_data_dir() -> str:
     return install_dir
 
 
+def get_custom_model_paths_file() -> str:
+    return os.path.join(get_data_dir(), "model_paths.json")
+
+
+def load_custom_model_dirs() -> list:
+    path = get_custom_model_paths_file()
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        result = []
+        for item in data:
+            if isinstance(item, str) and item.strip():
+                norm = os.path.abspath(item.strip())
+                if norm not in result:
+                    result.append(norm)
+        return result
+    except Exception:
+        return []
+
+
+def save_custom_model_dirs(dirs: list) -> None:
+    path = get_custom_model_paths_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(dirs, f, indent=2)
+
+
+def get_primary_models_dir() -> str:
+    explicit = os.environ.get("AEROMESH_MODELS_DIR", "").strip()
+    target = explicit if explicit else os.path.join(get_data_dir(), "models")
+    os.makedirs(target, exist_ok=True)
+    return target
+
+
 def get_models_dirs() -> list:
     dirs = []
     explicit = os.environ.get("AEROMESH_MODELS_DIR", "").strip()
@@ -57,6 +98,9 @@ def get_models_dirs() -> list:
     ):
         if d not in dirs:
             dirs.append(d)
+    for custom in load_custom_model_dirs():
+        if os.path.isdir(custom) and custom not in dirs:
+            dirs.append(custom)
     return dirs
 
 
@@ -1378,6 +1422,651 @@ async def generate_image_pipeline(request: Request):
             frames.append(json.loads(chunk[6:].strip()))
     last = frames[-1] if frames else {}
     return JSONResponse(status_code=200, content={"created": int(time.time()), "data": [{"b64_json": last.get("b64_png")}]})
+
+
+# ---------------------------------------------------------------------------
+# MODEL HUB & INSTALLER ROUTES (LM Studio / Ollama-style Library & HF Hub)
+# ---------------------------------------------------------------------------
+ALLOWED_DOWNLOAD_HOSTS = frozenset({
+    "huggingface.co",
+    "www.huggingface.co",
+    "hf.co",
+    "cdn-lfs.huggingface.co",
+    "cdn-lfs-us-1.huggingface.co",
+    "cdn-lfs-eu-1.huggingface.co",
+    "cas-bridge.xethub.hf.co",
+})
+
+CURATED_MODEL_CATALOG = [
+    {
+        "id": "qwen2.5-1.5b",
+        "name": "Qwen 2.5 1.5B Instruct",
+        "repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+        "recommended_file": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "params": "1.5B",
+        "quant": "Q4_K_M",
+        "size_hint": "~1.1 GB",
+        "vram_hint": "2 GB VRAM / CPU",
+        "category": "Fast & Compact",
+        "description": "Ultra-fast starter model for quick testing, laptops, and CPU fallback.",
+    },
+    {
+        "id": "llama-3.2-3b",
+        "name": "Llama 3.2 3B Instruct",
+        "repo": "bartowski/Llama-3.2-3B-Instruct-GGUF",
+        "recommended_file": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        "params": "3B",
+        "quant": "Q4_K_M",
+        "size_hint": "~2.0 GB",
+        "vram_hint": "3 GB VRAM",
+        "category": "General Chat",
+        "description": "Balanced everyday assistant with high token speed on single GPUs and Wi-Fi meshes.",
+    },
+    {
+        "id": "qwen2.5-7b",
+        "name": "Qwen 2.5 7B Instruct",
+        "repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+        "recommended_file": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+        "params": "7B",
+        "quant": "Q4_K_M",
+        "size_hint": "~4.7 GB",
+        "vram_hint": "6 GB VRAM",
+        "category": "General & Coding",
+        "description": "Strong instruction following and coding quality that fits comfortably in 6-8 GB VRAM.",
+    },
+    {
+        "id": "deepseek-r1-7b",
+        "name": "DeepSeek-R1 Distill Qwen 7B",
+        "repo": "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF",
+        "recommended_file": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+        "params": "7B",
+        "quant": "Q4_K_M",
+        "size_hint": "~4.7 GB",
+        "vram_hint": "6 GB VRAM",
+        "category": "Reasoning",
+        "description": "Step-by-step chain-of-thought reasoning with native <think> foldout support.",
+    },
+    {
+        "id": "deepseek-r1-14b",
+        "name": "DeepSeek-R1 Distill Qwen 14B",
+        "repo": "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF",
+        "recommended_file": "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
+        "params": "14B",
+        "quant": "Q4_K_M",
+        "size_hint": "~9.0 GB",
+        "vram_hint": "2x 8 GB Cluster",
+        "category": "Cluster Flagship",
+        "description": "Built for 2-node AeroMESH layer pipelining across two 6-8 GB gaming laptops.",
+    },
+    {
+        "id": "qwen2.5-coder-14b",
+        "name": "Qwen 2.5 Coder 14B Instruct",
+        "repo": "bartowski/Qwen2.5-Coder-14B-Instruct-GGUF",
+        "recommended_file": "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+        "params": "14B",
+        "quant": "Q4_K_M",
+        "size_hint": "~9.0 GB",
+        "vram_hint": "2x 8 GB Cluster",
+        "category": "Coding Cluster",
+        "description": "High-accuracy local software engineering model designed for distributed VRAM pooling.",
+    },
+]
+
+_DOWNLOAD_LOCK = threading.Lock()
+_DOWNLOAD_TASKS: dict = {}
+_DOWNLOAD_CANCEL: dict = {}
+
+
+def _format_bytes(num_bytes: int) -> str:
+    if num_bytes >= 1024 ** 3:
+        return f"{num_bytes / (1024 ** 3):.2f} GB"
+    if num_bytes >= 1024 ** 2:
+        return f"{num_bytes / (1024 ** 2):.1f} MB"
+    if num_bytes >= 1024:
+        return f"{num_bytes / 1024:.0f} KB"
+    return f"{num_bytes} B"
+
+
+def _extract_quant_tag(filename: str) -> str:
+    m = re.search(r'(?i)(I?Q\d_[A-Z0-9_]+|Q\d_0|F16|BF16|F32|FP16)', filename)
+    return m.group(1).upper() if m else ("FP16" if filename.lower().endswith(".safetensors") else "GGUF")
+
+
+def _verify_gguf_magic_file(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"GGUF"
+    except Exception:
+        return False
+
+
+def _validate_hf_download_url(raw_url: str) -> str:
+    url = str(raw_url or "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError("Only HTTPS download URLs are permitted.")
+    host = (parsed.hostname or "").lower()
+    if host not in ALLOWED_DOWNLOAD_HOSTS and not host.endswith(".hf.co") and not host.endswith(".huggingface.co"):
+        raise ValueError(f"Download host '{host}' is not on the Hugging Face allowlist.")
+    if not parsed.path or ".." in parsed.path:
+        raise ValueError("Invalid download URL path.")
+    return url
+
+
+def _validate_hf_repo_id(repo_id: str) -> str:
+    cleaned = str(repo_id or "").strip().strip("/")
+    if not re.match(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$', cleaned):
+        raise ValueError("Invalid Hugging Face repository ID (expected 'owner/repo').")
+    return cleaned
+
+
+def _list_model_library() -> dict:
+    primary_dir = get_primary_models_dir()
+    primary_real = os.path.realpath(primary_dir)
+    custom_dirs = load_custom_model_dirs()
+    custom_norm = {os.path.realpath(d).lower() for d in custom_dirs if os.path.isdir(d)}
+
+    directories = []
+    models = []
+    seen_real_files = set()
+
+    for idx, d in enumerate(get_models_dirs()):
+        exists = os.path.isdir(d)
+        real_d = os.path.realpath(d) if exists else d
+        count = 0
+        if exists:
+            try:
+                for entry in os.scandir(d):
+                    if not entry.is_file():
+                        continue
+                    fname = entry.name
+                    lower = fname.lower()
+                    if lower.endswith(".gguf"):
+                        if "_stage" in fname or fname.startswith(".aeromesh_"):
+                            continue
+                        kind = "llm"
+                    elif lower.endswith(".safetensors"):
+                        kind = "diffusion"
+                    else:
+                        continue
+                    real_file = os.path.realpath(entry.path)
+                    if real_file in seen_real_files:
+                        continue
+                    seen_real_files.add(real_file)
+                    st = entry.stat()
+                    count += 1
+                    models.append({
+                        "name": fname,
+                        "path": entry.path,
+                        "directory": d,
+                        "size_bytes": st.st_size,
+                        "size_label": _format_bytes(st.st_size),
+                        "kind": kind,
+                        "quant": _extract_quant_tag(fname),
+                        "managed": real_file.startswith(primary_real + os.sep),
+                        "modified_ts": int(st.st_mtime),
+                    })
+            except OSError:
+                pass
+
+        if real_d.lower() == primary_real.lower() and idx == 0:
+            dir_kind = "primary"
+        elif real_d.lower() in custom_norm:
+            dir_kind = "custom"
+        else:
+            dir_kind = "default"
+        directories.append({
+            "path": d,
+            "kind": dir_kind,
+            "exists": exists,
+            "model_count": count,
+        })
+
+    models.sort(key=lambda m: (0 if m["kind"] == "llm" else 1, m["name"].lower()))
+    with _DOWNLOAD_LOCK:
+        downloads = list(_DOWNLOAD_TASKS.values())
+
+    disk_free_bytes = 0
+    try:
+        disk_free_bytes = shutil.disk_usage(primary_dir).free
+    except Exception:
+        pass
+
+    return {
+        "primary_dir": primary_dir,
+        "disk_free_bytes": disk_free_bytes,
+        "disk_free_label": _format_bytes(disk_free_bytes),
+        "directories": directories,
+        "models": models,
+        "catalog": CURATED_MODEL_CATALOG,
+        "downloads": downloads,
+    }
+
+
+def _browse_windows_dialog(mode: str) -> Optional[str]:
+    if sys.platform != "win32":
+        return None
+    if mode == "folder":
+        ps_script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            "$d.Description = 'Select a folder containing GGUF or Safetensors models'; "
+            "$d.UseDescriptionForTitle = $true; "
+            "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }"
+        )
+    else:
+        ps_script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$d = New-Object System.Windows.Forms.OpenFileDialog; "
+            "$d.Title = 'Select a GGUF or Safetensors Model File'; "
+            "$d.Filter = 'AI Models (*.gguf;*.safetensors)|*.gguf;*.safetensors|All Files (*.*)|*.*'; "
+            "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }"
+        )
+    flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+    res = subprocess.run(
+        ["powershell", "-NoProfile", "-STA", "-Command", ps_script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        creationflags=flags,
+    )
+    selected = (res.stdout or "").strip()
+    return selected or None
+
+
+async def _run_model_download_task(download_id: str, url: str, filename: str, repo: str, hf_token: str = ""):
+    primary_dir = get_primary_models_dir()
+    dest_path = os.path.join(primary_dir, filename)
+    part_path = dest_path + ".part"
+    headers = {"User-Agent": "AeroMESH-Studio/0.3"}
+    if hf_token:
+        headers["Authorization"] = f"Bearer {hf_token}"
+
+    t_start = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=15.0)) as client:
+            async with client.stream("GET", url, headers=headers) as resp:
+                # Re-validate final redirected host against allowlist
+                final_host = (resp.url.host or "").lower()
+                if resp.url.scheme != "https" or (
+                    final_host not in ALLOWED_DOWNLOAD_HOSTS
+                    and not final_host.endswith(".hf.co")
+                    and not final_host.endswith(".huggingface.co")
+                ):
+                    raise ValueError(f"Blocked redirect to non-allowlisted host '{final_host}'.")
+
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Hugging Face returned HTTP {resp.status_code}")
+
+                total_bytes = int(resp.headers.get("content-length") or 0)
+                downloaded = 0
+                magic_checked = False
+                is_gguf = filename.lower().endswith(".gguf")
+
+                with _DOWNLOAD_LOCK:
+                    _DOWNLOAD_TASKS[download_id]["total_bytes"] = total_bytes
+                    _DOWNLOAD_TASKS[download_id]["status"] = "downloading"
+
+                with open(part_path, "wb") as out_f:
+                    async for chunk in resp.aiter_bytes(chunk_size=1024 * 512):
+                        if _DOWNLOAD_CANCEL.get(download_id):
+                            raise asyncio.CancelledError("Cancelled by user")
+                        if not chunk:
+                            continue
+                        if not magic_checked and is_gguf:
+                            if len(chunk) >= 4 and chunk[:4] != b"GGUF":
+                                raise ValueError("Downloaded payload is not a valid GGUF file (missing GGUF magic header).")
+                            magic_checked = True
+                        out_f.write(chunk)
+                        downloaded += len(chunk)
+                        elapsed = max(0.05, time.perf_counter() - t_start)
+                        speed_mbps = round((downloaded / (1024 * 1024)) / elapsed, 2)
+                        pct = round((downloaded / total_bytes) * 100.0, 1) if total_bytes > 0 else 0.0
+                        eta = int((total_bytes - downloaded) / (downloaded / elapsed)) if (total_bytes > downloaded > 0) else 0
+                        with _DOWNLOAD_LOCK:
+                            task = _DOWNLOAD_TASKS[download_id]
+                            task["downloaded_bytes"] = downloaded
+                            task["percent"] = pct
+                            task["speed_mbps"] = speed_mbps
+                            task["eta_seconds"] = eta
+
+        if filename.lower().endswith(".gguf") and not _verify_gguf_magic_file(part_path):
+            raise ValueError("Downloaded file failed GGUF header verification.")
+
+        os.replace(part_path, dest_path)
+        with _DOWNLOAD_LOCK:
+            task = _DOWNLOAD_TASKS[download_id]
+            task["status"] = "completed"
+            task["percent"] = 100.0
+            task["downloaded_bytes"] = os.path.getsize(dest_path)
+            task["total_bytes"] = task["downloaded_bytes"]
+            task["path"] = dest_path
+            task["eta_seconds"] = 0
+    except asyncio.CancelledError:
+        try:
+            if os.path.exists(part_path):
+                os.remove(part_path)
+        except OSError:
+            pass
+        with _DOWNLOAD_LOCK:
+            _DOWNLOAD_TASKS[download_id]["status"] = "cancelled"
+            _DOWNLOAD_TASKS[download_id]["error"] = "Cancelled by user"
+    except Exception as exc:
+        try:
+            if os.path.exists(part_path):
+                os.remove(part_path)
+        except OSError:
+            pass
+        with _DOWNLOAD_LOCK:
+            _DOWNLOAD_TASKS[download_id]["status"] = "error"
+            _DOWNLOAD_TASKS[download_id]["error"] = str(exc)[:240]
+    finally:
+        _DOWNLOAD_CANCEL.pop(download_id, None)
+
+
+@app.get("/api/models/library", dependencies=[Depends(verify_gateway_access)])
+async def get_models_library():
+    return JSONResponse(status_code=200, content=_list_model_library())
+
+
+@app.post("/api/models/paths", dependencies=[Depends(verify_gateway_access)])
+async def manage_model_paths(request: Request):
+    body = await request.json()
+    action = str(body.get("action", "add")).strip().lower()
+    raw_path = str(body.get("path", "")).strip().strip('"')
+    if not raw_path:
+        raise HTTPException(status_code=400, detail="Directory path is required.")
+
+    abs_path = os.path.abspath(os.path.expanduser(raw_path))
+    dirs = load_custom_model_dirs()
+    if action == "add":
+        if not os.path.isdir(abs_path):
+            raise HTTPException(status_code=400, detail=f"Folder does not exist: {abs_path}")
+        if not any(os.path.realpath(d).lower() == os.path.realpath(abs_path).lower() for d in dirs):
+            dirs.append(abs_path)
+            save_custom_model_dirs(dirs)
+    elif action == "remove":
+        target_low = os.path.realpath(abs_path).lower() if os.path.exists(abs_path) else abs_path.lower()
+        dirs = [d for d in dirs if os.path.realpath(d).lower() != target_low and d.lower() != abs_path.lower()]
+        save_custom_model_dirs(dirs)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported action (expected 'add' or 'remove').")
+
+    return JSONResponse(status_code=200, content={"status": "ok", "library": _list_model_library()})
+
+
+@app.post("/api/models/import-path", dependencies=[Depends(verify_gateway_access)])
+async def import_model_by_path(request: Request):
+    body = await request.json()
+    raw_path = str(body.get("path", "")).strip().strip('"')
+    copy_to_library = bool(body.get("copy_to_library", False))
+    if not raw_path:
+        raise HTTPException(status_code=400, detail="Model file path is required.")
+
+    abs_path = os.path.abspath(os.path.expanduser(raw_path))
+    if os.path.isdir(abs_path):
+        # User pasted a directory into the path bar — register it as a custom model folder
+        dirs = load_custom_model_dirs()
+        if not any(os.path.realpath(d).lower() == os.path.realpath(abs_path).lower() for d in dirs):
+            dirs.append(abs_path)
+            save_custom_model_dirs(dirs)
+        return JSONResponse(status_code=200, content={"status": "ok", "imported_type": "directory", "path": abs_path, "library": _list_model_library()})
+
+    if not os.path.isfile(abs_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {abs_path}")
+
+    fname = os.path.basename(abs_path)
+    lower = fname.lower()
+    if not (lower.endswith(".gguf") or lower.endswith(".safetensors")):
+        raise HTTPException(status_code=400, detail="Only .gguf and .safetensors model files are supported.")
+    if lower.endswith(".gguf") and not _verify_gguf_magic_file(abs_path):
+        raise HTTPException(status_code=400, detail="Selected file is not a valid GGUF model (missing GGUF magic header).")
+
+    if copy_to_library:
+        safe_name = _sanitize_model_name(fname)
+        dest = os.path.join(get_primary_models_dir(), safe_name)
+        part = dest + ".part"
+        await asyncio.to_thread(shutil.copy2, abs_path, part)
+        os.replace(part, dest)
+        final_path = dest
+    else:
+        parent_dir = os.path.dirname(abs_path)
+        dirs = load_custom_model_dirs()
+        if not any(os.path.realpath(d).lower() == os.path.realpath(parent_dir).lower() for d in dirs):
+            dirs.append(parent_dir)
+            save_custom_model_dirs(dirs)
+        final_path = abs_path
+
+    return JSONResponse(
+        status_code=200,
+        content={"status": "ok", "imported_type": "file", "model": fname, "path": final_path, "library": _list_model_library()},
+    )
+
+
+@app.post("/api/models/browse", dependencies=[Depends(verify_gateway_access)])
+async def browse_local_model_path(request: Request):
+    body = await request.json()
+    mode = str(body.get("mode", "file")).strip().lower()
+    if sys.platform != "win32":
+        return JSONResponse(status_code=200, content={"supported": False, "path": None, "message": "Native folder/file picker is available on Windows desktop; type or paste the path directly."})
+    selected = await asyncio.to_thread(_browse_windows_dialog, mode)
+    return JSONResponse(status_code=200, content={"supported": True, "path": selected})
+
+
+@app.post("/api/models/upload", dependencies=[Depends(verify_gateway_access)])
+async def upload_dropped_model(request: Request):
+    raw_name = request.query_params.get("filename") or request.headers.get("x-model-filename") or ""
+    try:
+        filename = _sanitize_model_name(raw_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    lower = filename.lower()
+    if not (lower.endswith(".gguf") or lower.endswith(".safetensors")):
+        raise HTTPException(status_code=400, detail="Only .gguf and .safetensors model files can be uploaded.")
+
+    primary_dir = get_primary_models_dir()
+    dest = os.path.join(primary_dir, filename)
+    part = dest + ".part"
+    written = 0
+    header_buf = bytearray()
+    try:
+        with open(part, "wb") as out_f:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                if len(header_buf) < 4:
+                    header_buf.extend(chunk[: 4 - len(header_buf)])
+                    if len(header_buf) == 4 and lower.endswith(".gguf") and bytes(header_buf) != b"GGUF":
+                        raise HTTPException(status_code=400, detail="Dropped file is not a valid GGUF model (missing GGUF header).")
+                out_f.write(chunk)
+                written += len(chunk)
+        if written == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file was empty.")
+        os.replace(part, dest)
+    except Exception:
+        try:
+            if os.path.exists(part):
+                os.remove(part)
+        except OSError:
+            pass
+        raise
+
+    return JSONResponse(
+        status_code=200,
+        content={"status": "ok", "model": filename, "size_bytes": written, "path": dest, "library": _list_model_library()},
+    )
+
+
+@app.post("/api/models/delete", dependencies=[Depends(verify_gateway_access)])
+async def delete_managed_model(request: Request):
+    body = await request.json()
+    raw_name = str(body.get("name", "")).strip()
+    try:
+        filename = _sanitize_model_name(raw_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    primary_dir = get_primary_models_dir()
+    primary_real = os.path.realpath(primary_dir)
+    candidate = os.path.realpath(os.path.join(primary_dir, filename))
+    if not candidate.startswith(primary_real + os.sep) or not os.path.isfile(candidate):
+        raise HTTPException(
+            status_code=404,
+            detail="Only model files stored in AeroMESH's managed models directory can be deleted from the UI. To unlink an external folder, remove it from Model Folders.",
+        )
+    os.remove(candidate)
+    return JSONResponse(status_code=200, content={"status": "ok", "deleted": filename, "library": _list_model_library()})
+
+
+@app.get("/api/models/hf/search", dependencies=[Depends(verify_gateway_access)])
+async def search_hf_gguf_models(q: str = "", limit: int = 12):
+    query = str(q or "").strip()
+    lim = max(1, min(int(limit), 25))
+    params = {
+        "filter": "gguf",
+        "sort": "downloads",
+        "direction": "-1",
+        "limit": str(lim),
+    }
+    if query:
+        params["search"] = query
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.get(
+                "https://huggingface.co/api/models",
+                params=params,
+                headers={"User-Agent": "AeroMESH-Studio/0.3"},
+            )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"Hugging Face search returned HTTP {resp.status_code}")
+            items = resp.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not reach Hugging Face Hub: {exc}")
+
+    results = []
+    for item in items:
+        repo_id = item.get("id") or item.get("modelId") or ""
+        if not repo_id:
+            continue
+        results.append({
+            "repo": repo_id,
+            "author": item.get("author") or repo_id.split("/")[0],
+            "downloads": item.get("downloads", 0),
+            "likes": item.get("likes", 0),
+            "gated": bool(item.get("gated", False)),
+            "last_modified": item.get("lastModified", ""),
+        })
+    return JSONResponse(status_code=200, content={"results": results})
+
+
+@app.get("/api/models/hf/files", dependencies=[Depends(verify_gateway_access)])
+async def list_hf_repo_gguf_files(repo: str):
+    try:
+        repo_id = _validate_hf_repo_id(repo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.get(
+                f"https://huggingface.co/api/models/{repo_id}/tree/main",
+                headers={"User-Agent": "AeroMESH-Studio/0.3"},
+            )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=resp.status_code, detail=f"Hugging Face returned HTTP {resp.status_code} for {repo_id}")
+            entries = resp.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not inspect repository {repo_id}: {exc}")
+
+    files = []
+    for entry in entries:
+        path = str(entry.get("path") or "")
+        if not path.lower().endswith(".gguf"):
+            continue
+        size = int(entry.get("size") or (entry.get("lfs") or {}).get("size") or 0)
+        fname = os.path.basename(path)
+        est_vram_gb = round((size / (1024 ** 3)) * 1.18 + 0.5, 1) if size > 0 else 0.0
+        files.append({
+            "filename": fname,
+            "path": path,
+            "size_bytes": size,
+            "size_label": _format_bytes(size) if size > 0 else "Unknown",
+            "quant": _extract_quant_tag(fname),
+            "est_vram_gb": est_vram_gb,
+            "download_url": f"https://huggingface.co/{repo_id}/resolve/main/{quote(path, safe='/')}",
+            "recommended": "Q4_K_M" in fname.upper(),
+        })
+    files.sort(key=lambda f: (0 if f["recommended"] else 1, f["size_bytes"]))
+    return JSONResponse(status_code=200, content={"repo": repo_id, "files": files})
+
+
+@app.post("/api/models/download", dependencies=[Depends(verify_gateway_access)])
+async def start_model_download(request: Request):
+    body = await request.json()
+    raw_url = str(body.get("url", "")).strip()
+    repo = str(body.get("repo", "")).strip()
+    raw_filename = str(body.get("filename", "")).strip()
+    hf_token = str(body.get("hf_token", "")).strip()
+
+    if not raw_url and repo and raw_filename:
+        repo_id = _validate_hf_repo_id(repo)
+        safe_fname = _sanitize_model_name(os.path.basename(raw_filename))
+        raw_url = f"https://huggingface.co/{repo_id}/resolve/main/{quote(raw_filename, safe='/')}"
+    else:
+        if not raw_filename and raw_url:
+            raw_filename = os.path.basename(urlparse(raw_url).path)
+
+    try:
+        url = _validate_hf_download_url(raw_url)
+        filename = _sanitize_model_name(os.path.basename(raw_filename))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if not (filename.lower().endswith(".gguf") or filename.lower().endswith(".safetensors")):
+        raise HTTPException(status_code=400, detail="Only .gguf and .safetensors files can be downloaded.")
+
+    download_id = uuid.uuid4().hex[:12]
+    task_info = {
+        "id": download_id,
+        "filename": filename,
+        "repo": repo or urlparse(url).path.strip("/"),
+        "status": "starting",
+        "downloaded_bytes": 0,
+        "total_bytes": 0,
+        "percent": 0.0,
+        "speed_mbps": 0.0,
+        "eta_seconds": 0,
+        "error": None,
+    }
+    with _DOWNLOAD_LOCK:
+        _DOWNLOAD_TASKS[download_id] = task_info
+        _DOWNLOAD_CANCEL[download_id] = False
+
+    asyncio.create_task(_run_model_download_task(download_id, url, filename, repo, hf_token))
+    return JSONResponse(status_code=202, content={"status": "started", "download": task_info})
+
+
+@app.get("/api/models/downloads", dependencies=[Depends(verify_gateway_access)])
+async def list_model_downloads():
+    with _DOWNLOAD_LOCK:
+        items = list(_DOWNLOAD_TASKS.values())
+    return JSONResponse(status_code=200, content={"downloads": items})
+
+
+@app.post("/api/models/download/cancel", dependencies=[Depends(verify_gateway_access)])
+async def cancel_model_download(request: Request):
+    body = await request.json()
+    download_id = str(body.get("id", "")).strip()
+    with _DOWNLOAD_LOCK:
+        if download_id not in _DOWNLOAD_TASKS:
+            raise HTTPException(status_code=404, detail="Download task not found.")
+        _DOWNLOAD_CANCEL[download_id] = True
+    return JSONResponse(status_code=200, content={"status": "cancelling", "id": download_id})
 
 
 # ---------------------------------------------------------------------------

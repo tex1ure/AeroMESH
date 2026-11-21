@@ -115,8 +115,99 @@ pub fn models_dir() -> PathBuf {
     data_dir().join("models")
 }
 
+/// Path to the persistent JSON list of user-registered custom model directories.
+pub fn custom_model_paths_file() -> PathBuf {
+    data_dir().join("model_paths.json")
+}
+
+/// Reads user-registered custom model directories from `model_paths.json`.
+pub fn load_custom_model_dirs() -> Vec<PathBuf> {
+    let path = custom_model_paths_file();
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(list) = serde_json::from_str::<Vec<String>>(&content) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    for raw in list {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let p = PathBuf::from(trimmed);
+        if !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    }
+    dirs
+}
+
+/// Persists the list of user-registered custom model directories to `model_paths.json`.
+pub fn save_custom_model_dirs(dirs: &[PathBuf]) -> std::io::Result<()> {
+    let file = custom_model_paths_file();
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let strings: Vec<String> = dirs
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let payload = serde_json::to_string_pretty(&strings).unwrap_or_else(|_| "[]".to_string());
+    std::fs::write(&file, payload)
+}
+
+/// Registers a user-chosen existing directory as an approved model search folder.
+pub fn add_custom_model_dir(dir: &Path) -> Result<Vec<PathBuf>> {
+    if !dir.is_dir() {
+        bail!("Directory '{}' does not exist", dir.display());
+    }
+    let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let mut dirs = load_custom_model_dirs();
+    let norm_new = canon.to_string_lossy().to_ascii_lowercase();
+    let exists = dirs
+        .iter()
+        .any(|d| d.to_string_lossy().to_ascii_lowercase() == norm_new);
+    if !exists {
+        dirs.push(canon);
+        save_custom_model_dirs(&dirs)?;
+    }
+    Ok(dirs)
+}
+
+/// Removes a custom model directory from `model_paths.json`.
+pub fn remove_custom_model_dir(dir: &Path) -> Result<Vec<PathBuf>> {
+    let norm_target = std::fs::canonicalize(dir)
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let raw_target = dir.to_string_lossy().to_ascii_lowercase();
+    let mut dirs = load_custom_model_dirs();
+    dirs.retain(|d| {
+        let cur = d.to_string_lossy().to_ascii_lowercase();
+        cur != norm_target && cur != raw_target
+    });
+    save_custom_model_dirs(&dirs)?;
+    Ok(dirs)
+}
+
+/// Verifies that a `.gguf` file starts with the 4-byte `GGUF` magic header.
+pub fn verify_gguf_header(path: &Path) -> Result<()> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic)?;
+    if &magic != b"GGUF" {
+        bail!(
+            "File '{}' is not a valid GGUF model (missing GGUF magic header)",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// All directories searched when discovering installed models (writable first,
-/// read-only install fallback second).
+/// read-only install fallback second, plus user-registered custom directories).
 pub fn model_search_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![models_dir()];
     let install_models = install_dir().join("models");
@@ -126,6 +217,11 @@ pub fn model_search_dirs() -> Vec<PathBuf> {
     let cwd_models = PathBuf::from("models");
     if cwd_models.is_dir() && !dirs.contains(&cwd_models) {
         dirs.push(cwd_models);
+    }
+    for custom in load_custom_model_dirs() {
+        if custom.is_dir() && !dirs.contains(&custom) {
+            dirs.push(custom);
+        }
     }
     dirs
 }

@@ -1416,3 +1416,679 @@ html, body {
   flex-shrink: 0;
 }
 
+/* ==========================================================================
+   SIDEBAR WORKSPACE SWITCHER & MODEL HUB (LM Studio / Ollama-style Manager)
+   ========================================================================== */
+
+.workspace-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  background-color: var(--Bg-Primary);
+  border: 1px solid var(--Separators-S1);
+  border-radius: var(--radius-sm);
+}
+
+.workspace-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--Labels-Secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.workspace-nav-btn:hover {
+  color: var(--Labels-Primary);
+  background-color: var(--Fills-F1);
+}
+
+.workspace-nav-btn.active {
+  background-color: var(--Bg-Tertiary);
+  color: var(--Labels-Primary);
+  font-weight: 600;
+}
+
+.workspace-nav-btn:focus-visible,
+.mh-subtab:focus-visible,
+.mh-btn-primary:focus-visible,
+.mh-btn-secondary:focus-visible,
+.mh-dropzone:focus-visible {
+  outline: 2px solid var(--Colors-KMBlue);
+  outline-offset: 2px;
+}
+
+.workspace-nav-count {
+  font-family: "JetBrains Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--Colors-KMBlue);
+}
+
+.model-dropdown-divider {
+  height: 1px;
+  background: var(--Separators-S1);
+  margin: 4px 0;
+}
+
+.model-dropdown-manage {
+  color: var(--Colors-KMBlue) !important;
+  font-weight: 600;
+}
+
+/* Full-stage Model Hub viewport */
+.models-hub-view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28px 32px 48px;
+  background-color: var(--Bg-Primary);
+}
+
+.mh-container {
+  max-width: 1100px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.mh-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--Separators-S1);
+}
+
+.mh-title {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--Labels-Primary);
+  line-height: 1.2;
+}
+
+.mh-subtitle {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--Labels-Secondary);
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
+.mh-subtitle code {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11.5px;
+  color: var(--Labels-Primary);
+}
+
+.mh-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mh-subtabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  background-color: var(--Bg-Secondary);
+  border: 1px solid var(--Separators-S1);
+  border-radius: var(--radius-sm);
+}
+
+.mh-subtab {
+  height: 34px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--Labels-Secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.mh-subtab:hover {
+  color: var(--Labels-Primary);
+}
+
+.mh-subtab.active {
+  background-color: var(--Bg-Quaternary);
+  color: var(--Labels-Primary);
+  font-weight: 600;
+}
+
+.mh-count-text {
+  font-variant-numeric: tabular-nums;
+  color: var(--Labels-Tertiary);
+  font-size: 12px;
+  margin-left: 4px;
+}
+
+.mh-icon-btn {
+  height: 40px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+
+.mh-feedback {
+  padding: 11px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  border: 1px solid var(--Separators-S2);
+  background-color: var(--Bg-Secondary);
+  color: var(--Labels-Primary);
+}
+
+.mh-feedback.is-ok {
+  border-color: rgba(22, 196, 86, 0.35);
+  background-color: rgba(22, 196, 86, 0.08);
+  color: #86efac;
+}
+
+.mh-feedback.is-error {
+  border-color: rgba(255, 71, 86, 0.4);
+  background-color: rgba(255, 71, 86, 0.09);
+  color: #fca5a5;
+}
+
+/* Buttons & Inputs */
+.mh-text-input {
+  flex: 1;
+  min-width: 180px;
+  height: 40px;
+  padding: 0 12px;
+  background-color: var(--Bg-Primary);
+  border: 1px solid var(--Separators-S2);
+  border-radius: var(--radius-sm);
+  color: var(--Labels-Primary);
+  font-size: 13.5px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.mh-text-input:focus {
+  border-color: var(--Colors-KMBlue);
+}
+
+.mh-text-input::placeholder {
+  color: var(--Labels-Tertiary);
+}
+
+.mh-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 16px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background-color: var(--Colors-KMBlue);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s ease;
+}
+
+.mh-btn-primary:hover:not(:disabled) {
+  background-color: var(--Colors-KMBlue-hover);
+}
+
+.mh-btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.mh-btn-secondary {
+  height: 36px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.mh-btn-ghost {
+  height: 40px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+
+.mh-btn-sm {
+  height: 34px;
+  padding: 0 12px;
+  font-size: 12.5px;
+}
+
+.mh-btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 71, 86, 0.35);
+  background-color: transparent;
+  color: #fca5a5;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s ease;
+}
+
+.mh-btn-danger:hover {
+  background-color: rgba(255, 71, 86, 0.14);
+}
+
+.mh-link-btn {
+  background: none;
+  border: none;
+  color: var(--Colors-KMBlue);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+
+.mh-link-btn:hover {
+  text-decoration: underline;
+}
+
+/* Active Transfers */
+.mh-downloads-panel {
+  background-color: var(--Bg-Secondary);
+  border: 1px solid var(--Separators-S1);
+  border-radius: var(--radius-md);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mh-downloads-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mh-dl-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--Separators-S1);
+}
+
+.mh-dl-row:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.mh-dl-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mh-dl-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--Labels-Primary);
+  word-break: break-all;
+}
+
+.mh-dl-meta {
+  font-family: "JetBrains Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--Labels-Secondary);
+}
+
+.mh-progress-track {
+  width: 100%;
+  height: 6px;
+  background-color: var(--Bg-Quaternary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.mh-progress-fill {
+  height: 100%;
+  background-color: var(--Colors-KMBlue);
+  transition: width 0.25s ease;
+}
+
+.mh-progress-fill.is-done {
+  background-color: var(--Colors-PositiveGreen);
+}
+
+.mh-progress-fill.is-err {
+  background-color: var(--Colors-Red);
+}
+
+/* Discover Search & Catalog */
+.mh-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.mh-search-bar-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  background-color: var(--Bg-Secondary);
+  border: 1px solid var(--Separators-S1);
+  border-radius: var(--radius-md);
+}
+
+.mh-search-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mh-token-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mh-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mh-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mh-section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--Labels-Primary);
+}
+
+.mh-section-desc {
+  margin-top: 3px;
+  font-size: 13px;
+  color: var(--Labels-Secondary);
+}
+
+.mh-section-desc code {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  color: var(--Labels-Primary);
+}
+
+.mh-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+@media (max-width: 900px) {
+  .mh-catalog-grid,
+  .mh-import-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.mh-catalog-card {
+  background-color: var(--Bg-Secondary);
+  border: 1px solid var(--Separators-S1);
+  border-radius: var(--radius-md);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mh-card-title {
+  font-size: 15.5px;
+  font-weight: 600;
+  color: var(--Labels-Primary);
+}
+
+.mh-meta-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--Labels-Secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.mh-meta-sep {
+  color: var(--Labels-Quaternary);
+}
+
+.mh-card-desc {
+  font-size: 13px;
+  color: var(--Labels-Secondary);
+  line-height: 1.5;
+}
+
+.mh-card-actions {
+  margin-top: auto;
+  padding-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Inline HF Quantizations Drawer */
+.mh-repo-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--Separators-S1);
+  border-radius: var(--radius-md);
+  background-color: var(--Bg-Secondary);
+  overflow: hidden;
+}
+
+.mh-repo-row {
+  padding: 14px 18px;
+  border-top: 1px solid var(--Separators-S1);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mh-repo-row:first-child {
+  border-top: none;
+}
+
+.mh-repo-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.mh-files-drawer {
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--Separators-S1);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mh-file-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background-color: var(--Bg-Primary);
+  border: 1px solid var(--Separators-S1);
+  flex-wrap: wrap;
+}
+
+.mh-file-option-name {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12.5px;
+  color: var(--Labels-Primary);
+  word-break: break-all;
+}
+
+/* Local Library & Import */
+.mh-import-grid {
+  display: grid;
+  grid-template-columns: 1.25fr 1fr;
+  gap: 16px;
+}
+
+.mh-surface {
+  background-color: var(--Bg-Secondary);
+  border: 1px solid var(--Separators-S1);
+  border-radius: var(--radius-md);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mh-path-input-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mh-path-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mh-checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--Labels-Secondary);
+  cursor: pointer;
+}
+
+.mh-dropzone {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  border-style: dashed;
+  border-color: var(--Separators-S2);
+  cursor: pointer;
+  transition: border-color 0.16s ease, background-color 0.16s ease;
+}
+
+.mh-dropzone:hover,
+.mh-dropzone.is-dragover {
+  border-color: var(--Colors-KMBlue);
+  background-color: rgba(26, 136, 255, 0.06);
+}
+
+.mh-dropzone-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--Labels-Primary);
+}
+
+.mh-dropzone-sub {
+  font-size: 12.5px;
+  color: var(--Labels-Secondary);
+  max-width: 34ch;
+}
+
+.mh-installed-list,
+.mh-folders-list {
+  display: flex;
+  flex-direction: column;
+  background-color: var(--Bg-Secondary);
+  border: 1px solid var(--Separators-S1);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.mh-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--Separators-S1);
+  flex-wrap: wrap;
+}
+
+.mh-list-row:first-child {
+  border-top: none;
+}
+
+.mh-list-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.mh-list-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--Labels-Primary);
+  word-break: break-all;
+}
+
+.mh-list-path {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11.5px;
+  color: var(--Labels-Tertiary);
+  word-break: break-all;
+}
+
+.mh-list-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.mh-empty-state {
+  padding: 28px 20px;
+  text-align: center;
+  color: var(--Labels-Secondary);
+  font-size: 13.5px;
+}
+
+

@@ -312,51 +312,88 @@ window.getApiUrl = window.getApiUrl || function(path) {
     }
   }
 
+  async function switchActiveModel(modelName) {
+    if (!modelName) return false;
+    activeModel = modelName;
+    if (elements.activeModelName) {
+      elements.activeModelName.textContent = `Loading ${activeModel}...`;
+    }
+    if (elements.modelDropdownMenu) {
+      elements.modelDropdownMenu.classList.remove('active');
+    }
+    renderModelDropdown();
+
+    try {
+      const resp = await fetch(getApiUrl('/api/model/switch'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelName })
+      });
+      if (resp.ok) {
+        if (elements.activeModelName) elements.activeModelName.textContent = activeModel;
+        await fetchModels();
+        await fetchClusterStatus();
+        return true;
+      }
+      // If coordinator is not yet running, start a local mesh with this model
+      const startResp = await fetch(getApiUrl('/api/node/start'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'all', model: modelName, peers: '' })
+      });
+      if (startResp.ok) {
+        if (elements.activeModelName) elements.activeModelName.textContent = activeModel;
+        setTimeout(() => { fetchModels(); fetchClusterStatus(); }, 1800);
+        return true;
+      }
+      if (elements.activeModelName) elements.activeModelName.textContent = activeModel;
+      return false;
+    } catch (e) {
+      console.error('Error switching model:', e);
+      if (elements.activeModelName) elements.activeModelName.textContent = activeModel;
+      return false;
+    }
+  }
+  window.switchActiveModel = switchActiveModel;
+
   function renderModelDropdown() {
     elements.modelDropdownMenu.innerHTML = '';
     if (availableModels.length === 0) {
       const emptyItem = document.createElement('div');
       emptyItem.className = 'model-dropdown-item';
-      emptyItem.textContent = 'No active models found';
+      emptyItem.textContent = 'No models found yet';
       elements.modelDropdownMenu.appendChild(emptyItem);
-      return;
+    } else {
+      availableModels.forEach((m) => {
+        const item = document.createElement('div');
+        item.className = `model-dropdown-item ${m.id === activeModel ? 'active' : ''}`;
+        // `m.id` comes from a file name on disk, so it is untrusted input.
+        item.innerHTML = `<span>${escapeHtml(m.id)}</span> ${m.id === activeModel ? '<i data-lucide="check" style="width: 13px; height: 13px;"></i>' : ''}`;
+        item.onclick = async () => {
+          if (activeModel === m.id) {
+            elements.modelDropdownMenu.classList.remove('active');
+            return;
+          }
+          await switchActiveModel(m.id);
+        };
+        elements.modelDropdownMenu.appendChild(item);
+      });
     }
 
-    availableModels.forEach((m) => {
-      const item = document.createElement('div');
-      item.className = `model-dropdown-item ${m.id === activeModel ? 'active' : ''}`;
-      // `m.id` comes from a file name on disk, so it is untrusted input.
-      item.innerHTML = `<span>${escapeHtml(m.id)}</span> ${m.id === activeModel ? '<i data-lucide="check" style="width: 13px; height: 13px;"></i>' : ''}`;
-      item.onclick = async () => {
-        if (activeModel === m.id) {
-          elements.modelDropdownMenu.classList.remove('active');
-          return;
-        }
-        activeModel = m.id;
-        elements.activeModelName.textContent = `Loading ${activeModel}...`;
-        elements.modelDropdownMenu.classList.remove('active');
-        renderModelDropdown();
+    const divider = document.createElement('div');
+    divider.className = 'model-dropdown-divider';
+    elements.modelDropdownMenu.appendChild(divider);
 
-        try {
-          const resp = await fetch(getApiUrl('/api/model/switch'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: m.id })
-          });
-          if (resp.ok) {
-            elements.activeModelName.textContent = activeModel;
-            await fetchClusterStatus();
-          } else {
-            console.error('Failed to switch model on coordinator');
-            elements.activeModelName.textContent = activeModel;
-          }
-        } catch (e) {
-          console.error('Error switching model:', e);
-          elements.activeModelName.textContent = activeModel;
-        }
-      };
-      elements.modelDropdownMenu.appendChild(item);
-    });
+    const manageItem = document.createElement('div');
+    manageItem.className = 'model-dropdown-item model-dropdown-manage';
+    manageItem.innerHTML = '<span>Install or manage models…</span><i data-lucide="hard-drive-download" style="width: 13px; height: 13px;"></i>';
+    manageItem.onclick = () => {
+      elements.modelDropdownMenu.classList.remove('active');
+      if (typeof window.openModelHub === 'function') {
+        window.openModelHub('discover');
+      }
+    };
+    elements.modelDropdownMenu.appendChild(manageItem);
 
     if (window.lucide) lucide.createIcons();
   }
@@ -1974,7 +2011,10 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
         <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:14px;background:#121214;padding:14px 16px;border-radius:14px;border:1px solid rgba(255,255,255,0.08);">
           <div>
-            <label style="font-size:11px;font-weight:700;color:#1a88ff;text-transform:uppercase;">1. Select Local GGUF Model</label>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+              <label style="font-size:11px;font-weight:700;color:#1a88ff;text-transform:uppercase;">1. Select Local GGUF Model</label>
+              <button id="rm-open-hub-btn" class="clay-btn" style="padding:3px 10px;font-size:11px;display:inline-flex;align-items:center;gap:5px;color:#1a88ff;"><i data-lucide="hard-drive-download" style="width: 11px; height: 11px;"></i><span>Install / Add Models</span></button>
+            </div>
             <select id="rm-model-select" style="width:100%;margin-top:6px;padding:9px 12px;border-radius:10px;background:#18181b;color:#fff;border:1px solid rgba(255,255,255,0.16);font-size:13px;"></select>
             <div style="font-size:11.5px;color:#16c456;margin-top:6px;" id="rm-img-model-label"></div>
           </div>
@@ -2022,6 +2062,10 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
     document.getElementById('rm-close-btn').onclick = () => closeRoleModal();
     document.getElementById('rm-rescan-btn').onclick = () => scanPeersIntoModal();
+    document.getElementById('rm-open-hub-btn').onclick = () => {
+      closeRoleModal();
+      if (typeof window.openModelHub === 'function') window.openModelHub('discover');
+    };
     document.getElementById('rm-stop-btn').onclick = async () => {
       await fetch(window.getApiUrl('/api/node/stop'), { method: 'POST' });
       stopLogPolling();
