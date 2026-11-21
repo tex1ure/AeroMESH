@@ -7,7 +7,7 @@
   **Zero-Weight Layer-Pipelined Distributed Inference over Tailscale WireGuard & LAN**
 
   <p align="center">
-    <a href="https://github.com/your-org/AeroMESH/actions"><img src="https://img.shields.io/badge/CI-Passing%20(92%2F92%20Tests)-10b981?style=for-the-badge&logo=githubactions&logoColor=white" alt="CI Status" /></a>
+    <a href=".github/workflows/windows-release.yml"><img src="https://img.shields.io/badge/Windows%20Installer-Inno%20Setup%20x64-0078d4?style=for-the-badge&logo=windows&logoColor=white" alt="Windows Installer" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-blue?style=for-the-badge&logo=apache" alt="License" /></a>
     <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.78%2B%20(2021)-orange?style=for-the-badge&logo=rust" alt="Rust 1.78+" /></a>
     <a href="https://tailscale.com/"><img src="https://img.shields.io/badge/Network-Tailscale%20WireGuard-00e5ff?style=for-the-badge&logo=tailscale&logoColor=white" alt="Tailscale" /></a>
@@ -74,7 +74,8 @@
   - [Wire Throughput & Codec Comparison Table](#wire-throughput--codec-comparison-table)
 - [Hardware & Model Compatibility](#hardware--model-compatibility)
 - [Quickstart in 60 Seconds](#quickstart-in-60-seconds)
-  - [Prerequisites](#prerequisites)
+  - [Windows Setup Wizard (`AeroMesh-Setup-x64.exe`)](#windows-setup-wizard-aeromesh-setup-x64exe)
+  - [Prerequisites (Building from Source)](#prerequisites)
   - [Automated Environment Bootstrap (`setup.ps1`)](#automated-environment-bootstrap-setupps1)
   - [Building from Source](#building-from-source)
   - [Running the Test Suites (65 Rust + 27 Python)](#running-the-test-suites-65-rust--27-python)
@@ -96,10 +97,6 @@
 - [Roadmap & Engineering Milestones](#roadmap--engineering-milestones)
 - [Contributing & Development](#contributing--development)
 - [License & Acknowledgments](#license--acknowledgments)
-- [Project Directory Layout](#-project-directory-layout)
-- [Roadmap & Engineering Milestones](#-roadmap--engineering-milestones)
-- [Contributing & Development](#-contributing--development)
-- [License & Acknowledgments](#-license--acknowledgments)
 
 ---
 
@@ -548,38 +545,54 @@ Before any activation frames are streamed, nodes complete a mutual cryptographic
 
 ## Quickstart in 60 Seconds
 
+### Windows Setup Wizard (`AeroMesh-Setup-x64.exe`)
+
+For Windows 10/11 end users, AeroMESH ships with a **VS Code–style Windows Setup Wizard** (`installer/AeroMesh.iss`) requiring **zero manual Rust, Python, or CUDA Toolkit installation**:
+
+- **Per-User or All-Users install** (`%LOCALAPPDATA%\Programs\AeroMesh` or `C:\Program Files\AeroMesh`), with writable models, cache, and `.env` stored cleanly in `%LOCALAPPDATA%\AeroMesh`.
+- **Automatic GPU Detection & Selectable Components**:
+  - **AeroMESH Core Engine & Desktop Studio** (bundled `AeroMesh-Desktop.exe`, `aeromesh.exe`, `llama.dll`, `ggml*.dll`, and 100% offline web UI assets).
+  - **NVIDIA CUDA 12 GPU Runtime** (auto-selected when an NVIDIA driver is detected; bundles `ggml-cuda.dll` + CUDA 12 runtime DLLs so users do not need the 4 GB CUDA Toolkit).
+  - **Vulkan GPU Acceleration** (for AMD Radeon / Intel Arc GPUs) & **CPU Fallback**.
+  - **Optional Stable Diffusion Studio (`sd-cli.exe`)** and **Optional Tailscale P2P Mesh helper**.
+- **Additional Tasks**: Desktop shortcut, add `aeromesh` CLI to `PATH`, Windows Defender Firewall rule for TCP port `50052`, and optional Worker auto-start on sign-in.
+
+To build the `.exe` installer locally on Windows (requires Rust + CMake + Inno Setup 6):
+
+```powershell
+.\installer\build-installer.ps1
+# Output: dist\AeroMesh-Setup-x64.exe + dist\SHA256SUMS.txt
+```
+
+See [installer/README.md](installer/README.md) for full packaging, CUDA redistributable, and code-signing instructions.
+
 ### Prerequisites
 
-1. **Windows 10 / 11 (64-bit)** with updated NVIDIA GPU drivers.
-2. **Rust Toolchain**: Rust 1.78+ (`stable-x86_64-pc-windows-gnu` with `w64devkit` or `msvc`).
-3. **Python 3.11+** installed and added to your `PATH`.
-4. **Tailscale**: Installed and signed in on all participating machines ([tailscale.com](https://tailscale.com)).
+1. **Windows 10 / 11 (64-bit)** with updated NVIDIA GPU drivers (or Vulkan-capable AMD/Intel GPU).
+2. **Rust Toolchain**: Rust 1.78+ (`stable-x86_64-pc-windows-msvc` or `gnu`).
+3. **Python 3.11+** (optional; only needed for running the legacy `app.py` FastAPI dev server — `AeroMesh-Desktop.exe` runs standalone).
+4. **Tailscale** (optional): Installed and signed in on all participating machines for cross-network meshes ([tailscale.com](https://tailscale.com)).
 
 ### Automated Environment Bootstrap (`setup.ps1`)
 
 Clone the repository and run the automated Windows setup script in PowerShell:
 
 ```powershell
-git clone https://github.com/your-org/AeroMESH.git
+git clone <your-aeromesh-repo-url>
 cd AeroMESH
-.\setup.ps1
+.\setup.ps1 -CloneLlamaCpp
 ```
 
 The script automatically:
-1. Validates the Rust and Python toolchains.
-2. Resolves and configures `w64devkit` GNU compiler utilities.
-3. Creates a Python virtual environment (`.venv`) and installs `fastapi`, `uvicorn`, `httpx`, and `pytest`.
-4. Compiles native release binaries with Thin LTO.
-5. Deploys required CUDA and `llama.cpp` dynamic link libraries (`bin/*.dll`).
-6. Generates cryptographically secure secrets in `.env`.
+1. Validates GPU drivers, Tailscale, Rust, and optional Python toolchains.
+2. Clones `llama.cpp` pinned to the ABI-verified release (`b10499`) and stages shared DLLs in `bin/`.
+3. Fetches SHA-384–verified offline UI vendor assets into `static/vendor/`.
+4. Compiles release binaries (`aeromesh.exe` and `AeroMesh-Desktop.exe`) with dynamic FFI loading (no MinGW `dlltool` import library hacks required).
 
 ### Building from Source
 
 ```powershell
-# Ensure w64devkit and cargo are on your environment PATH
-$env:PATH = "C:\w64devkit\bin;C:\Users\$env:USERNAME\.cargo\bin;$env:PATH"
-
-# Build release binaries (CLI and Desktop Studio)
+# Build release binaries (CLI and native Desktop Studio)
 cargo build --release --workspace
 
 # Deploy runtime DLLs to release output folder

@@ -315,6 +315,19 @@ async fn handle_coordinator_connection(
     let mut current_stage_index: u8 = 1;
     let mut current_total_stages: u8 = 2;
 
+    if peek_buf != aeromesh_core::HANDSHAKE_REQ_MAGIC {
+        warn!(
+            peer = %peer_addr,
+            magic = ?peek_buf,
+            "🚨 Rejected unauthenticated connection: peer must initiate AHSK handshake before sending activation frames."
+        );
+        let resp = HandshakeResponse::reject("Authentication required: AHSK handshake missing");
+        let _ = socket.write_all(&resp.encode()).await;
+        let _ = socket.flush().await;
+        let _ = socket.shutdown().await;
+        return Ok(());
+    }
+
     if peek_buf == aeromesh_core::HANDSHAKE_REQ_MAGIC {
         let handshake_fut = HandshakeRequest::decode_async(socket);
         let req = match tokio::time::timeout(SOCKET_TIMEOUT, handshake_fut).await {
@@ -331,9 +344,22 @@ async fn handle_coordinator_connection(
             }
         };
 
-        // Authenticate worker secret
+        // Authenticate worker secret (fail closed if secret is unset/empty)
         let expected_secret = std::env::var("AEROMESH_WORKER_SECRET").unwrap_or_default();
-        let expected_token: [u8; 32] = Sha256::digest(expected_secret.as_bytes()).into();
+        if expected_secret.trim().is_empty() {
+            warn!(
+                peer = %peer_addr,
+                "🚨 Handshake rejected: AEROMESH_WORKER_SECRET is not configured on this worker."
+            );
+            let resp = HandshakeResponse::reject(
+                "Worker misconfigured: AEROMESH_WORKER_SECRET must be set",
+            );
+            let _ = socket.write_all(&resp.encode()).await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
+            return Ok(());
+        }
+        let expected_token: [u8; 32] = Sha256::digest(expected_secret.trim().as_bytes()).into();
 
         // Constant-time comparison
         let mut diff = 0u8;
@@ -755,6 +781,8 @@ pub struct PipelineCoordinatorClient {
     pub hidden_dim: usize,
     pub total_layers: usize,
     pub transport: Option<PipelineTransport>,
+    /// Most recently measured connection/handshake round-trip latency in ms.
+    pub last_rtt_ms: Option<f64>,
     pub target_dtype: ActivationDtype,
     /// Sampling configuration applied to the next generation. Set from the
     /// HTTP request via [`Self::set_sampling`]; `None` keeps the defaults
@@ -825,6 +853,7 @@ impl PipelineCoordinatorClient {
             hidden_dim,
             total_layers,
             transport: None,
+            last_rtt_ms: None,
             target_dtype: activation_dtype_from_env(),
             sampling: None,
             abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1019,6 +1048,7 @@ impl PipelineCoordinatorClient {
         self.hidden_dim = hidden_dim;
         self.total_layers = total_layers;
         self.transport = None; // Force fresh transport handshake with new model dimensions
+        self.last_rtt_ms = None;
 
         info!(
             model = %self.model_path.display(),
@@ -1039,15 +1069,19 @@ impl PipelineCoordinatorClient {
         info!(worker = %target_worker, "Connecting to Stage 2 Pipeline Worker");
 
         if PipelineTransportFactory::is_local_address(&target_worker) {
+            let t0 = Instant::now();
             let channel_id = target_worker.port();
             if let Ok(shm_transport) = ShmPipelineTransport::new_coordinator(channel_id) {
-                info!(worker = %target_worker, "✅ Connected to Stage 2 Worker via Zero-Copy SHM");
+                let rtt = (t0.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
+                info!(worker = %target_worker, rtt_ms = rtt, "✅ Connected to Stage 2 Worker via Zero-Copy SHM");
+                self.last_rtt_ms = Some(rtt);
                 self.transport = Some(PipelineTransport::Shm(shm_transport));
                 return Ok(());
             }
         }
 
         // Remote TCP Connection & Handshake Execution
+        let connect_start = Instant::now();
         let mut stream = match tokio::time::timeout(
             SOCKET_TIMEOUT,
             TcpStream::connect(target_worker),
@@ -1089,7 +1123,11 @@ impl PipelineCoordinatorClient {
         };
 
         let worker_secret = std::env::var("AEROMESH_WORKER_SECRET").unwrap_or_default();
-        let auth_token: [u8; 32] = Sha256::digest(worker_secret.as_bytes()).into();
+        if worker_secret.trim().is_empty() {
+            warn!(worker = %target_worker, "🚨 AEROMESH_WORKER_SECRET is not set; skipping remote worker handshake");
+            return Ok(());
+        }
+        let auth_token: [u8; 32] = Sha256::digest(worker_secret.trim().as_bytes()).into();
 
         let req = HandshakeRequest {
             version: aeromesh_core::PROTOCOL_VERSION,
@@ -1123,7 +1161,10 @@ impl PipelineCoordinatorClient {
                     warn!(worker = %target_worker, "🚨 Worker handshake response failed mutual authentication check");
                     return Ok(());
                 }
-                info!(worker = %target_worker, "✅ Handshake verified with mutual authentication. Connected to remote Stage 2 Worker via Tuned TCP Socket");
+                let measured_rtt =
+                    (connect_start.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
+                self.last_rtt_ms = Some(measured_rtt);
+                info!(worker = %target_worker, rtt_ms = measured_rtt, "✅ Handshake verified with mutual authentication. Connected to remote Stage 2 Worker via Tuned TCP Socket");
                 self.transport = Some(PipelineTransport::Tcp(
                     aeromesh_core::TcpPipelineTransport::new(stream)?,
                 ));
@@ -1146,8 +1187,8 @@ impl PipelineCoordinatorClient {
         &mut self,
         prompt: &str,
         max_tokens: usize,
-        _temperature: f32,
-        _top_p: f32,
+        temperature: f32,
+        top_p: f32,
         session_id: u64,
         token_tx: Option<mpsc::Sender<Vec<u8>>>,
     ) -> Result<(String, Vec<String>)> {
@@ -1160,9 +1201,17 @@ impl PipelineCoordinatorClient {
             None => "Local CPU/GPU Direct Execution",
         };
 
-        // Effective sampling configuration for this generation: the request's
-        // values overlaid on the model-load defaults.
-        let sampling = self.effective_sampling();
+        // Effective sampling configuration for this generation: overlay the
+        // caller's temperature/top_p onto the configured/model-load defaults.
+        let base_sampling = self.effective_sampling();
+        let sampling = SamplingParams::resolve(
+            base_sampling,
+            Some(temperature),
+            Some(top_p),
+            None,
+            None,
+            None,
+        );
 
         println!("\n========================================================");
         println!("   AEROMESH DISTRIBUTED PIPELINE GENERATION             ");
@@ -1401,14 +1450,6 @@ impl PipelineCoordinatorClient {
                 {
                     self.transport = None;
                     bail!("Stage 1 decode forward pass error: {}", e);
-                }
-
-                // Phase 1 Boundary Watchdog: Inspect Coordinator decode egress activations
-                if let Err(e) = Ok::<(), anyhow::Error>(()) {
-                    tracing::error!(
-                        "🚨 Coordinator decode egress watchdog assertion failed: {}",
-                        e
-                    );
                 }
 
                 let mut next_token_id = 0;

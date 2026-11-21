@@ -141,12 +141,38 @@ pub fn is_stage_slice_name(name: &str) -> bool {
 /// Slices a single stage GGUF model file for a given node's assigned layer slice:
 /// - Stages 0..total_stages-2: Layers slice.layer_start..=slice.layer_end with Identity RMSNorm (output_norm = 1.0)
 /// - Stage total_stages-1 (Final stage): Layers slice.layer_start..=slice.layer_end with authentic output_norm and true LM Head
+///
+/// For runtime pipeline launches (`allow_ephemeral_skip = true`), models larger than 10 MB
+/// defer to the ephemeral VRAM loader to avoid duplicating gigabytes on disk.
+/// Explicit CLI slicing calls [`slice_gguf_stage_to_disk`] to always materialize stage files.
 pub fn slice_gguf_stage<P: AsRef<Path>, Q: AsRef<Path>>(
     source_model: P,
     output_dir: Q,
     slice: &LayerSliceConfig,
     stage_index: usize,
     total_stages: usize,
+) -> Result<PathBuf> {
+    slice_gguf_stage_impl(source_model, output_dir, slice, stage_index, total_stages, true)
+}
+
+/// Explicitly slices and writes a stage GGUF partition file to disk regardless of model size.
+pub fn slice_gguf_stage_to_disk<P: AsRef<Path>, Q: AsRef<Path>>(
+    source_model: P,
+    output_dir: Q,
+    slice: &LayerSliceConfig,
+    stage_index: usize,
+    total_stages: usize,
+) -> Result<PathBuf> {
+    slice_gguf_stage_impl(source_model, output_dir, slice, stage_index, total_stages, false)
+}
+
+fn slice_gguf_stage_impl<P: AsRef<Path>, Q: AsRef<Path>>(
+    source_model: P,
+    output_dir: Q,
+    slice: &LayerSliceConfig,
+    stage_index: usize,
+    total_stages: usize,
+    allow_ephemeral_skip: bool,
 ) -> Result<PathBuf> {
     let src_path = source_model.as_ref();
     let out_dir = output_dir.as_ref();
@@ -164,9 +190,10 @@ pub fn slice_gguf_stage<P: AsRef<Path>, Q: AsRef<Path>>(
         total_stages
     );
 
-    if std::fs::metadata(src_path)
-        .map(|m| m.len() > 10 * 1024 * 1024)
-        .unwrap_or(false)
+    if allow_ephemeral_skip
+        && std::fs::metadata(src_path)
+            .map(|m| m.len() > 10 * 1024 * 1024)
+            .unwrap_or(false)
     {
         info!(
             source = %src_path.display(),
@@ -441,7 +468,7 @@ pub fn slice_gguf_for_multi_stage<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 
     for (i, slice) in stage_slices.iter().enumerate() {
-        slice_gguf_stage(src_path, out_dir, slice, i, total_stages)?;
+        slice_gguf_stage_to_disk(src_path, out_dir, slice, i, total_stages)?;
     }
 
     Ok(stage_paths)
@@ -902,11 +929,24 @@ impl InPlaceStageGuard {
         }
         drop(loader);
 
-        let parent = model_path.parent().unwrap_or_else(|| Path::new("models"));
+        // Write ephemeral slices into user-writable cache_dir so installs under
+        // C:\Program Files\AeroMesh never fail with write-permission errors.
+        let cache_parent = aeromesh_core::cache_dir();
+        let parent = if std::fs::create_dir_all(&cache_parent).is_ok() {
+            cache_parent
+        } else {
+            std::env::temp_dir()
+        };
+        static EPHEMERAL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let seq = EPHEMERAL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let stage_num = if slice.is_last_stage { 2 } else { 1 };
         let tmp_path = parent.join(format!(
-            ".aeromesh_ephemeral_s{}_{}_stage{}.gguf",
-            slice.layer_start, slice.layer_end, stage_num
+            ".aeromesh_ephemeral_p{}_{}_s{}_{}_stage{}.gguf",
+            std::process::id(),
+            seq,
+            slice.layer_start,
+            slice.layer_end,
+            stage_num
         ));
 
         let file = File::open(model_path)
@@ -1000,11 +1040,21 @@ impl InPlaceStageGuard {
 impl Drop for InPlaceStageGuard {
     fn drop(&mut self) {
         if let Some(ref p) = self.ephemeral_path {
-            if std::fs::remove_file(p).is_ok() {
-                info!(
-                    ephemeral_file = %p.display(),
-                    "Auto-deleted ephemeral stage GGUF after VRAM upload (0.0 MB disk overhead)"
-                );
+            match std::fs::remove_file(p) {
+                Ok(()) => {
+                    info!(
+                        ephemeral_file = %p.display(),
+                        "Auto-deleted ephemeral stage GGUF after VRAM upload (0.0 MB disk overhead)"
+                    );
+                }
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    tracing::warn!(
+                        ephemeral_file = %p.display(),
+                        error = %e,
+                        "Failed to remove temporary ephemeral stage GGUF file"
+                    );
+                }
+                Err(_) => {}
             }
         }
     }

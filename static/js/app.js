@@ -147,6 +147,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
   }
+  window.escapeHtml = escapeHtml;
 
   /** Renders Markdown to sanitized HTML. Returns a string safe for innerHTML. */
   function renderMarkdown(text) {
@@ -382,6 +383,9 @@ window.getApiUrl = window.getApiUrl || function(path) {
     }
     setClusterState('offline', { state: 'offline', status: 'offline' });
   }
+  window.fetchModels = fetchModels;
+  window.fetchClusterStatus = fetchClusterStatus;
+  window.pollClusterStatus = fetchClusterStatus;
 
   /** Maps a /api/cluster/status payload onto one of the four UI states. */
   function mapClusterState(data) {
@@ -1890,9 +1894,8 @@ window.getApiUrl = window.getApiUrl || function(path) {
       const chatInput = document.getElementById('chat-input');
       if (chatInput) {
         chatInput.placeholder = window.__ditImageMode
-          ? 'Describe an image to generate across Coordinator + Worker...'
+          ? 'Describe an image to generate...'
           : 'Ask anything or prompt the AeroMesh cluster...';
-          // ngl i hate gemini 3.8 flash.. mf broke my code
       }
       return;
     }
@@ -2042,8 +2045,9 @@ window.getApiUrl = window.getApiUrl || function(path) {
       if (peers.length === 0) {
         if (listEl) listEl.innerHTML = '<span style="color:#71717a;">0 remote workers on :50052 (use Role 3 for Single-PC Mesh, or start Role 2 on another laptop).</span>';
       } else {
+        const esc = window.escapeHtml || ((v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
         if (listEl) {
-          listEl.innerHTML = peers.map(p => `<div style="color:#16c456;font-family:monospace;">✔ ${p.endpoint} (${p.type} • ${p.rtt_ms}ms)</div>`).join('');
+          listEl.innerHTML = peers.map(p => `<div style="color:#16c456;font-family:monospace;">✔ ${esc(p.endpoint)} (${esc(p.type)} • ${esc(p.rtt_ms)}ms)</div>`).join('');
         }
         if (customInput && !customInput.value.trim()) {
           customInput.value = peers.map(p => p.endpoint).join(',');
@@ -2062,7 +2066,8 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
       const hw = document.getElementById('rm-hw-summary');
       if (hw) {
-        hw.innerHTML = `GPU: <strong style="color:#fff;">${st.gpu || 'NVIDIA CUDA GPU'}</strong> &bull; Wi-Fi IP: <code style="color:#1a88ff;">${st.wifi_ip || '127.0.0.1'}:50052</code> &bull; Tailscale IP: <code style="color:#16c456;">${st.tailscale_ip || 'Local'}:50052</code>`;
+        const esc = window.escapeHtml || ((v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
+        hw.innerHTML = `GPU: <strong style="color:#fff;">${esc(st.gpu || 'CPU / Integrated GPU')}</strong> &bull; Wi-Fi IP: <code style="color:#1a88ff;">${esc(st.wifi_ip || '127.0.0.1')}:50052</code> &bull; Tailscale IP: <code style="color:#16c456;">${esc(st.tailscale_ip || 'Local')}:50052</code>`;
       }
 
       const sel = document.getElementById('rm-model-select');

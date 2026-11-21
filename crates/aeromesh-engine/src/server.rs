@@ -164,21 +164,24 @@ pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-/// Automatically loads .env file variables if present.
+/// Automatically loads `.env` variables from writable data_dir, CWD, or install_dir.
 pub fn load_dotenv_if_present() {
-    if let Ok(content) = std::fs::read_to_string(".env") {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((k, v)) = line.split_once('=') {
-                let k = k.trim();
-                let v = v.trim().trim_matches('"').trim_matches('\'');
-                if std::env::var(k).is_err() {
-                    std::env::set_var(k, v);
+    for path in aeromesh_core::env_search_paths() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = line.split_once('=') {
+                    let k = k.trim();
+                    let v = v.trim().trim_matches('"').trim_matches('\'');
+                    if std::env::var(k).is_err() {
+                        std::env::set_var(k, v);
+                    }
                 }
             }
+            break;
         }
     }
 }
@@ -623,18 +626,17 @@ async fn handle_switch_model(
     Json(req): Json<SwitchModelRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let model_req = req.model.trim().to_string();
-    let model_path = if std::path::Path::new(&model_req).exists() {
-        std::path::PathBuf::from(&model_req)
-    } else if std::path::Path::new("models").join(&model_req).exists() {
-        std::path::Path::new("models").join(&model_req)
-    } else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Model '{}' not found in models/ directory", model_req)
-            })),
-        ));
+    let model_path = match aeromesh_core::resolve_confined_model_path(&model_req) {
+        Ok(p) => p,
+        Err(e) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": e.to_string()
+                })),
+            ));
+        }
     };
 
     info!(target = %model_path.display(), "Switching coordinator active model...");
@@ -679,26 +681,32 @@ async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     let mut model_list = Vec::new();
     let current_model = state.model_name.lock().await.clone();
 
-    // Check models directory
-    if let Ok(entries) = std::fs::read_dir("models") {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
-                let name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                if crate::gguf_slicer::is_stage_slice_name(&name) {
-                    continue;
+    // Check configured models directories (%LOCALAPPDATA%\AeroMesh\models, ./models, etc.)
+    let mut seen = std::collections::HashSet::new();
+    for dir in aeromesh_core::model_search_dirs() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    if crate::gguf_slicer::is_stage_slice_name(&name)
+                        || name.starts_with(".aeromesh_")
+                        || !seen.insert(name.clone())
+                    {
+                        continue;
+                    }
+                    model_list.push(serde_json::json!({
+                        "id": name,
+                        "object": "model",
+                        "created": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+                        "owned_by": "local_disk",
+                        "is_active": name == current_model
+                    }));
                 }
-                model_list.push(serde_json::json!({
-                    "id": name,
-                    "object": "model",
-                    "created": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-                    "owned_by": "local_disk",
-                    "is_active": name == current_model
-                }));
             }
         }
     }
@@ -734,33 +742,62 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
     };
 
     let has_workers = !meta.workers.is_empty();
-    let is_connected = if has_workers {
+    let (is_connected, is_shm_transport, measured_rtt_ms) = if has_workers {
         if let Ok(coord) = state.coordinator.try_lock() {
-            coord.transport.is_some()
+            let connected = coord.transport.is_some();
+            let shm = coord.transport.as_ref().is_some_and(|t| t.is_shm());
+            (connected, shm, coord.last_rtt_ms)
         } else {
-            true
+            (true, false, None)
         }
     } else {
-        true
+        (true, false, Some(0.0))
     };
 
-    let transport = if has_workers {
-        if is_connected {
-            "Tailscale Direct WireGuard"
-        } else {
-            "Tailscale WireGuard (Worker Disconnected)"
+    let primary_worker_ip = meta
+        .workers
+        .first()
+        .and_then(|w| w.parse::<SocketAddr>().ok())
+        .map(|a| a.ip());
+    let is_loopback_worker = primary_worker_ip.is_some_and(|ip| ip.is_loopback());
+    let is_tailscale_worker = match primary_worker_ip {
+        Some(std::net::IpAddr::V4(v4)) => {
+            let o = v4.octets();
+            o[0] == 100 && (o[1] & 0xC0) == 64
         }
-    } else {
-        "Intra-Host Shared Memory (SHM)"
+        _ => false,
     };
-    let link_badge = if has_workers {
-        if is_connected {
-            "Direct WireGuard (P2P Mesh)"
-        } else {
-            "Worker Offline"
-        }
+
+    let (transport, link_badge, is_direct_wireguard) = if !has_workers {
+        (
+            "Local Single-Node GPU/CPU Execution",
+            "Standalone Node",
+            false,
+        )
+    } else if !is_connected {
+        (
+            "Worker Disconnected",
+            "Worker Offline",
+            false,
+        )
+    } else if is_shm_transport || is_loopback_worker {
+        (
+            "Intra-Host Shared Memory (SHM)",
+            "SHM Ring Buffer (Loopback)",
+            false,
+        )
+    } else if is_tailscale_worker {
+        (
+            "Tailscale Direct WireGuard",
+            "Direct WireGuard (P2P Mesh)",
+            true,
+        )
     } else {
-        "SHM Ring Buffer (Loopback)"
+        (
+            "Wi-Fi / LAN Direct TCP",
+            "LAN Direct TCP",
+            false,
+        )
     };
     let (codec_name, bytes_per_elem) = match std::env::var("AEROMESH_ACTIVATION_DTYPE")
         .unwrap_or_else(|_| "int8".to_string())
@@ -795,8 +832,8 @@ async fn handle_cluster_status(State(state): State<Arc<AppState>>) -> Json<serde
         "cluster_status": cluster_status,
         "active_model": current_model,
         "transport": transport,
-        "is_direct_wireguard": has_workers && is_connected,
-        "rtt_ms": if has_workers && is_connected { 1.14 } else { 0.0 },
+        "is_direct_wireguard": is_direct_wireguard,
+        "rtt_ms": measured_rtt_ms.unwrap_or(0.0),
         "link_badge": link_badge,
         "per_token_kb": format!("{:.2} KB/tok", per_token_kb),
         "quantization": codec_name,
@@ -983,36 +1020,34 @@ async fn handle_chat_completions(
         return err_resp.into_response();
     }
 
-    // Auto-switch model if request specifies a different model
+    // Auto-switch model if request specifies a different confined model
     if let Some(ref target_model) = req.model {
         let current_mn = state.model_name.lock().await.clone();
-        if target_model != &current_mn
-            && (target_model.ends_with(".gguf")
-                || std::path::Path::new("models").join(target_model).exists())
-        {
-            let model_path = if std::path::Path::new(target_model).exists() {
-                std::path::PathBuf::from(target_model)
-            } else {
-                std::path::Path::new("models").join(target_model)
-            };
-            let mut coord = state.coordinator.lock().await;
-            if let Err(e) = coord.switch_model(&model_path) {
-                error!(error = %e, target_model = %target_model, "Failed to switch model on chat request");
-                return ApiErrorResponse::internal(format!(
-                    "Failed to switch to requested model '{}': {}",
-                    target_model, e
-                ))
-                .into_response();
-            } else {
-                let mut mn = state.model_name.lock().await;
-                *mn = target_model.clone();
-                if let Ok(mut meta) = state.cluster_meta.write() {
-                    meta.model_path = coord.model_path.to_string_lossy().to_string();
-                    meta.local_layer_start = coord.local_slice.layer_start;
-                    meta.local_layer_end = coord.local_slice.layer_end;
-                    meta.total_layers = coord.total_layers;
-                    meta.hidden_dim = coord.hidden_dim;
-                    meta.workers = coord.worker_addrs.iter().map(|w| w.to_string()).collect();
+        if target_model != &current_mn {
+            if let Ok(model_path) = aeromesh_core::resolve_confined_model_path(target_model) {
+                let mut coord = state.coordinator.lock().await;
+                if let Err(e) = coord.switch_model(&model_path) {
+                    error!(error = %e, target_model = %target_model, "Failed to switch model on chat request");
+                    return ApiErrorResponse::internal(format!(
+                        "Failed to switch to requested model '{}': {}",
+                        target_model, e
+                    ))
+                    .into_response();
+                } else {
+                    let actual_name = model_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| target_model.clone());
+                    let mut mn = state.model_name.lock().await;
+                    *mn = actual_name;
+                    if let Ok(mut meta) = state.cluster_meta.write() {
+                        meta.model_path = coord.model_path.to_string_lossy().to_string();
+                        meta.local_layer_start = coord.local_slice.layer_start;
+                        meta.local_layer_end = coord.local_slice.layer_end;
+                        meta.total_layers = coord.total_layers;
+                        meta.hidden_dim = coord.hidden_dim;
+                        meta.workers = coord.worker_addrs.iter().map(|w| w.to_string()).collect();
+                    }
                 }
             }
         }

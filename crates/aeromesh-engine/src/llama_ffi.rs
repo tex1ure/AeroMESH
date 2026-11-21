@@ -410,14 +410,29 @@ unsafe fn resolve_from(handle: *mut c_void) -> Result<LlamaApi, String> {
 fn candidate_dll_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
 
+    let install_root = aeromesh_core::install_dir();
+    dirs.push(install_root.join("bin"));
+    dirs.push(install_root.clone());
+
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            dirs.push(exe_dir.to_path_buf());
-            dirs.push(exe_dir.join("bin"));
+            if !dirs.contains(&exe_dir.to_path_buf()) {
+                dirs.push(exe_dir.to_path_buf());
+            }
+            let exe_bin = exe_dir.join("bin");
+            if !dirs.contains(&exe_bin) {
+                dirs.push(exe_bin);
+            }
             if let Some(parent) = exe_dir.parent() {
-                dirs.push(parent.join("bin"));
+                let p_bin = parent.join("bin");
+                if !dirs.contains(&p_bin) {
+                    dirs.push(p_bin);
+                }
                 if let Some(grand) = parent.parent() {
-                    dirs.push(grand.join("bin"));
+                    let g_bin = grand.join("bin");
+                    if !dirs.contains(&g_bin) {
+                        dirs.push(g_bin);
+                    }
                 }
             }
         }

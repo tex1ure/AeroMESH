@@ -150,6 +150,10 @@ enum Commands {
         /// Run as a persistent OpenAI-compatible HTTP API server on specified port (e.g. 8080)
         #[arg(long)]
         serve: Option<u16>,
+
+        /// Host IP to bind HTTP API server when using --serve (defaults to 127.0.0.1 for security)
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
     },
 
     /// Launch persistent OpenAI-compatible HTTP API server for Gradio & Web Clients (Zero-Weight Pipeline)
@@ -196,6 +200,10 @@ enum Commands {
         /// Port to bind (50052 for worker, 8080 for coordinator API)
         #[arg(long)]
         port: Option<u16>,
+
+        /// Host IP to bind coordinator API (defaults to 127.0.0.1; pass 0.0.0.0 to expose on LAN/Tailscale)
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
     },
 
     /// Slice a monolithic GGUF into Stage 1 (0..N) and Stage 2 (N..end) partition files
@@ -608,6 +616,7 @@ async fn main() -> Result<()> {
             layers,
             peers,
             port,
+            bind,
         } => {
             let role_clean = role.trim().to_lowercase();
             let model_path = resolve_model_path(model.as_ref())?;
@@ -672,7 +681,7 @@ async fn main() -> Result<()> {
                         ngl,
                     )?;
                     let server = PipelineHttpServer::new(client, model_name);
-                    server.run("0.0.0.0", api_port).await?;
+                    server.run(&bind, api_port).await?;
                 }
                 "all" => {
                     let worker_port = 50052;
@@ -711,18 +720,51 @@ async fn main() -> Result<()> {
                     // Spawn worker in background task
                     let worker_model = model_path.clone();
                     tokio::spawn(async move {
-                        if let Ok(service) =
-                            PipelineWorkerService::new(&worker_model, worker_slice, worker_ngl)
-                        {
-                            let _ = service.run_server("127.0.0.1", worker_port).await;
+                        match PipelineWorkerService::new(&worker_model, worker_slice, worker_ngl) {
+                            Ok(service) => {
+                                if let Err(e) = service.run_server("127.0.0.1", worker_port).await {
+                                    warn!(error = %e, "Local worker server exited with error");
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to initialize local worker stage");
+                            }
                         }
                     });
 
-                    // Wait 500ms for worker listener
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-
+                    // Wait for worker TCP listener readiness instead of a hardcoded 500ms sleep
+                    // (large models can take 5-25s to load into VRAM).
                     let worker_addr: SocketAddr =
                         format!("127.0.0.1:{}", worker_port).parse().unwrap();
+                    let wait_start = std::time::Instant::now();
+                    let max_wait = Duration::from_secs(60);
+                    let mut worker_ready = false;
+                    while wait_start.elapsed() < max_wait {
+                        if tokio::time::timeout(
+                            Duration::from_millis(250),
+                            tokio::net::TcpStream::connect(worker_addr),
+                        )
+                        .await
+                        .is_ok_and(|res| res.is_ok())
+                        {
+                            worker_ready = true;
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                    if worker_ready {
+                        info!(
+                            elapsed_ms = wait_start.elapsed().as_millis(),
+                            "Local Stage 2 worker is listening on {}",
+                            worker_addr
+                        );
+                    } else {
+                        warn!(
+                            "Timed out waiting for local Stage 2 worker on {}; continuing with lazy reconnect",
+                            worker_addr
+                        );
+                    }
+
                     let model_name = model_path
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
@@ -735,7 +777,7 @@ async fn main() -> Result<()> {
                         coord_ngl,
                     )?;
                     let server = PipelineHttpServer::new(client, model_name);
-                    server.run("0.0.0.0", api_port).await?;
+                    server.run(&bind, api_port).await?;
                 }
                 _ => {
                     anyhow::bail!(
@@ -794,6 +836,7 @@ async fn main() -> Result<()> {
             prompt,
             max_tokens,
             serve,
+            bind,
         } => {
             println!("\n========================================================");
             println!("   AEROMESH DISTRIBUTED COORDINATOR INITIALIZING");
@@ -898,7 +941,7 @@ async fn main() -> Result<()> {
                     resolve_ngl(ngl),
                 )?;
                 let server = PipelineHttpServer::new(client, model_name);
-                server.run("0.0.0.0", serve_port).await?;
+                server.run(&bind, serve_port).await?;
                 return Ok(());
             }
 

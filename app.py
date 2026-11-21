@@ -9,6 +9,11 @@ import subprocess
 import socket
 import threading
 import time
+import asyncio
+import base64
+import hashlib
+import ipaddress
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -20,20 +25,66 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# Lightweight .env loader
+
+def get_install_dir() -> str:
+    return os.environ.get("AEROMESH_INSTALL_DIR") or os.path.dirname(os.path.abspath(__file__))
+
+
+def get_data_dir() -> str:
+    explicit = os.environ.get("AEROMESH_DATA_DIR", "").strip()
+    if explicit:
+        return explicit
+    install_dir = get_install_dir()
+    if os.path.exists(os.path.join(install_dir, "Cargo.toml")) or os.path.exists(
+        os.path.join(install_dir, ".aeromesh_portable")
+    ):
+        return install_dir
+    if sys.platform == "win32":
+        local_app = os.environ.get("LOCALAPPDATA")
+        if local_app:
+            return os.path.join(local_app, "AeroMesh")
+    return install_dir
+
+
+def get_models_dirs() -> list:
+    dirs = []
+    explicit = os.environ.get("AEROMESH_MODELS_DIR", "").strip()
+    if explicit:
+        dirs.append(explicit)
+    for d in (
+        os.path.join(get_data_dir(), "models"),
+        os.path.join(get_install_dir(), "models"),
+    ):
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def get_cache_dir() -> str:
+    d = os.path.join(get_data_dir(), "cache")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+# Lightweight .env loader (checks writable data dir first, then install dir)
 def load_dotenv():
-    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if os.path.exists(env_file):
-        with open(env_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k = k.strip()
-                v = v.strip().strip('"').strip("'")
-                if k not in os.environ:
-                    os.environ[k] = v
+    candidates = [
+        os.path.join(get_data_dir(), ".env"),
+        os.path.join(get_install_dir(), ".env"),
+    ]
+    for env_file in candidates:
+        if os.path.exists(env_file):
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k not in os.environ:
+                        os.environ[k] = v
+            break
 
 load_dotenv()
 
@@ -143,10 +194,23 @@ class HeaderPairs(list):
         return default
 
     def __getitem__(self, key):
+        if isinstance(key, (int, slice)):
+            return super().__getitem__(key)
         value = self.get(key, self._MISSING)
         if value is self._MISSING:
             raise KeyError(key)
         return value
+
+    def __setitem__(self, key, value):
+        if isinstance(key, (int, slice)):
+            super().__setitem__(key, value)
+            return
+        lowered = key.lower()
+        for idx, (k, _) in enumerate(self):
+            if k.lower() == lowered:
+                super().__setitem__(idx, (key, str(value)))
+                return
+        self.append((key, str(value)))
 
     def __contains__(self, key):
         return self.get(key, self._MISSING) is not self._MISSING
@@ -268,11 +332,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_ALLOWED_CORS_ORIGINS = [
+    f"http://127.0.0.1:{AEROMESH_UI_PORT}",
+    f"http://localhost:{AEROMESH_UI_PORT}",
+]
+for _extra_origin in os.getenv("AEROMESH_ALLOWED_ORIGIN", "").split(","):
+    _extra_origin = _extra_origin.strip()
+    if _extra_origin and _extra_origin not in _ALLOWED_CORS_ORIGINS:
+        _ALLOWED_CORS_ORIGINS.append(_extra_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=_ALLOWED_CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -631,83 +704,61 @@ def get_tailscale_ip() -> str:
     _CACHED_TS_IP = "Not Connected"
     return _CACHED_TS_IP
 
-def find_sd_assets():
-    root_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(root_dir, "bin", "diffusion", "sd-cli.exe"),
-        os.path.join(root_dir, "bin", "sd-cli.exe"),
-        os.path.join(root_dir, "bin", "sd.exe"),
-    ]
-    sd_bin = next((c for c in candidates if os.path.exists(c)), None)
-    sd_model = None
-    models_dir = os.path.join(root_dir, "models")
-    if os.path.exists(models_dir):
-        safes = [f for f in sorted(os.listdir(models_dir)) if f.endswith(".safetensors")]
-        if safes:
-            dream = next((f for f in safes if "dreamshaper" in f.lower()), safes[0])
-            sd_model = dream
-    return sd_bin, sd_model
+def _sanitize_model_name(raw_model: str) -> str:
+    cleaned = str(raw_model or "").strip()
+    if cleaned.startswith("models/") or cleaned.startswith("models\\"):
+        cleaned = cleaned[7:]
+    if (
+        not cleaned
+        or cleaned.startswith("-")
+        or ".." in cleaned
+        or "/" in cleaned
+        or "\\" in cleaned
+        or "\x00" in cleaned
+        or ":" in cleaned
+    ):
+        raise ValueError(f"Invalid model filename: {raw_model!r}")
+    return cleaned
 
-def discover_workers_sync(port=50052):
-    my_wifi = get_local_wifi_ip()
-    my_ts = get_tailscale_ip()
-    candidates = {}
-    creationflags = 0x08000000 if sys.platform == "win32" else 0
-    
-    try:
-        ts_out = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=2.0, creationflags=creationflags)
-        if ts_out.returncode == 0:
-            data = json.loads(ts_out.stdout)
-            peers = data.get("Peer", {})
-            for p in peers.values():
-                if p.get("Online"):
-                    host = p.get("HostName", "tailscale-peer")
-                    for ip in p.get("TailscaleIPs", []):
-                        if "." in ip and ip != my_ts:
-                            candidates[ip] = ("Tailscale Direct WireGuard", host)
-    except Exception:
-        pass
-        
-    try:
-        arp_out = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=2.0, creationflags=creationflags)
-        if arp_out.returncode == 0:
-            for line in arp_out.stdout.splitlines():
-                if "dynamic" in line.lower():
-                    tokens = line.split()
-                    if tokens:
-                        ip = tokens[0]
-                        if ip.count(".") == 3 and not ip.endswith(".255") and not ip.startswith("224.") and ip not in ("127.0.0.1", my_wifi):
-                            candidates.setdefault(ip, ("Wi-Fi / LAN Direct TCP", f"lan-{ip}"))
-    except Exception:
-        pass
-        
-    found = []
-    for ip, (net_type, host) in candidates.items():
-        try:
-            t0 = time.perf_counter()
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.35)
-            err = s.connect_ex((ip, port))
-            s.close()
-            if err == 0:
-                rtt = round((time.perf_counter() - t0) * 1000, 2)
-                found.append({
-                    "endpoint": f"{ip}:{port}",
-                    "ip": ip,
-                    "port": port,
-                    "type": net_type,
-                    "hostname": host,
-                    "rtt_ms": rtt
-                })
-        except Exception:
-            pass
-    return found
+
+def _resolve_confined_model_file(raw_model: str) -> str:
+    filename = _sanitize_model_name(raw_model)
+    for models_dir in get_models_dirs():
+        if not os.path.isdir(models_dir):
+            continue
+        base_real = os.path.realpath(models_dir)
+        candidate = os.path.realpath(os.path.join(models_dir, filename))
+        if candidate.startswith(base_real + os.sep) and os.path.isfile(candidate):
+            return candidate
+    raise FileNotFoundError(f"Model {filename!r} not found in models directory")
+
+
+def _validate_peers_csv(raw_peers: str) -> str:
+    trimmed = str(raw_peers or "").strip()
+    if not trimmed:
+        return ""
+    validated = []
+    for item in trimmed.split(","):
+        part = item.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError(f"Invalid peer address {part!r}: expected IP:PORT")
+        host, port_s = part.rsplit(":", 1)
+        host = host.strip("[]")
+        ipaddress.ip_address(host)
+        port_num = int(port_s)
+        if not (1 <= port_num <= 65535):
+            raise ValueError(f"Invalid peer port in {part!r}")
+        validated.append(f"{host}:{port_num}")
+    return ",".join(validated)
+
 
 class NodeRuntimeManager:
     def __init__(self):
         self.lock = threading.RLock()
         self.role = "idle"
-        self.model = "models/test.gguf"
+        self.model = "test.gguf"
         self.peers = ""
         self.process = None
         self.logs = ["[AeroMesh Studio] Ready. Click a Role Card above to start Coordinator, Worker, or Full Local Mesh."]
@@ -732,75 +783,88 @@ class NodeRuntimeManager:
     def stop(self):
         with self.lock:
             if self.process is not None:
-                try:
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.process.pid)], capture_output=True)
-                except Exception:
-                    pass
+                pid = self.process.pid
+                if sys.platform == "win32":
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(pid)],
+                            capture_output=True,
+                            creationflags=0x08000000,
+                            timeout=5,
+                        )
+                    except Exception:
+                        pass
                 try:
                     self.process.kill()
+                    self.process.wait(timeout=3)
                 except Exception:
                     pass
                 self.process = None
-            try:
-                subprocess.run(["taskkill", "/F", "/IM", "aeromesh.exe"], capture_output=True)
-            except Exception:
-                pass
             self.role = "idle"
             self.logs.append("[AeroMesh Studio] Node stopped by user.")
 
     def start(self, role: str, model: str, peers: str) -> dict:
+        role_clean = str(role or "").strip().lower()
+        if role_clean not in ("worker", "coordinator", "all"):
+            return {"status": "error", "message": f"Invalid role: {role!r}"}
+        try:
+            model_path = _resolve_confined_model_file(model)
+            safe_peers = _validate_peers_csv(peers)
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
+
         self.stop()
-        root_dir = os.path.dirname(os.path.abspath(__file__))
+        install_dir = get_install_dir()
+        data_dir = get_data_dir()
+        os.makedirs(data_dir, exist_ok=True)
         engine_candidates = [
-            os.path.join(root_dir, "target", "release", "aeromesh.exe"),
-            os.path.join(root_dir, "bin", "aeromesh.exe"),
-            os.path.join(root_dir, "aeromesh.exe"),
+            os.path.join(install_dir, "aeromesh.exe"),
+            os.path.join(install_dir, "bin", "aeromesh.exe"),
+            os.path.join(install_dir, "target", "release", "aeromesh.exe"),
         ]
         engine_exe = next((c for c in engine_candidates if os.path.exists(c)), "aeromesh.exe")
-        
-        model_arg = model if (model.startswith("models/") or model.startswith("models\\")) else f"models/{model}"
-        
+
         cmd = [engine_exe]
-        if role == "worker":
-            cmd += ["start", "--role", "worker", "--port", "50052", "--model", model_arg]
-        elif role == "coordinator":
-            cmd += ["start", "--role", "coordinator", "--model", model_arg, "--port", "8080"]
-            if peers.strip():
-                cmd += ["--peers", peers.strip()]
+        if role_clean == "worker":
+            cmd += ["start", "--role", "worker", "--port", "50052", "--model", model_path]
+        elif role_clean == "coordinator":
+            cmd += ["start", "--role", "coordinator", "--model", model_path, "--port", "8080"]
+            if safe_peers:
+                cmd += ["--peers", safe_peers]
         else:
-            cmd += ["start", "--role", "all", "--model", model_arg, "--port", "8080"]
-            
+            cmd += ["start", "--role", "all", "--model", model_path, "--port", "8080"]
+
         with self.lock:
             self.logs.clear()
-            self.logs.append(f"[AeroMesh Studio] Started role '{role.upper()}' with model '{model_arg}'")
+            self.logs.append(f"[AeroMesh Studio] Started role '{role_clean.upper()}' with model '{os.path.basename(model_path)}'")
             try:
                 creationflags = 0x08000000 if sys.platform == "win32" else 0
                 proc = subprocess.Popen(
                     cmd,
-                    cwd=root_dir,
+                    cwd=data_dir,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
                     bufsize=1,
-                    creationflags=creationflags
+                    creationflags=creationflags,
                 )
                 self.process = proc
-                self.role = role
-                self.model = model_arg
-                self.peers = peers
-                
+                self.role = role_clean
+                self.model = os.path.basename(model_path)
+                self.peers = safe_peers
+
                 def log_reader(p: subprocess.Popen):
                     for line in iter(p.stdout.readline, ""):
                         clean = line.rstrip()
                         if clean:
                             self.push_log(clean)
                     p.stdout.close()
-                
+
                 t = threading.Thread(target=log_reader, args=(proc,), daemon=True)
                 t.start()
-                return {"status": "ok", "role": role, "model": model, "peers": peers}
+                return {"status": "ok", "role": role_clean, "model": self.model, "peers": safe_peers}
             except Exception as e:
                 self.logs.append(f"[AeroMesh Studio] Failed to start aeromesh.exe: {e}")
                 return {"status": "error", "message": str(e)}
@@ -808,30 +872,24 @@ class NodeRuntimeManager:
 node_manager = NodeRuntimeManager()
 
 
-@app.get("/api/cluster/discover", dependencies=[Depends(verify_gateway_access)])
-async def cluster_discover():
-    peers = discover_workers_sync(50052)
-    sd_bin, sd_model = find_sd_assets()
-    return {
-        "discovered_workers": peers,
-        "count": len(peers),
-        "diffusion_engine_ready": sd_bin is not None and sd_model is not None,
-        "diffusion_model": sd_model
-    }
-
-
 @app.get("/api/node/state", dependencies=[Depends(verify_gateway_access)])
 async def node_state():
-    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
     gguf_models = []
     image_models = []
-    if os.path.exists(models_dir):
-        for f in sorted(os.listdir(models_dir)):
-            if f.endswith(".gguf") and not _is_slice_file(f) and not f.startswith(".aeromesh_"):
-                gguf_models.append(f)
-            elif f.endswith(".safetensors"):
-                image_models.append(f)
-                
+    seen_gguf = set()
+    seen_img = set()
+    for models_dir in get_models_dirs():
+        if os.path.isdir(models_dir):
+            for f in sorted(os.listdir(models_dir)):
+                if f.endswith(".gguf") and not _is_slice_file(f) and not f.startswith(".aeromesh_"):
+                    if f not in seen_gguf:
+                        seen_gguf.add(f)
+                        gguf_models.append(f)
+                elif f.endswith(".safetensors"):
+                    if f not in seen_img:
+                        seen_img.add(f)
+                        image_models.append(f)
+
     with node_manager.lock:
         role = node_manager.role
         model = node_manager.model
@@ -847,29 +905,31 @@ async def node_state():
         "gpu": get_gpu_summary(),
         "wifi_ip": get_local_wifi_ip(),
         "tailscale_ip": get_tailscale_ip(),
+        "models_dir": get_models_dirs()[0],
         "models": gguf_models,
         "image_models": image_models,
-        "logs": logs_copy
+        "logs": logs_copy,
     }
 
 
 @app.post("/api/node/start", dependencies=[Depends(verify_gateway_access)])
 async def node_start(request: Request):
     body = await _read_json_body(request)
-    role = body.get("role", "all")
-    model = body.get("model", "test.gguf")
-    peers = body.get("peers", "")
-    
+    role = str(body.get("role", "all")).strip().lower()
+    model = str(body.get("model", "")).strip()
+    peers = str(body.get("peers", "")).strip()
+
     if role == "auto":
-        discovered = discover_workers_sync(50052)
+        discovered = await asyncio.to_thread(discover_mesh_workers_sync, 50052)
         if discovered:
             peers = ",".join(d["endpoint"] for d in discovered)
             role = "coordinator"
         else:
             role = "all"
-            
+
     res = node_manager.start(role, model, peers)
-    return JSONResponse(status_code=200 if res.get("status") == "ok" else 500, content=res)
+    status_code = 200 if res.get("status") == "ok" else 400
+    return JSONResponse(status_code=status_code, content=res)
 
 
 @app.post("/api/node/stop", dependencies=[Depends(verify_gateway_access)])
@@ -1028,36 +1088,32 @@ def _stream_response(body: dict) -> StreamingResponse:
 
 
 # ---------------------------------------------------------------------------
-# DISTRIBUTED 4-STEP DiT IMAGE GENERATION & AUTO-DISCOVERY PIPELINE
+# LOCAL STABLE DIFFUSION IMAGE GENERATION & PEER DISCOVERY
 # ---------------------------------------------------------------------------
-import asyncio
-import base64
-import hashlib
-import socket
-import subprocess
-import time
-from concurrent.futures import ThreadPoolExecutor
-
 def _find_sd_binary_and_model():
-    root_dir = os.path.dirname(os.path.abspath(__file__))
+    install_dir = get_install_dir()
     sd_candidates = [
-        os.path.join(root_dir, "bin", "diffusion", "sd-cli.exe"),
-        os.path.join(root_dir, "bin", "sd-cli.exe"),
-        os.path.join(root_dir, "bin", "sd.exe"),
-        os.path.join(root_dir, "bin", "stable-diffusion.exe"),
+        os.path.join(install_dir, "bin", "diffusion", "sd-cli.exe"),
+        os.path.join(install_dir, "bin", "sd-cli.exe"),
+        os.path.join(install_dir, "bin", "sd.exe"),
+        os.path.join(install_dir, "bin", "stable-diffusion.exe"),
     ]
     sd_bin = next((p for p in sd_candidates if os.path.exists(p)), None)
-    models_dir = os.path.join(root_dir, "models")
     sd_model = None
-    if os.path.exists(models_dir):
-        candidates = (
-            glob.glob(os.path.join(models_dir, "*.safetensors"))
-            + glob.glob(os.path.join(models_dir, "diffusion", "*.gguf"))
-            + glob.glob(os.path.join(models_dir, "diffusion", "*.safetensors"))
-        )
-        if candidates:
-            preferred = [c for c in candidates if "realvis" in os.path.basename(c).lower() or "dreamshaper" in os.path.basename(c).lower()]
-            sd_model = sorted(preferred)[0] if preferred else sorted(candidates)[0]
+    candidates = []
+    for models_dir in get_models_dirs():
+        if os.path.isdir(models_dir):
+            candidates += (
+                glob.glob(os.path.join(models_dir, "*.safetensors"))
+                + glob.glob(os.path.join(models_dir, "diffusion", "*.gguf"))
+                + glob.glob(os.path.join(models_dir, "diffusion", "*.safetensors"))
+            )
+    if candidates:
+        preferred = [
+            c for c in candidates
+            if "realvis" in os.path.basename(c).lower() or "dreamshaper" in os.path.basename(c).lower()
+        ]
+        sd_model = sorted(preferred)[0] if preferred else sorted(candidates)[0]
     return sd_bin, sd_model
 
 
@@ -1072,10 +1128,17 @@ def _probe_worker_port(ip_str: str, port: int = 50052, timeout: float = 0.35):
 
 
 def discover_mesh_workers_sync(port: int = 50052):
-    """Scans both Tailscale mesh peers and local Wi-Fi LAN ARP/subnet neighbors in parallel."""
+    """Scans Tailscale mesh peers and local Wi-Fi LAN ARP neighbors in parallel."""
     candidate_ips = {}
+    creationflags = 0x08000000 if sys.platform == "win32" else 0
     try:
-        res = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=2.0)
+        res = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            creationflags=creationflags,
+        )
         if res.returncode == 0 and res.stdout:
             ts_data = json.loads(res.stdout)
             for peer in (ts_data.get("Peer") or {}).values():
@@ -1097,7 +1160,13 @@ def discover_mesh_workers_sync(port: int = 50052):
         pass
 
     try:
-        arp = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=2.0)
+        arp = subprocess.run(
+            ["arp", "-a"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            creationflags=creationflags,
+        )
         if arp.returncode == 0:
             for m in re.finditer(r"(\d+\.\d+\.\d+\.\d+)\s+[0-9a-fA-F-]+\s+dynamic", arp.stdout):
                 ip = m.group(1)
@@ -1131,23 +1200,38 @@ async def cluster_discover():
     }
 
 
-def _run_sd_cli_sync(sd_bin: str, sd_model: str, prompt: str, steps: int, out_png: str):
+def _run_sd_cli_sync(
+    sd_bin: str,
+    sd_model: str,
+    prompt: str,
+    steps: int,
+    width: int,
+    height: int,
+    out_png: str,
+):
+    creationflags = 0x08000000 if sys.platform == "win32" else 0
     cmd = [
         sd_bin,
         "-m", sd_model,
         "--type", "f16",
-        "-t", "8",
-        "-p", prompt + ", masterpiece, photorealistic, razor sharp focus, ultra detailed, 8k uhd, cinematic lighting",
-        "-n", "blurry, out of focus, low quality, deformed, bad anatomy, watermark, text",
+        "-p", prompt,
+        "-n", "blurry, out of focus, low quality, deformed, watermark, text",
         "--cfg-scale", "7.0",
         "--sampling-method", "euler_a",
-        "--steps", "10",
-        "-W", "512",
-        "-H", "512",
+        "--steps", str(steps),
+        "-W", str(width),
+        "-H", str(height),
         "-o", out_png,
     ]
-    logger.info("Launching DreamShaper 8 CUDA Diffusion (512x512, 10 steps): %s", " ".join(cmd))
-    res = subprocess.run(cmd, cwd=os.path.dirname(sd_bin), capture_output=True, text=True, timeout=120)
+    logger.info("Launching local sd-cli (%dx%d, %d steps)", width, height, steps)
+    res = subprocess.run(
+        cmd,
+        cwd=os.path.dirname(sd_bin),
+        capture_output=True,
+        text=True,
+        timeout=180,
+        creationflags=creationflags,
+    )
     if res.returncode != 0:
         raise RuntimeError(((res.stderr or "") + "\n" + (res.stdout or "")).strip()[-300:] or f"sd-cli exited with {res.returncode}")
 
@@ -1166,11 +1250,10 @@ async def generate_image_pipeline(request: Request):
         )
 
     sd_bin, sd_model = _find_sd_binary_and_model()
-    model_label = os.path.basename(sd_model) if sd_model else "Procedural-DiT"
-    is_xl = bool(sd_model and ("xl" in model_label.lower() or "realvis" in model_label.lower()))
-    steps = 6 if is_xl else max(1, min(int(body.get("steps", 4)), 12))
-    width = 768 if is_xl else 512
-    height = 768 if is_xl else 512
+    model_label = os.path.basename(sd_model) if sd_model else "Not Installed"
+    steps = max(1, min(int(body.get("steps", 12)), 50))
+    width = (max(256, min(int(body.get("width", 512)), 1024)) // 64) * 64
+    height = (max(256, min(int(body.get("height", 512)), 1024)) // 64) * 64
     stream = bool(body.get("stream", True))
 
     async def dit_event_stream():
@@ -1179,41 +1262,28 @@ async def generate_image_pipeline(request: Request):
 
         cluster_meta = {
             "connected": False,
-            "transport": "Standalone Local GPU (Coordinator Offline)",
-            "rtt_ms": 0.1,
-            "workers": [],
-            "local_stage": {"layer_start": 0, "layer_end": 13},
-            "total_layers": 28,
+            "transport": "Local GPU/CPU Stable Diffusion (sd-cli)",
+            "rtt_ms": 0.0,
         }
         try:
             c_resp = await client.get("/api/cluster/status", headers=get_auth_headers(), timeout=1.5)
             if c_resp.status_code == 200:
                 c_data = c_resp.json()
                 cluster_meta.update(c_data)
-                cluster_meta["connected"] = bool(c_data.get("connected", True))
+                cluster_meta["connected"] = bool(c_data.get("connected", False))
         except Exception:
             pass
 
         mesh_active = bool(cluster_meta.get("connected"))
-        workers_list = cluster_meta.get("workers") or cluster_meta.get("worker_nodes") or []
-        worker_badge = workers_list[0] if workers_list else "127.0.0.1:50052"
-        local_stage = cluster_meta.get("local_stage") or {}
-        l_end = local_stage.get("layer_end", 13)
-        total_layers = cluster_meta.get("total_layers", 28)
+        transport_label = (
+            f"Local sd-cli + LLM Prompt Conditioning ({cluster_meta.get('transport', 'Local')})"
+            if mesh_active
+            else "Local GPU/CPU Stable Diffusion (sd-cli)"
+        )
 
         enhanced_prompt = prompt
         mesh_tokens_generated = 0
         if mesh_active:
-            stage0_evt = {
-                "type": "dit_mesh_conditioning",
-                "mesh_active": True,
-                "coordinator_layers": f"0..{l_end}",
-                "worker_node": worker_badge,
-                "worker_layers": f"{int(l_end)+1}..{int(total_layers)-1}",
-                "transport": cluster_meta.get("transport", "Tailscale Direct WireGuard"),
-                "rtt_ms": cluster_meta.get("rtt_ms", 0.1),
-            }
-            yield f"data: {json.dumps(stage0_evt)}\n\n"
             try:
                 cond_resp = await client.post(
                     "/v1/chat/completions",
@@ -1221,12 +1291,12 @@ async def generate_image_pipeline(request: Request):
                         "messages": [
                             {"role": "user", "content": f"Write a 12-word vivid visual lighting and lens description for: {prompt}"}
                         ],
-                        "max_tokens": 18,
+                        "max_tokens": 24,
                         "temperature": 0.6,
                         "stream": False,
                     },
                     headers=get_auth_headers(),
-                    timeout=6.0,
+                    timeout=10.0,
                 )
                 if cond_resp.status_code == 200:
                     ext = cond_resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
@@ -1235,74 +1305,43 @@ async def generate_image_pipeline(request: Request):
                         enhanced_prompt = f"{prompt}, {ext}"
                         mesh_tokens_generated = len(ext.split())
             except Exception as e:
-                logger.warning("Stage-0 mesh conditioning fallback: %s", e)
+                logger.warning("Prompt conditioning fallback: %s", e)
 
-        out_png = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", f".aeromesh_sd_{int(time.time()*1000)}.png")
-        worker_ip = worker_badge.split(":")[0] if ":" in worker_badge else worker_badge
-        is_remote_worker = mesh_active and worker_ip not in ("127.0.0.1", "localhost", "::1")
-
-        async def _dispatch_diffusion():
-            # If a remote Worker laptop is connected over Tailscale/Wi-Fi, offload Diffusion to Worker (:50053) first!
-            if is_remote_worker:
-                try:
-                    w_url = f"http://{worker_ip}:50053/api/worker/render"
-                    logger.info("Offloading Stage-2 CUDA Diffusion to remote Worker GPU: %s", w_url)
-                    w_resp = await client.post(w_url, json={"prompt": enhanced_prompt, "steps": steps}, timeout=120.0)
-                    if w_resp.status_code == 200:
-                        w_data = w_resp.json()
-                        if w_data.get("b64_png"):
-                            with open(out_png, "wb") as f:
-                                f.write(base64.b64decode(w_data["b64_png"]))
-                            return
-                except Exception as e:
-                    logger.warning("Remote worker :50053 diffusion offload unavailable (%s), falling back to local GPU", e)
-            if sd_bin and sd_model:
-                await asyncio.to_thread(_run_sd_cli_sync, sd_bin, sd_model, enhanced_prompt, steps, out_png)
-
-        sd_task = asyncio.create_task(_dispatch_diffusion())
-
-        patches = (width // 16) * (height // 16)
-        step_wire_mb = 1.42
-        return_latent_kb = 64.2
-        sigmas = [round(1.0 - (i / steps), 3) for i in range(steps + 1)]
-        accum_wire_mb = 2.00 if mesh_active else 0.00
-
-        for s in range(1, steps + 1):
-            await asyncio.sleep(0.55)
-            accum_wire_mb = round(accum_wire_mb + step_wire_mb + (return_latent_kb / 1024.0), 2)
-            evt = {
-                "type": "dit_step",
-                "step": s,
-                "total_steps": steps,
-                "sigma_curr": sigmas[s - 1],
-                "sigma_next": sigmas[s],
+        if not (sd_bin and sd_model):
+            final_evt = {
+                "type": "dit_complete",
+                "prompt": prompt,
+                "conditioning": enhanced_prompt[:240],
                 "mesh_active": mesh_active,
-                "worker_node": worker_badge if mesh_active else "Local RTX 4060",
-                "stage1_blocks": f"Coord (0..{l_end}) + UNet Upper" if mesh_active else "Stage 1 Conditioning + UNet Upper",
-                "stage2_blocks": f"Worker ({worker_badge}) + FP16 VAE ({model_label})",
-                "step_wire_mb": step_wire_mb,
-                "return_latent_kb": return_latent_kb,
-                "accum_wire_mb": accum_wire_mb,
-                "elapsed_s": round(time.perf_counter() - t0, 2),
-                "rtt_ms": cluster_meta.get("rtt_ms", 0.1),
-                "transport": cluster_meta.get("transport", "Intra-Host Shared Memory (SHM)"),
-                "conditioning": enhanced_prompt[:180],
                 "model_name": model_label,
+                "steps": steps,
+                "width": width,
+                "height": height,
+                "accum_wire_mb": 0.0,
+                "weights_on_wire_mb": 0.0,
+                "elapsed_s": round(time.perf_counter() - t0, 2),
+                "b64_png": None,
+                "sd_error": "Stable Diffusion engine (sd-cli.exe) or a .safetensors model is not installed. Select the Stable Diffusion component in the AeroMESH installer.",
+                "transport": "Local sd-cli (Not Installed)",
             }
-            yield f"data: {json.dumps(evt)}\n\n"
+            yield f"data: {json.dumps(final_evt)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
+        yield f"data: {json.dumps({'type': 'dit_step', 'step': 1, 'total_steps': steps, 'mesh_active': mesh_active, 'stage1_blocks': 'Local UNet + CLIP Conditioning', 'stage2_blocks': f'Local FP16 VAE ({model_label})', 'step_wire_mb': 0.0, 'accum_wire_mb': 0.0, 'elapsed_s': round(time.perf_counter() - t0, 2), 'transport': transport_label, 'conditioning': enhanced_prompt[:180], 'model_name': model_label})}\n\n"
+
+        out_png = os.path.join(get_cache_dir(), f".aeromesh_sd_{os.getpid()}_{int(time.time()*1000)}.png")
         b64_png = None
         sd_error = None
-        if sd_task is not None:
-            try:
-                await sd_task
-                if os.path.exists(out_png):
-                    with open(out_png, "rb") as f:
-                        b64_png = base64.b64encode(f.read()).decode("ascii")
-                    os.remove(out_png)
-            except Exception as e:
-                sd_error = str(e)[:120]
-                logger.warning("sd-cli.exe error: %s", e)
+        try:
+            await asyncio.to_thread(_run_sd_cli_sync, sd_bin, sd_model, enhanced_prompt, steps, width, height, out_png)
+            if os.path.exists(out_png):
+                with open(out_png, "rb") as f:
+                    b64_png = base64.b64encode(f.read()).decode("ascii")
+                os.remove(out_png)
+        except Exception as e:
+            sd_error = str(e)[:200]
+            logger.warning("sd-cli error: %s", e)
 
         seed_hex = hashlib.sha256(enhanced_prompt.encode("utf-8")).hexdigest()[:12]
         final_evt = {
@@ -1311,19 +1350,17 @@ async def generate_image_pipeline(request: Request):
             "conditioning": enhanced_prompt[:240],
             "mesh_active": mesh_active,
             "mesh_tokens_generated": mesh_tokens_generated,
-            "worker_node": worker_badge if mesh_active else None,
             "model_name": model_label,
             "steps": steps,
             "width": width,
             "height": height,
-            "patches": patches,
-            "accum_wire_mb": accum_wire_mb,
+            "accum_wire_mb": 0.0,
             "weights_on_wire_mb": 0.0,
             "elapsed_s": round(time.perf_counter() - t0, 2),
             "seed": seed_hex,
             "b64_png": b64_png,
             "sd_error": sd_error,
-            "transport": cluster_meta.get("transport", "Intra-Host Shared Memory (SHM)"),
+            "transport": transport_label,
         }
         yield f"data: {json.dumps(final_evt)}\n\n"
         yield "data: [DONE]\n\n"

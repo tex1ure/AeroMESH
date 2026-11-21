@@ -741,15 +741,13 @@ impl LlamaPipelineInstance {
 
         let mut mparams = llama_call!(llama_model_default_params)?;
         mparams.n_gpu_layers = n_gpu_layers.max(0);
-        unsafe {
-            let raw_bytes = std::slice::from_raw_parts_mut(
-                (&mut mparams as *mut crate::llama_ffi::LlamaModelParams).cast::<u8>(),
-                std::mem::size_of::<crate::llama_ffi::LlamaModelParams>(),
-            );
-            for b in &mut raw_bytes[56..] {
-                *b = 0;
-            }
-        }
+        // Disable mmap/extra buffers explicitly via named fields rather than raw byte offsets.
+        mparams.vocab_only = false;
+        mparams.check_tensors = false;
+        mparams.use_extra_bufts = false;
+        mparams.no_host = false;
+        mparams.no_alloc = false;
+        mparams.load_mtp = false;
 
         let model = llama_call!(llama_model_load_from_file, c_path.as_ptr(), mparams);
         drop(in_place_guard);
@@ -800,8 +798,8 @@ impl LlamaPipelineInstance {
 
         let mut cparams = llama_call!(llama_context_default_params)?;
         cparams.n_ctx = if n_ctx > 0 { n_ctx } else { DEFAULT_N_CTX };
-        let _ = &physical_threads;
-        let _ = &physical_threads;
+        cparams.n_threads = physical_threads;
+        cparams.n_threads_batch = physical_threads;
         if !slice_config.is_last_stage {
             cparams.embeddings = true;
             cparams.cb_eval = Some(llama_cb_eval_capture);

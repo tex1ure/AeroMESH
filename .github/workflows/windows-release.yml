@@ -1,0 +1,116 @@
+name: Windows Release & Installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "installer/**"
+      - "scripts/**"
+      - "static/**"
+      - "app.py"
+      - "Cargo.toml"
+      - ".github/workflows/windows-release.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Installer version (e.g. 0.3.0)"
+        required: false
+        default: "0.3.0"
+      llama_cpp_tag:
+        description: "Pinned llama.cpp release tag"
+        required: false
+        default: "b10499"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-installer:
+    name: Build & Package Windows x64 Setup (.exe)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine release version
+        id: meta
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -match '^v(.+)$') {
+            $ver = $Matches[1]
+          } elseif ("${{ github.event.inputs.version }}" -ne "") {
+            $ver = "${{ github.event.inputs.version }}"
+          } else {
+            $ver = "0.3.0"
+          }
+          $llamaTag = if ("${{ github.event.inputs.llama_cpp_tag }}" -ne "") { "${{ github.event.inputs.llama_cpp_tag }}" } else { "b10499" }
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "llama_tag=$llamaTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Release version: $ver | llama.cpp tag: $llamaTag"
+
+      - name: Setup Rust toolchain (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Rust workspace test suite
+        shell: pwsh
+        run: cargo test --workspace
+
+      - name: Setup Python & run FastAPI gateway tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python test dependencies & run pytest
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn httpx pytest
+          pytest tests/test_fastapi_gateway.py
+
+      - name: Ensure Inno Setup 6 is installed
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup 6 ISCC.exe not found after installation."
+          }
+
+      - name: Fetch offline UI vendor assets & build AeroMesh-Setup-x64.exe
+        shell: pwsh
+        run: |
+          .\installer\build-installer.ps1 `
+            -Version "${{ steps.meta.outputs.version }}" `
+            -LlamaCppTag "${{ steps.meta.outputs.llama_tag }}" `
+            -FetchLlamaPrebuilt `
+            -IncludeCuda `
+            -IncludeVulkan
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AeroMesh-Setup-x64-${{ steps.meta.outputs.version }}
+          path: |
+            dist/AeroMesh-Setup-x64.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (on v* tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/AeroMesh-Setup-x64.exe
+            dist/SHA256SUMS.txt

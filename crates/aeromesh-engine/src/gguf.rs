@@ -34,15 +34,16 @@ pub fn resolve_model_path<P: AsRef<Path>>(input_path: Option<P>) -> Result<PathB
             return Ok(with_gguf);
         }
 
-        // Try inside models/ folder
-        let in_models = Path::new("models").join(path);
-        if in_models.exists() {
-            return Ok(in_models);
-        }
-
-        let in_models_gguf = Path::new("models").join(&with_gguf);
-        if in_models_gguf.exists() {
-            return Ok(in_models_gguf);
+        // Try inside configured models directories (%LOCALAPPDATA%\AeroMesh\models, ./models, etc.)
+        for models_dir in aeromesh_core::model_search_dirs() {
+            let in_models = models_dir.join(path);
+            if in_models.exists() {
+                return Ok(in_models);
+            }
+            let in_models_gguf = models_dir.join(&with_gguf);
+            if in_models_gguf.exists() {
+                return Ok(in_models_gguf);
+            }
         }
 
         // Try stripping leading "models/" if already inside models/ directory
@@ -77,12 +78,11 @@ pub fn resolve_model_path<P: AsRef<Path>>(input_path: Option<P>) -> Result<PathB
         bail!("Could not find model file at {:?} (also checked current directory, models/ and ../models/)", path);
     }
 
-    // Auto-discover in current directory or models/ folder
-    for candidate_dir in &[
-        Path::new("models"),
-        Path::new("."),
-        Path::new("..").join("models").as_path(),
-    ] {
+    // Auto-discover in configured models directories, current directory, or ../models
+    let mut discovery_dirs = aeromesh_core::model_search_dirs();
+    discovery_dirs.push(PathBuf::from("."));
+    discovery_dirs.push(Path::new("..").join("models"));
+    for candidate_dir in &discovery_dirs {
         if candidate_dir.exists() {
             if let Ok(entries) = std::fs::read_dir(candidate_dir) {
                 let mut candidates: Vec<PathBuf> = Vec::new();

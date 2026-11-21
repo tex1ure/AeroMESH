@@ -14,6 +14,8 @@
 #   -Peers "<ip:port>" Comma-separated worker endpoints (coordinator / all)
 #   -Port <n>          Worker TCP port, or API port for coordinator/all
 #   -Mode pipeline|rpc pipeline = zero-weight activation streaming (default)
+#   -InstallDiffusion  Opt-in to download optional sd-cli.exe / diffusion weights
+#   -ScanSubnet        Opt-in to sweep the local /24 LAN subnet for workers
 #   -NoUI              Do not start the Python web gateway
 #   -NoBrowser         Do not open a browser window
 #   -Force             Kill conflicting listeners without asking
@@ -42,6 +44,12 @@ param (
     [int]$Port = 0,
 
     [Parameter(Mandatory = $false)]
+    [switch]$InstallDiffusion,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ScanSubnet,
+
+    [Parameter(Mandatory = $false)]
     [switch]$NoUI,
 
     [Parameter(Mandatory = $false)]
@@ -63,6 +71,7 @@ $script:DefaultUiPort = 7860
 # Toolchain / PATH
 # ------------------------------------------------------------------------------
 $binDir = Join-Path $PSScriptRoot "bin"
+$cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
 $userPythonDir = Join-Path $env:USERPROFILE "AppData\Local\Programs\Python"
 $pyPathAdditions = ""
 if (Test-Path $userPythonDir) {
@@ -70,7 +79,13 @@ if (Test-Path $userPythonDir) {
         Sort-Object Name -Descending | Select-Object -First 1
     if ($latestPy) { $pyPathAdditions = "$($latestPy.FullName);$($latestPy.FullName)\Scripts;" }
 }
-$env:PATH = "C:\w64devkit\bin;$(Join-Path $env:USERPROFILE '.cargo\bin');$binDir;$pyPathAdditions$env:PATH"
+$extraPaths = @()
+if (Test-Path $cargoBin) { $extraPaths += $cargoBin }
+if (Test-Path $binDir) { $extraPaths += $binDir }
+if ($pyPathAdditions) { $extraPaths += $pyPathAdditions.TrimEnd(";") }
+if ($extraPaths.Count -gt 0) {
+    $env:PATH = ($extraPaths -join ";") + ";$env:PATH"
+}
 
 # Native runtime next to the release binary, so it is always resolvable.
 if (Test-Path "target\release") {
@@ -180,7 +195,15 @@ function Stop-PortConflict {
             $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
             if ($proc) { $procName = $proc.ProcessName }
 
-            $isOurs = $procName -match '^(aeromesh|llama-server|ggml-rpc-server|python|pythonw)$'
+            $isOurs = $procName -match '^(aeromesh|AeroMesh-Desktop|llama-server|ggml-rpc-server)$'
+            if (-not $isOurs -and ($procName -match '^(python|pythonw)$')) {
+                try {
+                    $cimProc = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerPid" -ErrorAction SilentlyContinue
+                    if ($cimProc -and $cimProc.CommandLine -match 'app\.py') {
+                        $isOurs = $true
+                    }
+                } catch {}
+            }
             if (-not $isOurs -and -not $Force -and -not $Always) {
                 Write-Host "  [!] Port $p is held by '$procName' (PID $ownerPid), which is not an AeroMesh process." -ForegroundColor Yellow
                 Write-Host "      Re-run with -Force to terminate it, or choose another port with -Port." -ForegroundColor Yellow
@@ -248,7 +271,8 @@ function Get-AeroMeshExe {
 
 function Find-AeroMeshWorkers {
     param ([int]$TargetPort = 50052)
-    Write-Host "  [*] Auto-scanning Tailscale Mesh & Wi-Fi /24 Subnet for active Worker nodes (:$TargetPort)..." -ForegroundColor Cyan
+    $scanScope = if ($ScanSubnet) { "Tailscale Mesh, ARP Cache & Local /24 Subnet" } else { "Tailscale Mesh & Local ARP Neighbors" }
+    Write-Host "  [*] Scanning $scanScope for active Worker nodes (:$TargetPort)..." -ForegroundColor Cyan
     $candidateIPs = New-Object System.Collections.Generic.List[string]
     $localIPs = @("127.0.0.1", "0.0.0.0")
     try {
@@ -277,7 +301,7 @@ function Find-AeroMeshWorkers {
         } catch {}
     }
 
-    # 2. Local Wi-Fi / LAN ARP neighbors + active /24 subnet sweep
+    # 2. Local Wi-Fi / LAN ARP neighbors (+ optional opt-in /24 subnet sweep)
     try {
         $arpLines = (& arp -a 2>$null)
         foreach ($line in $arpLines) {
@@ -288,17 +312,18 @@ function Find-AeroMeshWorkers {
                 }
             }
         }
-        # Also sweep the primary Wi-Fi / LAN /24 subnet so even un-pinged laptops are discovered
-        foreach ($myIp in $localIPs) {
-            if ($myIp -match '^(192\.168\.\d+|10\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+)\.(\d+)$') {
-                $prefix = $Matches[1]
-                for ($h = 1; $h -le 254; $h++) {
-                    $subIp = "$prefix.$h"
-                    if ($subIp -notin $localIPs -and -not $candidateIPs.Contains($subIp)) {
-                        $candidateIPs.Add($subIp)
+        if ($ScanSubnet) {
+            foreach ($myIp in $localIPs) {
+                if ($myIp -match '^(192\.168\.\d+|10\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+)\.(\d+)$') {
+                    $prefix = $Matches[1]
+                    for ($h = 1; $h -le 254; $h++) {
+                        $subIp = "$prefix.$h"
+                        if ($subIp -notin $localIPs -and -not $candidateIPs.Contains($subIp)) {
+                            $candidateIPs.Add($subIp)
+                        }
                     }
+                    break
                 }
-                break
             }
         }
     } catch {}
@@ -329,7 +354,7 @@ function Find-AeroMeshWorkers {
 
 function Invoke-AeroMeshBootstrap {
     Write-Host "`n========================================================================" -ForegroundColor Cyan
-    Write-Host "   [*] AEROMESH BRAND-NEW PC DOCTOR & AUTO-BOOTSTRAPPER                 " -ForegroundColor Cyan
+    Write-Host "   [*] AEROMESH PC DOCTOR & ENVIRONMENT CHECK                           " -ForegroundColor Cyan
     Write-Host "========================================================================" -ForegroundColor Cyan
 
     foreach ($dir in @("models", "bin", "bin\diffusion")) {
@@ -346,61 +371,53 @@ function Invoke-AeroMeshBootstrap {
         Write-Host "  [OK] Rust Engine Binary:      $exe" -ForegroundColor Green
     }
 
-    # 2. Copy existing bin\*.dll into bin\diffusion\ FIRST so we never re-download 430 MB of CUDA DLLs unnecessarily!
+    # 2. Reuse existing bin\*.dll inside bin\diffusion\ so CUDA DLLs are not duplicated online
     Get-ChildItem -Path "bin\*.dll" -File -ErrorAction SilentlyContinue | ForEach-Object {
         $destDll = Join-Path "bin\diffusion" $_.Name
         if (-not (Test-Path $destDll)) { Copy-Item $_.FullName -Destination "bin\diffusion\" -Force }
     }
 
     $sdCli = Join-Path $PSScriptRoot "bin\diffusion\sd-cli.exe"
-    $cublasDll = Join-Path $PSScriptRoot "bin\diffusion\cublas64_12.dll"
-    if (-not (Test-Path $sdCli) -or -not (Test-Path $cublasDll)) {
-        Write-Host "  [*] Auto-installing CUDA 12 Diffusion Engine (sd-cli.exe + cuBLAS DLLs)..." -ForegroundColor Cyan
+    if (Test-Path $sdCli) {
+        $r = Invoke-Native -Command $sdCli -Arguments @("--help") -IgnoreErrors
+        if ($r.Ok) {
+            Write-Host "  [OK] Diffusion Engine:        bin\diffusion\sd-cli.exe (Verified)" -ForegroundColor Green
+        } else {
+            Write-Host "  [!] Diffusion Engine:         Exited with code $($r.Code)" -ForegroundColor Yellow
+        }
+    } elseif ($InstallDiffusion) {
+        Write-Host "  [*] -InstallDiffusion enabled: fetching stable-diffusion.cpp release binary..." -ForegroundColor Cyan
         try {
             $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/latest"
             foreach ($asset in $rel.assets) {
                 $needSd = ($asset.name -match "win-cuda12-x64\.zip$" -and $asset.name -notmatch "^cudart" -and -not (Test-Path $sdCli))
-                $needCu = ($asset.name -match "^cudart.*cu12.*\.zip$" -and -not (Test-Path $cublasDll))
-                if ($needSd -or $needCu) {
+                if ($needSd) {
                     $zPath = Join-Path $env:TEMP $asset.name
                     $xDir = Join-Path $env:TEMP ("sd_auto_" + [System.IO.Path]::GetFileNameWithoutExtension($asset.name))
-                    curl.exe -L -C - $asset.browser_download_url -o $zPath
+                    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zPath -UseBasicParsing
+                    $hash = (Get-FileHash -Path $zPath -Algorithm SHA256).Hash
+                    Write-Host "      Downloaded $($asset.name) (SHA-256: $hash)" -ForegroundColor DarkGray
                     if (Test-Path $xDir) { Remove-Item $xDir -Recurse -Force }
-                    New-Item -ItemType Directory -Path $xDir -Force | Out-Null; & tar.exe -xf $zPath -C $xDir
+                    New-Item -ItemType Directory -Path $xDir -Force | Out-Null
+                    & tar.exe -xf $zPath -C $xDir
                     Get-ChildItem -Path $xDir -Recurse -Include "*.dll", "*.exe" | ForEach-Object {
                         Copy-Item $_.FullName -Destination "bin\diffusion\" -Force
                     }
                 }
             }
         } catch {
-            Write-Host "  [!] Could not auto-download diffusion binaries: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "  [!] Could not install diffusion binaries: $($_.Exception.Message)" -ForegroundColor Yellow
         }
+    } else {
+        Write-Host "  [i] Optional Diffusion Engine not installed (re-run with -InstallDiffusion or select it in the Windows installer)." -ForegroundColor DarkGray
     }
 
-    Get-ChildItem -Path "bin\*.dll" -File -ErrorAction SilentlyContinue | ForEach-Object {
-        if (-not (Test-Path (Join-Path "bin\diffusion" $_.Name))) {
-            Copy-Item $_.FullName -Destination "bin\diffusion\" -Force
-        }
-    }
-
-    if (Test-Path $sdCli) {
-        $r = Invoke-Native -Command $sdCli -Arguments @("--help") -IgnoreErrors
-        if ($r.Ok) {
-            Write-Host "  [OK] CUDA Diffusion Engine:   bin\diffusion\sd-cli.exe (DLLs Verified)" -ForegroundColor Green
-        } else {
-            Write-Host "  [!] CUDA Diffusion Engine:   Exited with code $($r.Code)" -ForegroundColor Yellow
-        }
-    }
-
-    # 3. Check Diffusion Model in models\
+    # 3. Report Diffusion Model in models\ (never download 2 GB files without explicit user opt-in)
     $sdModels = @(Get-ChildItem -Path "models" -Filter "*.safetensors" -File -ErrorAction SilentlyContinue)
-    if ($sdModels.Count -eq 0) {
-        Write-Host "  [*] No .safetensors image model found in models\ -> Auto-downloading DreamShaper 8 (1.99 GB FP16)..." -ForegroundColor Cyan
-        curl.exe -L -C - "https://huggingface.co/Lykon/DreamShaper/resolve/main/DreamShaper_8_pruned.safetensors" -o "models\DreamShaper_8_pruned.safetensors"
-        $sdModels = @(Get-ChildItem -Path "models" -Filter "*.safetensors" -File -ErrorAction SilentlyContinue)
-    }
     if ($sdModels.Count -gt 0) {
         Write-Host "  [OK] Active Image Model:      models\$($sdModels[0].Name)" -ForegroundColor Green
+    } else {
+        Write-Host "  [i] No .safetensors image model in models\. Place any SD 1.5 / SDXL .safetensors model in models\ to enable Image Studio." -ForegroundColor DarkGray
     }
 }
 
