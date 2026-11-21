@@ -74,7 +74,7 @@
           onerror="window.__loadCdnFallback('script',{src:'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js',integrity:'sha384-+VBxd3r6XgURycqtZ117nYw44OOcIax56Z4dCRWbxyPt0Koah1uHoK0o4+/RRE05',crossorigin:'anonymous',referrerpolicy:'no-referrer'})"></script>
 
   <!-- AeroMESH Kimi Desktop Design System -->
-  <link rel="stylesheet" href="/static/css/liquid_glass.css?v=kimi5">
+  <link rel="stylesheet" href="/static/css/liquid_glass.css?v=kimi6">
 </head>
 <body>
 
@@ -110,16 +110,16 @@
       <!-- Workspace View Switcher (Chat vs Models vs Cluster Pairing) -->
       <div class="workspace-nav" role="tablist" aria-label="Workspace View">
         <button id="nav-tab-chat" class="workspace-nav-btn active" role="tab" aria-selected="true" type="button">
-          <i data-lucide="message-square" style="width: 14px; height: 14px;"></i>
+          <i data-lucide="message-square" style="width: 13px; height: 13px;"></i>
           <span>Chat</span>
         </button>
         <button id="nav-tab-models" class="workspace-nav-btn" role="tab" aria-selected="false" type="button">
-          <i data-lucide="hard-drive-download" style="width: 14px; height: 14px;"></i>
+          <i data-lucide="hard-drive-download" style="width: 13px; height: 13px;"></i>
           <span>Models</span>
           <span id="nav-models-dl-count" class="workspace-nav-count" style="display: none;"></span>
         </button>
         <button id="nav-tab-cluster" class="workspace-nav-btn" role="tab" aria-selected="false" type="button">
-          <i data-lucide="link-2" style="width: 14px; height: 14px;"></i>
+          <i data-lucide="link-2" style="width: 13px; height: 13px;"></i>
           <span>Cluster</span>
           <span id="nav-cluster-pair-count" class="workspace-nav-count" style="display: none;"></span>
         </button>
@@ -496,14 +496,14 @@
     <!-- ==================================================================
          CLUSTER PAIRING & SECRET SYNC VIEW
          ================================================================== -->
-    <section id="cluster-pair-view" class="model-hub-view" style="display: none;" aria-label="Cluster Pairing and Secret Sync">
-      <div class="model-hub-inner">
+    <section id="cluster-pair-view" class="models-hub-view" style="display: none;" aria-label="Cluster Pairing and Secret Sync">
+      <div class="mh-container">
 
         <!-- Header + Key Fingerprint -->
         <div class="mh-header">
-          <div>
+          <div class="mh-header-text">
             <h1 class="mh-title">Cluster Pairing &amp; Secret Sync</h1>
-            <div class="mh-subtitle">
+            <div class="mh-subtitle cp-subtitle">
               <span>Cluster Key:</span>
               <code id="cp-key-fingerprint" class="cp-key-code">Checking...</code>
               <span class="mh-dot">&middot;</span>

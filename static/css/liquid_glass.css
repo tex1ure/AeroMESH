@@ -1422,7 +1422,7 @@ html, body {
 
 .workspace-nav {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: 0.78fr 1fr 1.18fr;
   gap: 3px;
   padding: 3px;
   background-color: var(--Bg-Primary);
@@ -1434,18 +1434,24 @@ html, body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 3px;
   height: 32px;
-  padding: 0 5px;
+  min-width: 0;
+  padding: 0 4px;
   border: none;
   border-radius: 6px;
   background: transparent;
   color: var(--Labels-Secondary);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 500;
   white-space: nowrap;
+  overflow: hidden;
   cursor: pointer;
   transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.workspace-nav-btn svg {
+  flex-shrink: 0;
 }
 
 .workspace-nav-btn:hover {
@@ -1471,9 +1477,10 @@ html, body {
 .workspace-nav-count {
   font-family: "JetBrains Mono", monospace;
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
   color: var(--Colors-KMBlue);
+  flex-shrink: 0;
 }
 
 .model-dropdown-divider {
@@ -1487,16 +1494,20 @@ html, body {
   font-weight: 600;
 }
 
-/* Full-stage Model Hub viewport */
+/* Full-stage Model Hub & Cluster Pairing viewport */
 .models-hub-view {
   flex: 1;
   min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
   overflow-y: auto;
-  padding: 28px 32px 48px;
+  overflow-x: hidden;
+  padding: 28px 32px 56px;
   background-color: var(--Bg-Primary);
 }
 
 .mh-container {
+  width: 100%;
   max-width: 1100px;
   margin: 0 auto;
   display: flex;
@@ -1512,6 +1523,11 @@ html, body {
   flex-wrap: wrap;
   padding-bottom: 18px;
   border-bottom: 1px solid var(--Separators-S1);
+}
+
+.mh-header-text {
+  min-width: 0;
+  flex: 1 1 320px;
 }
 
 .mh-title {
@@ -2271,6 +2287,13 @@ html, body {
   flex-shrink: 0;
 }
 
+.cp-subtitle {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .cp-key-code {
   display: inline-block;
   padding: 2px 7px;
@@ -2285,10 +2308,11 @@ html, body {
 .cp-grid-2 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  gap: 20px;
+  align-items: stretch;
 }
 
-@media (max-width: 960px) {
+@media (max-width: 1120px) {
   .cp-grid-2 {
     grid-template-columns: 1fr;
   }
@@ -2298,6 +2322,9 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .cp-card-head {
@@ -2305,6 +2332,10 @@ html, body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.cp-card-head > div {
+  min-width: 0;
 }
 
 .cp-status-text {
@@ -2404,6 +2435,16 @@ html, body {
   display: flex;
   gap: 8px;
   align-items: center;
+  min-width: 0;
+}
+
+.cp-copy-row .mh-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.cp-copy-row .mh-btn {
+  flex-shrink: 0;
 }
 
 .cp-mono-input {
@@ -2432,6 +2473,7 @@ html, body {
 .cp-lan-alt code {
   font-family: "JetBrains Mono", monospace;
   color: var(--Labels-Secondary);
+  word-break: break-all;
 }
 
 .cp-inline-link {
@@ -2468,6 +2510,7 @@ html, body {
   border-radius: var(--radius-sm);
   background-color: var(--Bg-Primary);
   border: 1px solid var(--Separators-S1);
+  min-width: 0;
 }
 
 .cp-nearby-head {
@@ -2493,6 +2536,7 @@ html, body {
 
 .cp-nearby-item {
   width: 100%;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2517,6 +2561,7 @@ html, body {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  flex: 1;
 }
 
 .cp-nearby-name {
@@ -2529,6 +2574,8 @@ html, body {
   font-size: 11.5px;
   font-family: "JetBrains Mono", monospace;
   color: var(--Labels-Secondary);
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .cp-nearby-select {
@@ -2542,12 +2589,18 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  margin-top: auto;
+  min-width: 0;
 }
 
 .cp-join-split {
   display: grid;
-  grid-template-columns: 1.45fr 1fr;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
   gap: 10px;
+}
+
+.cp-join-split > div {
+  min-width: 0;
 }
 
 .cp-sync-ok {
