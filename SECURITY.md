@@ -1,111 +1,104 @@
-# AeroMESH Security Architecture & Threat Model (SEC-01)
+# AeroMESH Security Architecture
 
-**Document ID**: SEC-2026-ARCH-01  
-**Target System**: AeroMESH Distributed LLM Cluster Engine (Protocol v4)  
-**Security Standard**: Zero-Trust Multi-Tier Defense-in-Depth
+AeroMESH runs distributed inference across consumer laptops and desktops over home Wi-Fi or Tailscale networks. Every hop between the browser, gateway, coordinator, and remote workers enforces explicit trust boundaries and constant-time secret verification.
 
 ---
 
-## Table of Contents
+## Contents
 
-- [1. Executive Threat Model](#1-executive-threat-model)
-- [2. Control Surfaces & Trust Boundaries](#2-control-surfaces--trust-boundaries)
-- [3. Authentication & Authorization Implementations](#3-authentication--authorization-implementations)
-  - [A. Web Gateway Proxy (Port 7860)](#a-web-gateway-proxy-port-7860)
-  - [B. Coordinator API Engine (Port 8080)](#b-coordinator-api-engine-port-8080)
-  - [C. Worker P2P TCP Mesh (Port 50052)](#c-worker-p2p-tcp-mesh-port-50052)
-- [4. Cryptographic Primitives & Side-Channel Resistance](#4-cryptographic-primitives--side-channel-resistance)
-- [5. Wire Protocol Bounded Deserialization (Anti-DoS)](#5-wire-protocol-bounded-deserialization-anti-dos)
-- [6. Secret Management & Automated Provisioning](#6-secret-management--automated-provisioning)
-- [7. Client-Side Security & XSS Mitigation](#7-client-side-security--xss-mitigation)
-- [8. Tailscale WireGuard Network Policy & ACLs](#8-tailscale-wireguard-network-policy--acls)
-- [9. Vulnerability Disclosure & Reporting Policy](#9-vulnerability-disclosure--reporting-policy)
+1. [Trust Boundaries & Architecture](#1-trust-boundaries--architecture)
+2. [Network Surfaces](#2-network-surfaces)
+3. [Authentication by Layer](#3-authentication-by-layer)
+4. [One-Click Cluster Pairing Cryptography (:50053)](#4-one-click-cluster-pairing-cryptography-50053)
+5. [Constant-Time Comparisons](#5-constant-time-comparisons)
+6. [Bounded Wire Deserialization (Anti-DoS)](#6-bounded-wire-deserialization-anti-dos)
+7. [Secret Provisioning & Hygiene](#7-secret-provisioning--hygiene)
+8. [Client-Side Security & Offline Assets](#8-client-side-security--offline-assets)
+9. [Recommended Tailscale ACLs](#9-recommended-tailscale-acls)
+10. [Reporting Vulnerabilities](#10-reporting-vulnerabilities)
 
 ---
 
-## 1. Executive Threat Model
+## 1. Trust Boundaries & Architecture
 
-AeroMESH is designed to run distributed tensor pipelines across consumer devices connected over untrusted home Wi-Fi networks or public Tailscale tailnets. The architecture implements a **multi-tier defense-in-depth model** where each layer assumes the adjacent layer could be compromised:
+```mermaid
+flowchart TB
+    subgraph T0["Tier 0 · Browser / Desktop UI"]
+        UI["Single-Page App<br/>DOMPurify XSS Sanitization<br/>Local Vendored Assets + SRI Fallback"]
+    end
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        CLIENT WORKSPACE (Tier 0)                       │
-│  • Web Browser Single Page Application (Liquid Glass UI)               │
-│  • DOMPurify Sanitization · Subresource Integrity (SRI) Pinned Assets  │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ HTTP / SSE (Loopback: 127.0.0.1)
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                     FASTAPI GATEWAY PROXY (Tier 1)                     │
-│  • Bounded Payloads: MAX_REQUEST_BYTES = 8 MB                          │
-│  • Loopback Enforcement: verify_gateway_access Guard                   │
-│  • RFC 7230 Hop-by-Hop Filter · Upstream Credential Injection          │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ Authenticated HTTP Loopback (:8080)
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                    AXUM COORDINATOR ENGINE (Tier 2)                    │
-│  • Constant-Time Bearer Verification: AEROMESH_API_KEY                 │
-│  • Rate Limiting: 60 req/min (health), 15 req/min (chat completions)   │
-│  • Strict Input Validation (OpenAI-compatible 422 envelopes)           │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ Protocol v4 Binary Mesh (:50052)
-                                    │ [Tailscale WireGuard UDP Tunnel]
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                      REMOTE WORKER NODE (Tier 3)                       │
-│  • Constant-Time Handshake Auth: AEROMESH_WORKER_SECRET (Protocol v4)  │
-│  • Strict Frame Length Caps (128 MB max, S*d invariant verification)   │
-│  • Win32 Job Object Containment (SafeProcessJob - Auto VRAM reclaim)   │
-└────────────────────────────────────────────────────────────────────────┘
+    subgraph T1["Tier 1 · FastAPI Gateway (127.0.0.1:7860)"]
+        GW["Loopback Guard (verify_gateway_access)<br/>8 MB JSON Payload Cap · RFC 7230 Header Filter<br/>Injects AEROMESH_API_KEY Upstream"]
+        PAIR["Ephemeral Pairing Listener (:50053)<br/>PBKDF2-SHA256 + Encrypt-then-MAC · 5m TTL"]
+    end
+
+    subgraph T2["Tier 2 · Axum Coordinator (127.0.0.1:8080)"]
+        COORD["Constant-Time Bearer Auth (AEROMESH_API_KEY)<br/>Rate Limits: 60/m health · 15/m completions<br/>Strict OpenAI 422 Input Validation"]
+    end
+
+    subgraph T3["Tier 3 · Worker Mesh (0.0.0.0:50052)"]
+        WORK["Protocol v4 Pinning · SHA-256 Handshake<br/>128 MB Frame Cap · S*d Overflow Checks<br/>Win32 Job Object VRAM Reclamation"]
+    end
+
+    UI -->|"HTTP / SSE (Loopback)"| GW
+    GW -->|"Authenticated HTTP (:8080)"| COORD
+    COORD -->|"Protocol v4 Binary TCP (:50052)<br/>Tailscale Direct WireGuard"| WORK
+    PAIR -.->|"One-Time Encrypted Secret Sync"| WORK
 ```
 
 ---
 
-## 2. Control Surfaces & Trust Boundaries
+## 2. Network Surfaces
 
-| Interface / Surface | Default Network Binding | Transport Protocol | Authentication Method | Exposure Recommendation |
+| Surface | Default Bind | Protocol | Authentication | Exposure |
 |:---|:---|:---|:---|:---|
-| **Web Gateway Proxy** | `127.0.0.1:7860` | HTTP / SSE | Loopback Origin or `AEROMESH_GATEWAY_API_KEY` | **Strictly Loopback** (Do not expose to public internet) |
-| **Coordinator API** | `127.0.0.1:8080` | HTTP / JSON | Constant-time Bearer token (`AEROMESH_API_KEY`) | **Strictly Loopback** or Tailscale IP |
-| **P2P Worker Mesh** | `0.0.0.0:50052` | Binary TCP (`AERO`) | SHA-256 Handshake Token (`AEROMESH_WORKER_SECRET`) | **Restrict via Tailscale WireGuard ACLs only** |
+| **Web Gateway** | `127.0.0.1:7860` | HTTP / SSE | Loopback allowlist or `AEROMESH_GATEWAY_API_KEY` | Loopback only |
+| **Coordinator API** | `127.0.0.1:8080` | HTTP / JSON | Constant-time Bearer (`AEROMESH_API_KEY`) | Loopback or private Tailnet |
+| **Worker Mesh** | `0.0.0.0:50052` | Binary TCP (`AERO`) | SHA-256 handshake (`AEROMESH_WORKER_SECRET`) | LAN / Tailscale ACLs only |
+| **Pairing Listener** | `0.0.0.0:50053` *(off by default)* | Encrypted JSON over TCP | 6-digit one-time PIN (PBKDF2 + HMAC-SHA256) | Ephemeral (max 5 min while hosting) |
 
 ---
 
-## 3. Authentication & Authorization Implementations
+## 3. Authentication by Layer
 
-### A. Web Gateway Proxy (Port 7860)
-The gateway proxy (`app.py`) controls browser ingress:
-- **Loopback Protection (`verify_gateway_access`)**: Permitted loopback origins (`127.0.0.1`, `localhost`, `::1`) are allowed direct access. Calls originating from non-loopback IPs must present a matching `Authorization: Bearer <AEROMESH_GATEWAY_API_KEY>`; if unconfigured, non-loopback access is rejected immediately (`401 Unauthorized`).
-- **Credential Ownership**: The gateway owns the upstream credentials. Any client-provided `Authorization` header is stripped before the gateway injects its internal `AEROMESH_API_KEY`, preventing client impersonation or header duplication.
-- **Request Size Ceilings**: Enforces `MAX_REQUEST_BYTES = 8_388_608` (8 MB). Payloads exceeding this limit are aborted prior to buffering in memory.
+### Web Gateway (`app.py` :7860)
+- **Loopback enforcement (`verify_gateway_access`):** Requests from `127.0.0.1`, `localhost`, or `::1` are permitted locally. Any non-loopback caller must supply `Authorization: Bearer <AEROMESH_GATEWAY_API_KEY>`; if unset, external callers receive `401 Unauthorized`.
+- **Credential ownership:** Browser JavaScript never reads `AEROMESH_API_KEY`. Any incoming `Authorization` header is stripped before the gateway injects its internal Bearer secret on loopback calls to `:8080`.
+- **Payload limits:** JSON proxy requests are capped at `MAX_REQUEST_BYTES = 8_388_608` (8 MB) before buffering.
 
-### B. Coordinator API Engine (Port 8080)
-The Axum backend (`crates/aeromesh-engine/src/server.rs`) protects inference execution:
-- **Constant-Time Verification**: Uses `constant_time_eq_str` to validate incoming Bearer tokens against `AEROMESH_API_KEY`.
-- **Public Probes**: Only the low-overhead liveness route (`GET /health`) is exempt from authentication to support health checks.
-- **Rate Limiting**: Axum tower middleware enforces isolated bucket pools: 60 req/min for health probes and 15 req/min for chat completions, emitting standard OpenAI 429 errors upon overrun.
+### Coordinator Engine (`crates/aeromesh-engine/src/server.rs` :8080)
+- **Constant-time Bearer check:** All routes except `GET /health` verify `AEROMESH_API_KEY` using `constant_time_eq_str`. If the key is missing from the environment, protected routes fail closed.
+- **Rate limiting:** Separate token buckets cap `/health` at 60 req/min and completions at 15 req/min, returning OpenAI-format `429` responses.
 
-### C. Worker P2P TCP Mesh (Port 50052)
-The worker daemon (`crates/aeromesh-core/src/activation.rs` & `aeromesh-engine/src/pipeline.rs`) accepts activation streams:
-- **Protocol Version Pinning**: Workers reject frames with protocol version `< 4`, preventing backward-compatibility downgrade attacks.
-- **Mutual Handshake Authentication**: Nodes derive a 32-byte cryptographic token from `AEROMESH_WORKER_SECRET` using SHA-256. Mismatched handshake tokens trigger immediate socket closure and security alerts.
+### Worker P2P Mesh (`crates/aeromesh-core/src/activation.rs` :50052)
+- **Protocol pinning:** Connections below Protocol Version 4 are rejected immediately.
+- **Mutual handshake:** Nodes hash `AEROMESH_WORKER_SECRET` with SHA-256 into a 32-byte token verified in constant time. Mismatched handshakes drop the TCP socket immediately.
 
 ---
 
-## 4. Cryptographic Primitives & Side-Channel Resistance
+## 4. One-Click Cluster Pairing Cryptography (:50053)
 
-To prevent execution-time side-channel attacks (timing attacks) where an adversary infers token characters by measuring microsecond response differentials, all secret comparisons employ constant-time evaluation:
+To eliminate manual `.env` copy-pasting between machines, the **Cluster** tab supports one-click secret sync over Wi-Fi or Tailscale:
+
+1. **Off by default:** TCP port `50053` is closed unless the user explicitly clicks **Start Pairing Session**.
+2. **Short TTL & brute-force lockout:** Each session generates a fresh 6-digit PIN (`secrets.randbelow`), expires automatically after **5 minutes**, and locks out after **5 failed attempts**.
+3. **Key derivation:** A 16-byte random salt and the 6-digit PIN derive independent encryption and MAC keys via **PBKDF2-HMAC-SHA256** (200,000 iterations).
+4. **Encrypt-then-MAC:** The cluster payload (`AEROMESH_WORKER_SECRET`, node metadata, and local model list) is encrypted with a SHA-256 CTR-mode keystream and authenticated with **HMAC-SHA256** over `(salt || nonce || ciphertext)`. Decryption verifies the MAC with `hmac.compare_digest` before touching plaintext.
+5. **Key rotation:** Clicking **Rotate Cluster Key** (`POST /api/cluster/pair/rotate`) generates a fresh 256-bit `AEROMESH_WORKER_SECRET`, updates `.env`, and flags previously paired nodes for re-pairing.
+
+---
+
+## 5. Constant-Time Comparisons
+
+All API key and worker handshake comparisons avoid early-exit timing leaks:
 
 ```rust
-// Constant-time string equality via SHA-256 XOR accumulation
 pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     let hash_a = sha2::Sha256::digest(a.as_bytes());
     let hash_b = sha2::Sha256::digest(b.as_bytes());
     constant_time_eq_32(&hash_a.into(), &hash_b.into())
 }
 
-// 32-byte constant-time XOR accumulation
 pub fn constant_time_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
     let mut diff = 0u8;
     for (x, y) in a.iter().zip(b.iter()) {
@@ -117,50 +110,39 @@ pub fn constant_time_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 
 ---
 
-## 5. Wire Protocol Bounded Deserialization (Anti-DoS)
+## 6. Bounded Wire Deserialization (Anti-DoS)
 
-Untrusted network input can trigger remote Denial-of-Service (DoS) via memory exhaustion if buffer lengths are derived directly from wire headers. AeroMESH implements strict mathematical validation on all incoming binary frames:
-
-1. **Absolute Payload Ceiling**: Frame payloads cannot exceed `MAX_FRAME_PAYLOAD_BYTES = 134_217_728` (128 MB).
-2. **Dimension Upper Bounds**:
-   - Sequence length: $S \le 131,072$ tokens.
-   - Hidden dimension: $d_{\text{model}} \le 65,536$.
-3. **Mathematical Size Invariant**:
-   The header `payload_bytes` field must strictly match the byte count implied by $S \times d \times \text{dtype}$. Any frame exhibiting length discrepancies or integer overflow during multiplication is discarded without memory allocation.
+Incoming binary frames on `:50052` are validated before any heap allocation:
+1. **Payload cap:** `MAX_FRAME_PAYLOAD_BYTES = 134_217_728` (128 MB).
+2. **Tensor bounds:** Sequence length $S \le 131{,}072$, hidden dimension $d \le 65{,}536$.
+3. **Exact size invariant:** `header.payload_bytes` must equal the exact byte size implied by $S$, $d$, and `dtype` using checked arithmetic. Mismatches or overflows drop the frame immediately.
 
 ---
 
-## 6. Secret Management & Automated Provisioning
+## 7. Secret Provisioning & Hygiene
 
-### Cryptographic Generation (`start.ps1`)
-On first startup, the cluster launcher verifies the existence of `.env`. If absent or unpopulated, it generates cryptographically secure 256-bit random tokens using `System.Security.Cryptography.RandomNumberGenerator`:
+On first run, `start.ps1` and the Windows installer generate cryptographically secure 256-bit random keys for `AEROMESH_API_KEY` and `AEROMESH_WORKER_SECRET` via `System.Security.Cryptography.RandomNumberGenerator` (or Python's `secrets.token_hex(32)` in the gateway).
 
-```powershell
-$bytes = New-Object byte[] 32
-[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-$secret = -join ($bytes | ForEach-Object { "{0:x2}" -f $_ })
-```
-
-### Version Control Exclusion
-`.env`, `.env.*`, and temporary model slices (`.aeromesh_ephemeral_*`) are explicitly ignored in `.gitignore`, preventing accidental commits of production keys.
+`.env`, `.env.*`, and temporary `.aeromesh_ephemeral_*` slice files are excluded in `.gitignore`.
 
 ---
 
-## 7. Client-Side Security & XSS Mitigation
+## 8. Client-Side Security & Offline Assets
 
-1. **DOMPurify Sanitization**: All markdown and assistant reasoning outputs rendered by the Single Page Application (`static/js/app.js`) are sanitized via DOMPurify before DOM injection.
-2. **Subresource Integrity (SRI)**: All CDN assets (KaTeX, Highlight.js, Lucide Icons) are pinned with cryptographic SHA-384 / SHA-512 SRI integrity hashes.
-3. **CORS Isolation**: The coordinator Axum server rejects cross-origin browser requests, restricting CORS exclusively to the local web gateway origin (`http://127.0.0.1:7860`).
+- **DOMPurify sanitization:** Markdown and `<think>` reasoning blocks rendered in the browser pass through DOMPurify before DOM insertion.
+- **Offline-first vendored libraries:** Frontend libraries (Lucide, Marked, DOMPurify, Highlight.js, KaTeX) are bundled locally under `static/vendor/` so the UI works offline without external requests; optional CDN fallbacks are pinned with SHA-384/SHA-512 Subresource Integrity (SRI) hashes.
+- **Strict CORS:** The Axum coordinator restricts CORS to the local gateway origin (`http://127.0.0.1:7860`).
 
 ---
 
-## 8. Tailscale WireGuard Network Policy & ACLs
+## 9. Recommended Tailscale ACLs
 
-When distributing inference across multiple physical machines, deploy nodes strictly within a private Tailscale tailnet. Configure access control lists (ACLs) to isolate worker nodes:
+When running across machines on a Tailscale tailnet, restrict port `50052` to tagged coordinator and worker hosts:
 
 ```json
 {
-  "acls": [{
+  "acls": [
+    {
       "action": "accept",
       "src": ["tag:coordinator"],
       "dst": ["tag:worker:50052"]
@@ -175,10 +157,6 @@ When distributing inference across multiple physical machines, deploy nodes stri
 
 ---
 
-## 9. Vulnerability Disclosure & Reporting Policy
+## 10. Reporting Vulnerabilities
 
-If you discover a security vulnerability or authentication bypass in AeroMESH:
-- **Do not open a public GitHub issue**.
-- Email security reports directly to the core engineering maintainers.
-- Include detailed reproduction steps, network capture traces, and environment details.
-- We will acknowledge receipt within 48 hours and coordinate a coordinated security patch.
+If you find a security issue or auth bypass, please do not open a public GitHub issue. Contact the maintainers privately with reproduction steps and environment details; we aim to acknowledge reports within 48 hours.

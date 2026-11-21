@@ -1,147 +1,126 @@
-# AeroMESH Empirical Benchmark Report
+# AeroMESH Benchmarks
 
-**Document ID**: BM-2026-DIST-02  
-**Target Architecture**: AeroMESH Zero-Weight Distributed Pipeline (Protocol v4)  
-**Evaluation Models**:
-- `Llama-3.2-3B-Instruct-Q8_0` (`test.gguf`, 3.19 GB, 28 Layers, hidden dimension d = 3072)
-- `DeepSeek-R1-Distill-Qwen-14B-Q4_K_M` (`DS.gguf`, 8.37 GB, 48 Layers, hidden dimension d = 5120)
+Measured performance for AeroMESH Protocol v4 across two consumer Windows laptops over 5 GHz Wi-Fi 6 and Tailscale Direct WireGuard.
 
----
-
-## Table of Contents
-
-- [1. Executive Summary](#1-executive-summary)
-- [2. Hardware Testbed & Environment](#2-hardware-testbed--environment)
-- [3. Measured Performance: Llama 3.2 3B Instruct (Q8_0)](#3-measured-performance-llama-32-3b-instruct-q8_0)
-- [4. Measured Performance: DeepSeek-R1-Distill-Qwen-14B (Q4_K_M)](#4-measured-performance-deepseek-r1-distill-qwen-14b-q4_k_m)
-- [5. Step-by-Step Pipeline Latency Decomposition](#5-step-by-step-pipeline-latency-decomposition)
-- [6. Network Transport Analysis: The Windows Delayed-ACK Benchmark](#6-network-transport-analysis-the-windows-delayed-ack-benchmark)
-- [7. Intra-Host Shared Memory (SHM) vs Network TCP Benchmark](#7-intra-host-shared-memory-shm-vs-network-tcp-benchmark)
-- [8. Numerical Fidelity & Outlier-Preserving INT8 Evaluation](#8-numerical-fidelity--outlier-preserving-int8-evaluation)
-- [9. Architectural Benchmark Comparison: AeroMESH vs Alternatives](#9-architectural-benchmark-comparison-aeromesh-vs-alternatives)
+- **Models tested:**
+  - `Llama-3.2-3B-Instruct-Q8_0` (`3.19 GB`, 28 layers, `d = 3072`)
+  - `DeepSeek-R1-Distill-Qwen-14B-Q4_K_M` (`8.37 GB`, 48 layers, `d = 5120`)
 
 ---
 
-## 1. Executive Summary
+## Contents
 
-AeroMESH resolves the three foundational bottlenecks of consumer distributed LLM inference:
-1. **Network Weight Transfer Bottleneck**: Achieves **0.0 MB model weights on the wire** through symmetric local base `.gguf` pre-positioning.
-2. **Persistent Storage Bloat**: Achieves **0.0 MB duplicate disk overhead** via Ephemeral VRAM Stage Loading (`InPlaceStageGuard`), uploading assigned layers to GPU VRAM and immediately deleting temporary slice files.
-3. **Tailscale / Wi-Fi Latency**: Achieves **74.8% wire payload reduction** via Outlier-Preserving Per-Row INT8 quantization (~3.05 KB to 5.05 KB per token), combined with **Win32 `SIO_TCP_SET_ACK_FREQUENCY = 1`** to eliminate the 200 ms Windows TCP Delayed-ACK stall over WireGuard tunnels.
-
----
-
-## 2. Hardware Testbed & Environment
-
-- **Coordinator Node (Laptop A / Stage 1)**:
-  - GPU: NVIDIA GeForce RTX 4060 Laptop GPU (8 GB GDDR6 VRAM, TGP 115W, CUDA 12.4)
-  - CPU: Intel Core i7-13700H (14 cores, 20 threads)
-  - Memory: 32 GB DDR5-5200 RAM
-  - Storage: PCIe 4.0 NVMe SSD (Sequential Read: 5,000 MB/s)
-  - OS: Windows 11 Home 64-bit (Build 22631)
-- **Worker Node (Laptop B / Stage 2)**:
-  - GPU: NVIDIA GeForce RTX 4060 Laptop GPU (8 GB GDDR6 VRAM, TGP 115W, CUDA 12.4)
-  - CPU: AMD Ryzen 7 7840HS (8 cores, 16 threads)
-  - Memory: 16 GB DDR5-5600 RAM
-  - Storage: PCIe 4.0 NVMe SSD
-  - OS: Windows 11 Home 64-bit (Build 22631)
-- **Network Fabric**:
-  - P2P Tunnel: Tailscale Direct WireGuard (UDP Port 41641, NAT-traversal direct path)
-  - Physical Link: 5 GHz Wi-Fi 6 (802.11ax, RSSI: -48 dBm, Physical Link Rate: 1201 Mbps)
-  - Mean RTT: **1.14 ms** (measured via `aeromesh probe`)
+1. [Key Takeaways](#1-key-takeaways)
+2. [Test Hardware & Network](#2-test-hardware--network)
+3. [Llama 3.2 3B Instruct (Q8_0)](#3-llama-32-3b-instruct-q8_0)
+4. [DeepSeek-R1-Distill-Qwen-14B (Q4_K_M)](#4-deepseek-r1-distill-qwen-14b-q4_k_m)
+5. [Per-Token Latency Breakdown](#5-per-token-latency-breakdown)
+6. [Windows TCP Delayed-ACK Fix](#6-windows-tcp-delayed-ack-fix)
+7. [Shared Memory (SHM) vs TCP & WireGuard](#7-shared-memory-shm-vs-tcp--wireguard)
+8. [Outlier-INT8 Fidelity vs FP32](#8-outlier-int8-fidelity-vs-fp32)
+9. [Comparison with Other Frameworks](#9-comparison-with-other-frameworks)
 
 ---
 
-## 3. Measured Performance: Llama 3.2 3B Instruct (Q8_0)
+## 1. Key Takeaways
 
-**Model Configuration**:
-- File: `models/test.gguf` (3.19 GB, Q8_0 quantization)
-- Architecture: LLaMA (28 Transformer Layers, hidden dimension d = 3072)
-- Partitioning: Stage 1 = Layers `0..13` (Coordinator), Stage 2 = Layers `14..27` + LM Head (Worker)
+- **0.0 MB model weights on the wire:** Both nodes read the same base `.gguf` locally and transfer only intermediate hidden states.
+- **0.0 MB persistent slice overhead:** `InPlaceStageGuard` loads each stage's layers into VRAM and deletes the temporary slice immediately.
+- **74.8% smaller activation frames:** Outlier-Preserving INT8 compresses each token step to 3.05–5.05 KB without losing reasoning quality.
+- **5.2x speedup over stock Windows TCP:** Setting `SIO_TCP_SET_ACK_FREQUENCY = 1` eliminates the 200 ms Windows Delayed-ACK stall over WireGuard's 1280-byte MTU.
 
-| Metric | Measured Value | Analysis & Engineering Context |
+---
+
+## 2. Test Hardware & Network
+
+| Role | GPU | CPU / RAM | OS |
+|:---|:---|:---|:---|
+| **Coordinator (Laptop A, Stage 1)** | RTX 4060 Laptop 8 GB (115W, CUDA 12.4) | i7-13700H / 32 GB DDR5 | Windows 11 22631 |
+| **Worker (Laptop B, Stage 2)** | RTX 4060 Laptop 8 GB (115W, CUDA 12.4) | Ryzen 7 7840HS / 16 GB DDR5 | Windows 11 22631 |
+
+- **Link:** 5 GHz Wi-Fi 6 (`802.11ax`, -48 dBm, 1201 Mbps PHY) over Tailscale Direct WireGuard (UDP `:41641`)
+- **Mean RTT:** **1.14 ms** (`aeromesh probe`)
+
+---
+
+## 3. Llama 3.2 3B Instruct (Q8_0)
+
+Split: Stage 1 = Layers `0..13` (Coordinator), Stage 2 = Layers `14..27` + LM Head (Worker).
+
+| Metric | Measured | Notes |
 |:---|:---:|:---|
-| **Sustained Generation Speed** | **24.9 – 41.7 tok/s** | ~24.0 ms to 40.1 ms per token step across network (peak 41.7 tok/s verified in UI) |
-| **Prefill Speed (Prompt Eval)** | **148.2 tok/s** | Chunked evaluation across 256 input prompt tokens |
-| **Stage 1 VRAM Allocation** | **1.82 GB** | Layers `0..13` + Embeddings (LM Head stripped) |
-| **Stage 2 VRAM Allocation** | **1.94 GB** | Layers `14..27` + Genuine Output Norm + LM Head |
-| **Wire Payload per Token** | **3.05 – 3.09 KB / tok** | 3,124 bytes INT8 payload + 44 bytes `ActivationHeader` |
-| **Wire Savings vs FP32** | **74.6%** | Baseline FP32: 12,288 B + 44 B = 12,332 B |
-| **Model Weights on Network** | **0.0 MB** | Pre-positioned local NVMe models |
-| **Persistent SSD Overhead** | **0.0 MB** | Ephemeral slices auto-deleted after VRAM allocation |
+| **Decode throughput** | **24.9 – 41.7 tok/s** | 24.0–40.1 ms per token across WireGuard |
+| **Prompt prefill** | **148.2 tok/s** | 256-token prompt chunk |
+| **Stage 1 VRAM** | **1.82 GB** | Layers `0..13` + embeddings (LM head stripped) |
+| **Stage 2 VRAM** | **1.94 GB** | Layers `14..27` + output norm + LM head |
+| **Wire payload / token** | **3.05 – 3.09 KB** | 3,124 B INT8 payload + 44 B header (vs 12,332 B FP32) |
+| **Weights on wire / disk bloat** | **0.0 MB / 0.0 MB** | Pre-positioned GGUF + ephemeral VRAM load |
 
 ---
 
-## 4. Measured Performance: DeepSeek-R1-Distill-Qwen-14B (Q4_K_M)
+## 4. DeepSeek-R1-Distill-Qwen-14B (Q4_K_M)
 
-**Model Configuration**:
-- File: `models/DS.gguf` (8.37 GB, Q4_K_M quantization)
-- Architecture: Qwen-2.5 / DeepSeek-R1 (48 Transformer Layers, hidden dimension d = 5120)
-- Partitioning: Stage 1 = Layers `0..22` (Coordinator), Stage 2 = Layers `23..47` + LM Head (Worker)
+Split: Stage 1 = Layers `0..22` (Coordinator), Stage 2 = Layers `23..47` + LM Head (Worker).
 
-| Operational Metric | Coordinator Node (Stage 1) | Remote Worker Node (Stage 2) |
+| Metric | Stage 1 (Laptop A) | Stage 2 (Laptop B) |
 |:---|:---:|:---:|
-| **Hardware Assignment** | Laptop A (RTX 4060 8GB) | Laptop B (RTX 4060 8GB) |
-| **Layer Allocation** | Layers `0..22` (23 layers) | Layers `23..47` (25 layers) + Head |
-| **VRAM Memory Footprint** | **4.12 GB** (Safe margin on 8GB VRAM) | **4.85 GB** (Safe margin on 8GB VRAM) |
-| **Sustained Throughput** | **15.8 tok/s** (~63.3 ms/tok) | **15.8 tok/s** (~63.3 ms/tok) |
-| **Wire Payload per Token** | **5.05 KB / tok** (5,172 B + 44 B) | **48 B** (`TokenResponseFrame` + UTF-8) |
-| **Network Fabric** | Tailscale Direct WireGuard | `SIO_TCP_SET_ACK_FREQUENCY = 1` |
-| **Measured Inter-Node RTT** | **1.14 ms** | **1.14 ms** |
-| **Persistent Disk Bloat** | **0.0 MB** | **0.0 MB** |
+| **Assigned layers** | `0..22` (23 layers) | `23..47` (25 layers) + LM Head |
+| **VRAM usage** | **4.12 GB** / 8 GB | **4.85 GB** / 8 GB |
+| **Sustained throughput** | **15.8 tok/s** (~63.3 ms/tok) | **15.8 tok/s** (~63.3 ms/tok) |
+| **Wire payload / token** | **5.05 KB** (5,172 B + 44 B) | **48 B** (`TokenResponseFrame` + UTF-8) |
+| **Inter-node RTT** | **1.14 ms** | **1.14 ms** |
+| **Disk bloat** | **0.0 MB** | **0.0 MB** |
 
-> **Significance**: Running DeepSeek-R1 14B on a single 8GB laptop crashes with an Out-of-Memory (OOM) error or collapses to 0.3 tok/s due to CPU paging. AeroMESH splits the 48 layers across two consumer laptops, maintaining full GPU CUDA offload (`ngl = 999`) and sustaining **15.8 tokens per second**.
+On a single 8 GB laptop, DeepSeek-R1 14B Q4_K_M either OOMs or drops to ~0.3 tok/s under CPU offloading. Splitting across two 8 GB laptops keeps full CUDA offload (`ngl = 999`) at **15.8 tok/s**.
 
 ---
 
-## 5. Step-by-Step Pipeline Latency Decomposition
+## 5. Per-Token Latency Breakdown
 
-Latency profile of a single autoregressive token generation cycle (63.3 ms total for DeepSeek-R1 14B):
+Single autoregressive token step for DeepSeek-R1 14B (`63.3 ms` total = `15.8 tok/s`):
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      Autoregressive Step Latency Breakdown                   │
-└─────────────────────────────────────────────────────────────────────────────┘
-  Stage 1 GEMM (Layers 0..22):        28.4 ms  ████████████████████ (44.9%)
-  Outlier-INT8 Encoding:               0.3 ms  ▌ (0.5%)
-  WireGuard Transmission (5.1 KB):     1.6 ms  █▌ (2.5%)
-  Stage 2 Dequantization:              0.2 ms  ▍ (0.3%)
-  Stage 2 GEMM (Layers 23..47):       31.1 ms  █████████████████████ (49.1%)
-  LM Head & Top-p Sampling:            1.2 ms  █ (1.9%)
-  ATOK 1-Hop Feedback Transfer:        0.5 ms  ▍ (0.8%)
- ─────────────────────────────────────────────────────────────────────────────
-  Total Latency per Token:            63.3 ms  (15.8 tokens / sec)
+```mermaid
+pie showData
+    title Per-Token Latency Share (ms) — DeepSeek-R1 14B
+    "Stage 1 GEMM (Layers 0..22)" : 28.4
+    "Stage 2 GEMM (Layers 23..47)" : 31.1
+    "WireGuard Transfer (5.1 KB)" : 1.6
+    "LM Head & Sampling" : 1.2
+    "ATOK 1-Hop Return (48 B)" : 0.5
+    "Outlier-INT8 Encode + Decode" : 0.5
 ```
 
-1. **Stage 1 GEMM (28.4 ms)**: Token evaluation across 23 layers on Laptop A's RTX 4060.
-2. **Outlier-INT8 Quantization (0.3 ms)**: Top-8 outlier extraction and vector scaling in CPU/AVX2.
-3. **Network Transport (1.6 ms)**: Transmission of 5.16 KB frame across 5 TCP segments over Tailscale WireGuard.
-4. **Stage 2 GEMM (31.1 ms)**: Forward pass across 25 layers on Laptop B's RTX 4060.
-5. **LM Head & Penalty Sampler (1.2 ms)**: Final logits projection and temperature / top-p sampling.
-6. **ATOK 1-Hop Return (0.5 ms)**: Compact 48-byte token frame streamed back to Coordinator.
+| Step | Time | Share | Details |
+|:---|---:|---:|:---|
+| **Stage 1 GEMM (Layers 0..22)** | 28.4 ms | 44.9% | RTX 4060 Laptop A |
+| **Outlier-INT8 Encode** | 0.3 ms | 0.5% | Top-8 FP32 extraction + row quantization |
+| **WireGuard Transfer (5.1 KB)** | 1.6 ms | 2.5% | 5 TCP segments over Direct WireGuard |
+| **Outlier-INT8 Dequantize** | 0.2 ms | 0.3% | Row reconstruction on Worker |
+| **Stage 2 GEMM (Layers 23..47)** | 31.1 ms | 49.1% | RTX 4060 Laptop B |
+| **LM Head & Top-p Sampling** | 1.2 ms | 1.9% | Logits projection + sampler |
+| **ATOK 1-Hop Feedback** | 0.5 ms | 0.8% | 48-byte token frame returned to Coordinator |
+| **Total** | **63.3 ms** | **100%** | **15.8 tok/s** (94% GPU compute, ~3.3% network) |
 
 ---
 
-## 6. Network Transport Analysis: The Windows Delayed-ACK Benchmark
+## 6. Windows TCP Delayed-ACK Fix
 
-Over Tailscale's WireGuard interface (MTU 1280 bytes, TCP MSS 1240 bytes), a 5,216-byte activation frame splits into **5 TCP segments** (an odd number).
+Tailscale's WireGuard MTU is `1280` bytes (TCP MSS `1240` bytes), so a 5,216-byte activation frame splits into **5 TCP segments** (an odd count). Stock Windows waits 200 ms for a 6th segment before ACKing the 5th.
 
-We benchmarked token throughput under default Windows TCP settings versus AeroMESH's Win32 `WSAIoctl` socket tuning:
+| Socket Configuration | ACK Behavior | Measured Throughput |
+|:---|:---|:---:|
+| **Stock Windows** (`TcpAckFrequency = 2`) | 200 ms stall on 5th odd segment | **2.4 – 4.8 tok/s** |
+| **AeroMESH** (`SIO_TCP_SET_ACK_FREQUENCY = 1` + `TCP_NODELAY`) | Immediate ACK per segment | **15.8 – 24.9 tok/s** |
 
-| Configuration | TCP Socket Parameters | ACK Behavior | Measured Throughput |
-|:---|:---|:---|:---:|
-| **Stock Windows NT** | `TcpAckFrequency = 2` (Default) | Waits 200 ms on 5th odd segment | **2.4 – 4.8 tok/s** |
-| **AeroMESH Optimized** | `SIO_TCP_SET_ACK_FREQUENCY = 1` | Immediate ACK on every segment | **15.8 – 24.9 tok/s** |
-
-Applying `SIO_TCP_SET_ACK_FREQUENCY = 1` combined with `SIO_LOOPBACK_FAST_PATH = 1` and `TCP_NODELAY` eliminated the 200 ms Delayed-ACK penalty, achieving a **5.2x speedup** on identical consumer hardware.
+Result: **5.2x speedup** on identical hardware.
 
 ---
 
-## 7. Intra-Host Shared Memory (SHM) vs Network TCP Benchmark
+## 7. Shared Memory (SHM) vs TCP & WireGuard
 
-For developers running full local testing (`.\start.ps1 all`), AeroMESH activates its lock-free Single-Producer Single-Consumer (SPSC) shared-memory ring buffer (`ShmPipelineTransport`):
+Single-machine multi-process runs (`.\start.ps1 all`) use AeroMESH's lock-free SPSC shared-memory ring buffer (`ShmPipelineTransport`):
 
-| Transport Mechanism | Handshake Latency | Frame Transfer Latency (5.1 KB) | Throughput (Llama 3.2 3B) |
+| Transport | Handshake RTT | 5.1 KB Transfer | Llama 3.2 3B |
 |:---|:---:|:---:|:---:|
 | **Tailscale Direct WireGuard** | 1.14 ms | 1.62 ms | 24.9 tok/s |
 | **Localhost TCP Loopback** | 0.28 ms | 0.35 ms | 27.8 tok/s |
@@ -149,26 +128,22 @@ For developers running full local testing (`.\start.ps1 all`), AeroMESH activate
 
 ---
 
-## 8. Numerical Fidelity & Outlier-Preserving INT8 Evaluation
+## 8. Outlier-INT8 Fidelity vs FP32
 
-To verify that Outlier-Preserving INT8 does not degrade generation quality, we measured perplexity and output coherence across reasoning models:
-
-| Quantization Format | Bytes / Element | Wire Size ($d=5120$) | Top-8 Outlier Error | Reasoning Token Match vs FP32 |
+| Format | Bytes / Element | Frame Size (`d = 5120`) | Top-8 Outlier Error | Reasoning Match vs FP32 |
 |:---|:---:|:---:|:---:|:---:|
-| **Raw FP32** | 4 bytes | 20,480 B | 0.000% (Baseline) | 100.0% |
-| **Raw FP16** | 2 bytes | 10,240 B | < 0.001% | 100.0% |
-| **Naive Linear INT8** | 1 byte | 5,124 B | ~4.820% (Crushed) | 68.2% (Degeneration / Repetition) |
-| **AeroMESH Outlier-INT8** | **1 B + Top-8 FP32** | **5,172 B** | **0.000% (Exact FP32)** | **99.98% (Zero Degradation)** |
-
-By extracting and transmitting the 8 largest magnitude activation channels as exact FP32 values, AeroMESH completely eliminates dynamic scale collapse, matching raw FP32 output quality while slashing wire bandwidth by 74.8%.
+| **Raw FP32** | 4 B | 20,480 B | 0.000% | 100.0% |
+| **Raw FP16** | 2 B | 10,240 B | < 0.001% | 100.0% |
+| **Naive Linear INT8** | 1 B | 5,124 B | ~4.820% | 68.2% (repetition loops) |
+| **AeroMESH Outlier-INT8** | **1 B + Top-8 FP32** | **5,172 B** | **0.000%** | **99.98%** |
 
 ---
 
-## 9. Architectural Benchmark Comparison: AeroMESH vs Alternatives
+## 9. Comparison with Other Frameworks
 
-| Framework | Weights on Wire | Duplicate Disk Storage | Wire Payload ($d=5120$) | Minimum Network Link | VRAM (14B Q4_K_M) |
-|:---|:---:|:---:|:---:|:---:|:---:|
-| **AeroMESH (Protocol v4)** | **0.0 MB** | **0.0 MB** | **5.05 KB / tok** | Consumer 5GHz Wi-Fi / VPN | **4.12 GB** (Enables 8GB GPUs) |
-| **llama.cpp GGML RPC** | 0.0 MB (cached) / GBs (cold) | 0.0 MB | 20.48 KB / tok (FP32) | Wired LAN (stalls over Wi-Fi) | 4.50 GB |
-| **Exo / Petals** | 8.37 GB – 14.0 GB | High disk churn | Dynamic / Variable | High-Speed Fiber Uplink | High buffer overhead |
-| **vLLM (Tensor Parallel)** | 0.0 MB (pre-loaded) | 0.0 MB | Hundreds of MBs / layer | NVLink @ 900 GB/s | Single cluster pool |
+| Framework | Weights on Wire | Disk Bloat | Payload (`d = 5120`) | Target Network | 14B VRAM / Node |
+|:---|:---:|:---:|:---:|:---|:---:|
+| **AeroMESH (v4)** | **0.0 MB** | **0.0 MB** | **5.05 KB / tok** | 5 GHz Wi-Fi / Tailscale | **4.12 GB** |
+| **llama.cpp RPC** | 0 MB cached / GBs cold | 0.0 MB | 20.48 KB / tok (FP32) | Wired LAN | 4.50 GB |
+| **Exo / Petals** | 8–14 GB | Higher disk churn | Variable | Fast fiber / LAN | Higher buffer overhead |
+| **vLLM (Tensor Parallel)** | 0.0 MB | 0.0 MB | Hundreds of MB / layer | NVLink / InfiniBand | Single datacenter pool |

@@ -1,76 +1,77 @@
-# AeroMESH Changelog
+# Changelog
 
-All notable changes, architectural updates, and security hardening milestones for the AeroMESH project are documented in this file.
+Notable changes to AeroMESH are documented here following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+---
+
+## [v0.3.0] - 2026-11-21
+
+### Added
+- **Windows Setup Wizard (`installer/AeroMesh.iss`, `installer/build-installer.ps1`)**:
+  - Full Inno Setup x64 installer (`AeroMesh-Setup-x64.exe`) with VS Code-style component checkboxes: NVIDIA CUDA / CPU `llama.cpp` runtime DLLs, Tailscale VPN check, Desktop / Start Menu shortcuts, PATH registration, and Windows Firewall rules for `:50052` and `:50053`.
+  - Bundled standalone Python embeddable runtime so end users do not need to install Python, Rust, or Visual Studio.
+  - Portable `setup.ps1` improvements including `-CloneLlamaCpp` support and dynamic FFI loading without requiring MinGW `dlltool.exe`.
+- **Model Hub Tab (`static/js/models_hub.js`, `app.py` `/api/models/*`)**:
+  - LM Studio / Ollama-style model manager built into the Studio sidebar.
+  - Curated multi-GPU catalog + live Hugging Face Hub GGUF repository search and quantization file picker.
+  - Resumable background downloads with live progress bar, MB/s speed, ETA, and cancellation.
+  - Custom watched model folders (link existing LM Studio or Ollama directories with zero duplication), native Windows file/folder picker (`/api/models/browse`), and drag-and-drop streaming `.gguf`/`.safetensors` uploads.
+- **One-Click Cluster Pairing & Secret Sync (`static/js/cluster_pair.js`, `app.py` `/api/cluster/pair/*`)**:
+  - Ephemeral encrypted pairing listener on TCP `:50053` protected by a 6-digit one-time PIN (PBKDF2-HMAC-SHA256 + Encrypt-then-MAC HMAC-SHA256, 5-minute TTL, 5-attempt lockout).
+  - Copyable one-click invite tokens (`AERO-<ip>:50053-<pin>`) for both Tailscale and Wi-Fi LAN, plus automatic nearby host discovery.
+  - Saved peer registry showing live GPU info, key fingerprint match (`KEY-XXXX-XXXX`), matching GGUF models, one-click **Use as Worker**, and one-click **Rotate Cluster Key**.
+- **Offline Vendored UI Assets (`static/vendor/`)**:
+  - Bundled Lucide, Marked, DOMPurify, Highlight.js, and KaTeX locally with automatic SRI-pinned CDN fallback so the Studio works reliably offline.
+
+### Fixed
+- **Cluster Pairing Layout & Responsive Grid (`static/css/liquid_glass.css`)**:
+  - Fixed two-column grid overflow and edge overlap on the Cluster Pairing page across desktop and narrower viewports (`minmax(0, 1fr)`, proper flex wrapping, and clean card padding).
+- **Documentation & Visual Assets**:
+  - Rewrote `README.md` for conciseness, moved deep engineering write-ups into `docs/architecture/engineering-and-protocol.md`, replaced wide ASCII diagrams with mobile-safe GitHub Mermaid charts, refreshed all UI screenshots, and added a walkthrough GIF + HD MP4 demo.
 
 ---
 
 ## [v0.2.0-ArgonFixes] - 2026-10-22
 
 ### Added
-- **Sub-Millisecond Windows TCP Socket Tuning (`transport.rs`, `pipeline.rs`)**:
-  - Implemented Win32 `WSAIoctl` controls on all coordinator and worker network sockets:
-    - `SIO_TCP_SET_ACK_FREQUENCY = 1` (`0x98000017`): Eliminates the 200 ms Windows TCP Delayed-ACK stall over Tailscale WireGuard's 1280-byte MTU, lifting generation throughput from 2–5 tok/s to 15–25 tok/s.
-    - `SIO_LOOPBACK_FAST_PATH = 1` (`0x98000010`): Enables fast-path routing on loopback connections.
-    - `TCP_NODELAY = true`: Disables Nagle's buffering algorithm.
-    - 512 KB `SO_SNDBUF` and `SO_RCVBUF` socket buffers.
+- **Windows TCP Socket Tuning (`transport.rs`, `pipeline.rs`)**:
+  - Win32 `WSAIoctl` controls (`SIO_TCP_SET_ACK_FREQUENCY = 1`, `SIO_LOOPBACK_FAST_PATH = 1`), `TCP_NODELAY = true`, and 512 KB `SO_SNDBUF`/`SO_RCVBUF` buffers, eliminating the 200 ms Windows Delayed-ACK stall over Tailscale WireGuard's 1280-byte MTU and lifting throughput from 2–5 tok/s to 15–25 tok/s.
 - **Outlier-Preserving Per-Row INT8 Codec (`activation.rs`, `server.rs`, `pipeline.rs`)**:
-  - Upgraded `Int8PerRow` for hidden dimensions $d \ge 256$ to isolate and extract the Top-8 outlier channels per row as exact `(u16 index, f32 value)` pairs (48 bytes) before quantizing remaining channels to INT8.
-  - Eliminates numerical scale collapse and repetition loops on DeepSeek-R1 and Qwen-2.5 models while achieving a 74.8% reduction in wire bandwidth (3.05 KB/tok for 3B, 5.05 KB/tok for 14B).
+  - Extracts the Top-8 outlier channels per row as exact `(u16 index, f32 value)` pairs (48 bytes) before quantizing the remaining channels to INT8. Cuts wire bandwidth by 74.8% (3.05 KB/tok for 3B, 5.05 KB/tok for 14B) without repetition loops on DeepSeek-R1 or Qwen 2.5.
 - **Ephemeral VRAM Stage Loading (`InPlaceStageGuard` in `gguf_slicer.rs`, `slice_loader.rs`)**:
-  - Direct upload of sliced stage tensors into GPU VRAM with `use_mmap = false`, followed by immediate unlinking and deletion of temporary `.aeromesh_ephemeral_*` slice files upon initialization.
-  - Reduces persistent disk overhead across the entire cluster to **0.0 MB**.
-- **Coalesced Frame Write Buffer (`transport.rs`)**:
-  - Added reusable `BytesMut` buffer in `TcpPipelineTransport::send_activation` to merge the 44-byte `ActivationHeader` and activation payload into a single network system call.
+  - Loads sliced tensors directly into VRAM (`use_mmap = false`) and immediately unlinks temporary `.aeromesh_ephemeral_*` slice files, leaving **0.0 MB** persistent disk overhead.
+- **Coalesced Frame Writes (`transport.rs`)**:
+  - Reusable `BytesMut` buffer sends the 44-byte `ActivationHeader` and payload in a single write syscall.
 - **Lock-Free SHM Spin-Yielding (`shm.rs`, `transport.rs`)**:
-  - Integrated a 64-iteration cooperative `tokio::task::yield_now()` spin loop before microsecond sleep in shared-memory transport, reducing local handoff latency to < 100 microseconds.
-- **Procedural DiT / Stable Diffusion Pipeline (`app.py`, `/v1/images/generations`)**:
-  - Added support for procedural image generation conditioned via distributed mesh textual prompt expansion.
-- **Native Desktop Studio Application (`aeromesh_desktop.rs`, `AeroMesh-Desktop.exe`)**:
-  - Compiled Windows frameless native desktop studio embedding coordinator, worker, and Web UI.
+  - 64-iteration cooperative `tokio::task::yield_now()` spin loop cuts intra-host shared-memory handoff latency below 100 microseconds.
+- **Distributed Diffusion Pipeline (`app.py`, `/v1/images/generations`)**:
+  - Procedural DiT / Stable Diffusion image generation conditioned by distributed LLM prompt expansion.
+- **Desktop Studio Binary (`aeromesh_desktop.rs`, `AeroMesh-Desktop.exe`)**:
+  - Frameless native Windows desktop wrapper embedding the Studio UI.
 
 ### Fixed
-- **Big-Endian Token Frame Decoding (`activation.rs`)**:
-  - Corrected `TokenResponseFrame::decode_async` to unpack header fields using `from_be_bytes`, matching the Big-Endian wire encoder specification.
-- **Non-Terminal LM Head Stripping (`gguf_slicer.rs`)**:
-  - Stripped `output.weight` and `output.bias` tensors from non-terminal Stage 1 slices, saving hundreds of megabytes of VRAM and avoiding unused tensor initialization overhead.
-- **Worker Handshake False-Positive Reloading (`pipeline.rs`)**:
-  - Fixed layer count check (`inst.slice_config.total_layers != req.total_layers`) in the worker service loop to prevent unnecessary weight reloads on incoming peer reconnections.
-- **Multi-Stage Chain Compatibility (`slice_loader.rs`, `pipeline.rs`, `app.js`)**:
-  - Fixed downstream layer range computation for clusters with 3+ nodes and updated the Liquid Glass Cluster HUD to visualize multi-stage topologies.
+- **Big-Endian Token Frame Decoding (`activation.rs`)**: Aligned `TokenResponseFrame::decode_async` with the Big-Endian encoder.
+- **Non-Terminal LM Head Stripping (`gguf_slicer.rs`)**: Stripped `output.weight` and `output.bias` from non-terminal slices to save VRAM.
+- **Worker Handshake False Reloads (`pipeline.rs`)**: Fixed layer-count comparison so peer reconnects do not trigger redundant weight reloads.
+- **Multi-Stage Chain Indexing (`slice_loader.rs`, `pipeline.rs`, `app.js`)**: Fixed layer range calculation for 3+ node clusters and updated the Cluster HUD.
 
 ---
 
 ## [v0.1.5] - 2026-10-15
 
 ### Security & Hardening
-- **FastAPI Gateway Hardening (FIX-16)**:
-  - Added persistent connection-pooled `httpx.AsyncClient` with unbuffered SSE token streaming (`X-Accel-Buffering: no`).
-  - Added RFC 7230 hop-by-hop header stripping and upstream credential injection.
-  - Implemented graceful offline degradation: dynamic local `models/*.gguf` scanning when the coordinator backend is offline.
-  - Added `/health` (gateway liveness) and `/ready` (end-to-end backend readiness) probes.
-- **Win32 Job Object Lifecycle Containment (`job_object.rs`)**:
-  - Bound native child processes to a Win32 Job Object configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, ensuring automatic kernel reclamation of GPU VRAM on exit.
-- **OpenAI-Compatible Error Envelopes (FIX-06, FIX-07)**:
-  - Standardized JSON error response schema across all 400, 401, 404, 422, 429, 500, and 503 status codes.
-- **Context-Window Guard (FIX-24)**:
-  - Early rejection of requests where `prompt_tokens + max_tokens > n_ctx` before allocating GPU computation buffers.
-- **Real-Time Generation Abort (`/api/chat/abort`, FIX-19)**:
-  - Added atomic cancellation token halting the autoregressive generation loop upon client abort.
+- **FastAPI Gateway Hardening (FIX-16)**: Connection-pooled `httpx.AsyncClient`, unbuffered SSE streaming (`X-Accel-Buffering: no`), RFC 7230 hop-by-hop stripping, upstream Bearer injection, offline local model scanning, and `/health` + `/ready` probes.
+- **Win32 Job Object Containment (`job_object.rs`)**: `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` ensures child processes terminate and release GPU VRAM on exit or crash.
+- **OpenAI-Compatible Errors (FIX-06, FIX-07)**: Standardized JSON error responses across 400, 401, 404, 422, 429, 500, and 503.
+- **Context-Window Guard (FIX-24)**: Rejects requests where `prompt_tokens + max_tokens > n_ctx` with HTTP 422 before GPU allocation.
+- **Generation Abort (`/api/chat/abort`, FIX-19)**: Atomic cancellation halts active decoding immediately.
 
 ---
 
 ## [v0.1.0] - 2026-10-01
 
 ### Added
-- **Core Zero-Weight Distributed Pipeline**:
-  - Monolithic base GGUF pre-positioning with deterministic layer slicing along transformer block boundaries.
-  - Identity RMSNorm injection ($\mathbf{w} = [1.0, 1.0, \dots, 1.0]$) resolving the Double Normalization Problem.
-- **Binary Wire Protocol v4 (`activation.rs`)**:
-  - Formalized 44-byte `ActivationHeader` and 35-byte `TokenResponseFrame` with Big-Endian byte encoding.
-  - Cryptographic mutual handshake with SHA-256 worker token authentication.
-- **Claymorphic Liquid Glass Web UI (`static/`)**:
-  - Dependency-free dark theme Single Page Application with live KaTeX math rendering, syntax highlighting, and cluster telemetry HUD.
-- **Dynamic C++ FFI Loader (`llama_ffi.rs`)**:
-  - Runtime dynamic symbol resolution (`GetProcAddress`) for CUDA-compiled `llama.cpp` runtime libraries.
+- **Zero-Weight Distributed Pipeline**: Symmetric local `.gguf` slicing along transformer block boundaries with Identity RMSNorm ($\mathbf{w} = [1.0, \dots, 1.0]$) on non-terminal stages.
+- **Wire Protocol v4 (`activation.rs`)**: 44-byte `ActivationHeader`, 35-byte `TokenResponseFrame`, Big-Endian framing, and SHA-256 mutual handshake.
+- **Web UI (`static/`)**: Dark glass single-page interface with Markdown, KaTeX math, Highlight.js code blocks, and live cluster telemetry.
+- **Dynamic C++ FFI Loader (`llama_ffi.rs`)**: Runtime symbol resolution (`GetProcAddress`) for CUDA `llama.cpp` DLLs.

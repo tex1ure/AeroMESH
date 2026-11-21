@@ -1,118 +1,80 @@
-# AeroMESH: Architectural Boundaries & Operational Constraints
+# AeroMESH Limitations & Trade-Offs
 
-**Document ID**: DOC-LIMIT-2026-V4  
-**Target Engine**: AeroMESH Distributed LLM Engine (Protocol v4)  
-**Scope**: Deliberate engineering boundaries, hardware trade-offs, and design constraints.
+AeroMESH is built for consumer Windows PCs and gaming laptops (6–8 GB VRAM) linked over home Wi-Fi or Tailscale, not datacenter InfiniBand racks. The constraints below are deliberate trade-offs made to keep consumer-link throughput usable.
 
 ---
 
-## Table of Contents
+## Contents
 
-- [1. Executive Philosophy](#1-executive-philosophy)
-- [2. Pipeline Parallelism & The Autoregressive Bubble](#2-pipeline-parallelism--the-autoregressive-bubble)
-- [3. Pre-Shared Symmetric GGUF Weights Requirement](#3-pre-shared-symmetric-gguf-weights-requirement)
-- [4. Windows-Centric Process Containment (Win32 Job Objects)](#4-windows-centric-process-containment-win32-job-objects)
-- [5. Ephemeral Stateless Context & Concurrency Semantics](#5-ephemeral-stateless-context--concurrency-semantics)
-- [6. Context Window & Memory Hard Limits](#6-context-window--memory-hard-limits)
-- [7. Model Architecture Support & Slicing Boundaries](#7-model-architecture-support--slicing-boundaries)
-- [8. Architectural Trade-Off & Roadmap Matrix](#8-architectural-trade-off--roadmap-matrix)
-
----
-
-## 1. Executive Philosophy
-
-AeroMESH is engineered specifically for **distributed edge inference across consumer laptops and gaming PCs** rather than multi-tenant cloud datacenters. Every constraint outlined in this document reflects a deliberate engineering decision made to optimize inference over consumer Wi-Fi, low-cost Tailscale WireGuard tunnels, and laptops equipped with 6 GB to 8 GB of VRAM.
+1. [Sequential Pipeline Parallelism (Autoregressive Bubble)](#1-sequential-pipeline-parallelism-autoregressive-bubble)
+2. [Local Base GGUF File on Each Node](#2-local-base-gguf-file-on-each-node)
+3. [Windows-First Process Containment](#3-windows-first-process-containment)
+4. [Stateless Context & Single Active Generation](#4-stateless-context--single-active-generation)
+5. [Fixed Context Window Ceiling (`n_ctx`)](#5-fixed-context-window-ceiling-n_ctx)
+6. [Supported Model Architectures](#6-supported-model-architectures)
+7. [Trade-Off & Roadmap Summary](#7-trade-off--roadmap-summary)
 
 ---
 
-## 2. Pipeline Parallelism & The Autoregressive Bubble
+## 1. Sequential Pipeline Parallelism (Autoregressive Bubble)
 
-### Current Architecture
-AeroMESH partitions deep neural networks across transformer layer boundaries:
-- **Coordinator Node (Stage 1)**: Executes tokenization, prompt embedding, transformer blocks `0..K`, Identity RMSNorm injection, and dynamic Outlier-INT8 compression.
-- **Worker Node (Stage 2+)**: Dequantizes activations, executes transformer blocks `K+1..N-1`, evaluates genuine output normalization, computes LM head logits, samples the next token ID, and returns a 1-hop token frame directly to the coordinator.
+AeroMESH splits models along transformer layer boundaries: Stage 1 runs blocks `0..K`, sends the compressed hidden state (~3–5 KB), and Stage 2 runs blocks `K+1..N-1` plus the LM head and returns the sampled token in 1 hop.
 
-### Operational Constraint
-In pure sequential pipeline parallelism with batch size 1 ($B=1$), only one node is actively executing GEMM tensor arithmetic at any given millisecond during autoregressive decoding:
-- While Laptop A computes layers `0..K`, Laptop B is waiting for the activation frame.
-- While Laptop B computes layers `K+1..N-1` and samples the next token, Laptop A is waiting for the token response.
-
-### Why this boundary exists
-Alternative schemes (such as Tensor Parallelism) achieve 100% compute overlap across nodes, but require multi-gigabyte all-reduce collective communications inside every single attention layer. Over consumer Wi-Fi or Tailscale WireGuard (where latency ranges between 1 ms and 15 ms), Tensor Parallelism grinds inference down to < 0.1 tokens per second. AeroMESH accepts the sequential pipeline bubble to keep network traffic down to a tiny **~3.05 KB to 5.05 KB per token step**, enabling smooth 15–25 tok/s inference over standard wireless links.
+- **Constraint:** At batch size 1 (`B = 1`), only one GPU computes at a time during decoding. While Laptop A runs layers `0..K`, Laptop B waits; while Laptop B runs `K+1..N-1`, Laptop A waits.
+- **Why:** Tensor parallelism overlaps compute across GPUs, but requires all-reduce syncs inside every layer. Over 1–15 ms Wi-Fi or WireGuard links, that overhead drops throughput below 0.1 tok/s. Accepting the pipeline bubble keeps traffic to ~3–5 KB/token so 15–25 tok/s is achievable over Wi-Fi.
 
 ---
 
-## 3. Pre-Shared Symmetric GGUF Weights Requirement
+## 2. Local Base GGUF File on Each Node
 
-### Current Architecture
-All participating cluster nodes must pre-position the identical base `.gguf` model file on their local NVMe SSDs inside the `models/` folder prior to launching the cluster.
+Each node in the cluster must have the same base `.gguf` file on local storage before starting distributed inference.
 
-### Why this boundary exists
-Shipping 8 GB to 30 GB of model weights across consumer internet or Wi-Fi creates multi-minute cold starts, exhausts data caps, and saturates home uplinks. AeroMESH operates under a **Zero-Weight Network Transfer** philosophy. By pre-positioning the base model, runtime network traffic is strictly confined to intermediate activation vectors.
-
-### Operational Mitigation
-Users copy the base `.gguf` file across laptops before execution (e.g., via high-speed USB 3.2 flash drive, local Windows file share `\\LAPTOP\models`, or direct download). When the cluster launches, AeroMESH validates model header hashes (`aeromesh model-check`) to confirm mathematical consistency across all peers.
+- **Why:** Streaming 8–20 GB of weights over Wi-Fi or residential internet causes multi-minute startup delays and saturates home uplinks. Pre-positioning keeps runtime weight transfer at **0.0 MB**.
+- **Built-in tooling:** You do not need to duplicate models if they already exist in LM Studio or Ollama—use the **Model Hub** tab to link existing folders (zero-copy) or pull matching quantizations from Hugging Face. Once paired via **One-Click Cluster Pairing**, the Cluster tab automatically highlights which GGUF files match on both machines, and `aeromesh model-check` verifies header hashes before execution.
 
 ---
 
-## 4. Windows-Centric Process Containment (Win32 Job Objects)
+## 3. Windows-First Process Containment
 
-### Current Architecture
-All native child processes (including worker compute instances and RPC helpers) are bound to a Win32 Job Object configured with:
-```rust
-info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-```
+Child engine and worker processes are attached to a Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
 
-### Why this boundary exists
-Consumer gaming laptops running Windows 11 with discrete NVIDIA GeForce RTX GPUs represent the primary target baseline. In Windows, crashed or orphaned CUDA processes frequently hold active device context handles, locking dedicated VRAM until a full system reboot. Win32 Job Objects guarantee that if the coordinator process exits, crashes, or is terminated by `Ctrl+C`, the Windows NT kernel immediately terminates all child processes and reclaims all allocated GPU VRAM.
-
-### Portability Constraint
-This containment mechanism is Windows-specific. Running AeroMESH on Linux or macOS requires abstracting `job_object.rs` using POSIX `prctl(PR_SET_PDEATHSIG, SIGKILL)` or systemd `cgroups v2` hierarchical containment.
+- **Why:** On Windows + CUDA, orphaned worker processes can hold GPU contexts open and leak VRAM until reboot. Job Objects ensure the NT kernel kills child processes and reclaims VRAM automatically if the coordinator crashes or exits.
+- **Portability:** Native builds currently target Windows 10/11 x64. Linux/macOS support requires replacing `job_object.rs` with `prctl(PR_SET_PDEATHSIG, SIGKILL)` or `cgroups v2` and swapping the Windows `WSAIoctl` TCP socket tuning.
 
 ---
 
-## 5. Ephemeral Stateless Context & Concurrency Semantics
+## 4. Stateless Context & Single Active Generation
 
-### Current Architecture
-AeroMESH maintains an ephemeral, in-memory KV-cache context. The engine does not embed an external database (such as SQLite, PostgreSQL, or Redis). The coordinator exposes an OpenAI-compliant stateless HTTP API (`/v1/chat/completions`) that reconstructs multi-turn conversational context from the client-supplied `messages` array.
+The coordinator maintains an in-memory KV cache with no embedded database. Multi-turn history is supplied by the client via the OpenAI-compatible `messages` array.
 
-### Operational Constraint
-- **Concurrency**: Generation runs on a single active inference context per coordinator instance. Concurrent incoming client requests are queued sequentially.
-- **State Invalidation**: Switching models (`/api/model/switch`), restarting node processes, or refreshing the browser flushes the transient KV cache. Context persistence is delegated to client storage.
+- **Concurrency:** One active generation runs at a time per coordinator instance; concurrent requests queue sequentially.
+- **Reset behavior:** Switching models (`/api/model/switch`), restarting a node, or clearing a chat flushes the transient KV cache.
 
 ---
 
-## 6. Context Window & Memory Hard Limits
+## 5. Fixed Context Window Ceiling (`n_ctx`)
 
-### Current Architecture
-The inference engine enforces strict upper bounds on context sequence lengths:
-- Default context length: `n_ctx = 4096` tokens.
-- Request validation: Prompts where `prompt_tokens + max_tokens > n_ctx` are rejected immediately with HTTP 422 before any GPU computation begins.
+Default context length is `n_ctx = 4096`. Requests where `prompt_tokens + max_tokens > n_ctx` are rejected early with HTTP `422` before allocating GPU buffers.
 
-### Why this boundary exists
-Consumer laptop GPUs (e.g., RTX 4060 8GB) have tight VRAM margins when hosting 14B or 32B model slices. Allowing unbounded context growth would trigger CUDA Out-Of-Memory (OOM) allocations, terminating the worker process. The hard context ceiling ensures predictable VRAM footprints throughout long conversations.
+- **Why:** On 6–8 GB GPUs hosting half of a 14B or 32B model, unbounded KV-cache growth triggers CUDA out-of-memory crashes. Enforcing a hard cap keeps VRAM usage predictable across long sessions.
 
 ---
 
-## 7. Model Architecture Support & Slicing Boundaries
+## 6. Supported Model Architectures
 
-### Current Architecture
-AeroMESH's deterministic GGUF slicer (`crates/aeromesh-engine/src/gguf_slicer.rs`) is optimized for dense Transformer architectures where layers are indexed uniformly:
-- Supported: LLaMA (Llama-2, Llama-3, Llama-3.1, Llama-3.2), Qwen (Qwen-2, Qwen-2.5, DeepSeek-R1 Distill), Mistral, and Gemma.
-- Boundary Rules: Models must be sliced strictly along transformer block boundaries (`blk.X.*`). The embedding layer (`token_embd.weight`) is retained on Stage 1; the language model head (`output.weight`) and genuine RMSNorm are retained on the terminal stage.
-
-### Operational Constraint
-Non-standard architectures (such as Mixture-of-Experts with dynamic cross-layer token routing, or non-transformer state space models like Mamba) require custom stage-partitioning logic to avoid splitting inter-expert routing logic across network hops.
+The deterministic GGUF slicer (`crates/aeromesh-engine/src/gguf_slicer.rs`) targets dense Transformer models with uniform `blk.X.*` block naming:
+- **Supported:** Llama 2 / 3 / 3.1 / 3.2, Qwen 2 / 2.5, DeepSeek-R1 Distill, Mistral, and Gemma.
+- **Not yet supported:** Sparse Mixture-of-Experts (MoE) architectures with cross-layer routing or non-transformer state-space models (Mamba/RWKV), which require custom partition logic.
 
 ---
 
-## 8. Architectural Trade-Off & Roadmap Matrix
+## 7. Trade-Off & Roadmap Summary
 
-| Constraint Area | Current AeroMESH Architecture | Underlying Engineering Reason | Future Milestone / Target |
-|---|---|---|---|
-| **Cluster Topology** | 2-Node Point-to-Point & Multi-Stage Ring | Lowest token feedback latency | Dynamic Pipeline Rebalancing |
-| **Operating System** | Windows 10/11 x64 (Win32 Job Objects) | Prevents orphaned CUDA VRAM leaks | Linux `cgroups v2` / POSIX abstraction |
-| **Model Weights** | Pre-positioned local base GGUF | Zero-weight streaming over consumer Wi-Fi | Local P2P BitTorrent model pre-seeding |
-| **Context Memory** | Ephemeral in-memory KV-cache | Minimal edge footprint; client-driven state | Optional SQLite session persistence |
-| **Context Length** | Bounded by `n_ctx` (default: 4096) | Prevents GPU Out-of-Memory crashes | Dynamic RoPE scaling & FlashAttention-2 |
-| **Concurrency** | Single active generation session | Bounded VRAM on consumer GPUs | Multi-turn continuous batching |
+| Area | Current Behavior | Reason | Planned Direction |
+|:---|:---|:---|:---|
+| **Topology** | 2-node P2P & multi-stage chain | Lowest 1-hop token latency | Dynamic layer rebalancing |
+| **OS Support** | Windows 10/11 x64 (Win32 Jobs) | Clean CUDA VRAM reclamation | Linux `cgroups v2` / POSIX port |
+| **Model Distribution** | Local GGUF + Model Hub / folder linking | Zero runtime weight streaming | Optional LAN P2P model sync |
+| **Session State** | In-memory KV cache | Low edge footprint | Optional SQLite persistence |
+| **Context Limit** | Hard `n_ctx` cap (default 4096) | Prevents 8 GB GPU OOM | Dynamic RoPE & FlashAttention-2 |
+| **Concurrency** | Single active generation | Predictable consumer VRAM | Continuous batching |
