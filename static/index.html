@@ -74,7 +74,7 @@
           onerror="window.__loadCdnFallback('script',{src:'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js',integrity:'sha384-+VBxd3r6XgURycqtZ117nYw44OOcIax56Z4dCRWbxyPt0Koah1uHoK0o4+/RRE05',crossorigin:'anonymous',referrerpolicy:'no-referrer'})"></script>
 
   <!-- AeroMESH Kimi Desktop Design System -->
-  <link rel="stylesheet" href="/static/css/liquid_glass.css?v=kimi6">
+  <link rel="stylesheet" href="/static/css/liquid_glass.css?v=kimi9">
 </head>
 <body>
 
@@ -363,6 +363,57 @@
             <h2 class="mh-section-title">Active Transfers</h2>
           </div>
           <div id="mh-downloads-list" class="mh-downloads-list"></div>
+        </div>
+
+        <!-- Hardware-Aware VRAM Fit Meter & Auto Layer-Split Planner -->
+        <div id="mh-fit-planner-card" class="mh-fit-card" aria-label="Hardware-Aware VRAM Fit Meter and Auto Layer-Split Planner">
+          <div class="mh-fit-head">
+            <div class="mh-fit-head-left">
+              <div class="mh-fit-title-row">
+                <i data-lucide="gauge" style="width: 16px; height: 16px; color: var(--Colors-KMBlue); flex-shrink: 0;"></i>
+                <h2 class="mh-fit-title">VRAM Fit Meter &amp; Auto Layer-Split Planner</h2>
+              </div>
+              <div id="mh-fit-pool-summary" class="mh-fit-pool-summary">Detecting local GPU &amp; paired cluster VRAM…</div>
+            </div>
+
+            <div class="mh-fit-controls">
+              <div class="mh-fit-seg" role="group" aria-label="Hardware scope">
+                <button id="mh-fit-mode-cluster" class="mh-fit-seg-btn active" type="button">Cluster</button>
+                <button id="mh-fit-mode-local" class="mh-fit-seg-btn" type="button">This PC</button>
+              </div>
+
+              <label class="mh-fit-select-wrap" title="Target context length for KV cache estimation">
+                <span class="mh-fit-select-label">Ctx</span>
+                <select id="mh-fit-ctx-select" class="mh-fit-select" aria-label="Context length">
+                  <option value="2048">2K</option>
+                  <option value="4096" selected>4K</option>
+                  <option value="8192">8K</option>
+                  <option value="16384">16K</option>
+                  <option value="32768">32K</option>
+                </select>
+              </label>
+
+              <div class="mh-fit-sim-wrap">
+                <select id="mh-fit-sim-select" class="mh-fit-select" aria-label="Simulate additional worker GPU">
+                  <option value="rtx3060-6g">RTX 3060 · 6 GB VRAM</option>
+                  <option value="rtx4060-8g">RTX 4060 · 8 GB VRAM</option>
+                  <option value="rtx4070-12g">RTX 4070 · 12 GB VRAM</option>
+                  <option value="rtx4080-16g">RTX 4080 · 16 GB VRAM</option>
+                  <option value="rtx4090-24g">RTX 4090 · 24 GB VRAM</option>
+                  <option value="cpu-16g">CPU Worker · 16 GB RAM</option>
+                </select>
+                <button id="mh-fit-sim-add-btn" class="clay-btn mh-btn-secondary mh-btn-xs" type="button" title="Add a simulated worker GPU to preview how layers split">
+                  + Simulate Worker
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div id="mh-fit-node-chips" class="mh-fit-node-chips"></div>
+
+          <div id="mh-fit-plan-body" class="mh-fit-plan-body">
+            <div class="mh-meta-line">Click <strong>Plan Split</strong> on any model below to calculate exact VRAM budgets and layer ranges.</div>
+          </div>
         </div>
 
         <!-- SUB-TAB 1: DISCOVER & INSTALL (Hugging Face + Curated Catalog) -->
@@ -658,10 +709,39 @@
           <div class="mh-section-head">
             <div>
               <h2 class="mh-section-title">Paired Cluster Nodes (<span id="cp-peers-count">0</span>)</h2>
-              <p class="mh-section-desc">Saved peers that share your cluster key, along with live model compatibility checks.</p>
+              <p class="mh-section-desc">Saved peers that share your cluster key, along with live sync status and disk space.</p>
             </div>
           </div>
           <div id="cp-peers-list" class="mh-installed-list"></div>
+        </div>
+
+        <!-- Active Peer-to-Peer Model Sync Transfers -->
+        <div id="cp-sync-jobs-panel" class="mh-downloads-panel" style="display: none;">
+          <div class="mh-section-head">
+            <h2 class="mh-section-title">Active Peer Model Transfers (LAN / Tailscale :50054)</h2>
+          </div>
+          <div id="cp-sync-jobs-list" class="mh-downloads-list"></div>
+        </div>
+
+        <!-- Automatic Multi-Node Model Check & Peer Model Sync Matrix -->
+        <div class="mh-section" id="cp-model-matrix-section">
+          <div class="mh-section-head cp-matrix-head">
+            <div>
+              <h2 class="mh-section-title">Multi-Node Model Check &amp; Peer Sync</h2>
+              <p class="mh-section-desc" id="cp-model-check-summary">
+                Verifies exact GGUF fingerprints across paired nodes so distributed inference runs with 0.0 MB runtime weight transfers.
+              </p>
+            </div>
+            <button id="cp-check-models-btn" class="mh-btn mh-btn-ghost mh-btn-sm" type="button">
+              <i data-lucide="shield-check" style="width: 14px; height: 14px;"></i>
+              <span>Check All Nodes</span>
+            </button>
+          </div>
+          <div id="cp-model-matrix-list" class="mh-installed-list">
+            <div class="mh-empty-state">
+              Pair a second PC above, then click <strong>Check All Nodes</strong> to compare GGUF hashes and push or pull missing models over Wi-Fi / Tailscale.
+            </div>
+          </div>
         </div>
 
       </div>
@@ -710,9 +790,9 @@
 
 <!-- Application Scripts -->
 <script src="/static/js/liquid_mesh.js"></script>
-<script src="/static/js/app.js?v=kimi7"></script>
-<script src="/static/js/model_hub.js?v=kimi7"></script>
-<script src="/static/js/cluster_pair.js?v=kimi7"></script>
+<script src="/static/js/app.js?v=kimi9"></script>
+<script src="/static/js/model_hub.js?v=kimi9"></script>
+<script src="/static/js/cluster_pair.js?v=kimi9"></script>
 
 </body>
 </html>

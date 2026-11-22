@@ -56,6 +56,7 @@ flowchart TB
 | **Coordinator API** | `127.0.0.1:8080` | HTTP / JSON | Constant-time Bearer (`AEROMESH_API_KEY`) | Loopback or private Tailnet |
 | **Worker Mesh** | `0.0.0.0:50052` | Binary TCP (`AERO`) | SHA-256 handshake (`AEROMESH_WORKER_SECRET`) | LAN / Tailscale ACLs only |
 | **Pairing Listener** | `0.0.0.0:50053` *(off by default)* | Encrypted JSON over TCP | 6-digit one-time PIN (PBKDF2 + HMAC-SHA256) | Ephemeral (max 5 min while hosting) |
+| **Peer Model Sync** | `0.0.0.0:50054` | Authenticated TCP (`aeromesh-sync-v1`) | Mutual challenge-response HMAC-SHA256 (`AEROMESH_WORKER_SECRET`) | LAN / Tailscale ACLs only |
 
 ---
 
@@ -85,6 +86,10 @@ To eliminate manual `.env` copy-pasting between machines, the **Cluster** tab su
 3. **Key derivation:** A 16-byte random salt and the 6-digit PIN derive independent encryption and MAC keys via **PBKDF2-HMAC-SHA256** (200,000 iterations).
 4. **Encrypt-then-MAC:** The cluster payload (`AEROMESH_WORKER_SECRET`, node metadata, and local model list) is encrypted with a SHA-256 CTR-mode keystream and authenticated with **HMAC-SHA256** over `(salt || nonce || ciphertext)`. Decryption verifies the MAC with `hmac.compare_digest` before touching plaintext.
 5. **Key rotation:** Clicking **Rotate Cluster Key** (`POST /api/cluster/pair/rotate`) generates a fresh 256-bit `AEROMESH_WORKER_SECRET`, updates `.env`, and flags previously paired nodes for re-pairing.
+
+### Peer Model Check & Sync Daemon (`:50054`)
+- **Mutual challenge-response HMAC-SHA256:** Every `manifest`, `push`, and `pull` connection exchanges fresh 16-byte server and client nonces and verifies HMAC-SHA256 tags bound to `(server_nonce, client_nonce, op, filename)` in constant time (`hmac.compare_digest`). No plaintext secret crosses the wire, and requests fail closed if `AEROMESH_WORKER_SECRET` is unset.
+- **Strict path confinement & integrity verification:** Sync operations strictly validate base `.gguf` filenames, reject internal `.stage` / `.aeromesh_` / traversal paths, confine all reads and writes via `os.path.realpath` inside managed model folders, validate peer hosts against link-local/metadata/unspecified/multicast addresses and privileged ports (`< 1024`), verify free disk space before writing, and check GGUF magic bytes + exact deterministic SHA-256 fingerprint before atomically replacing the target file.
 
 ---
 

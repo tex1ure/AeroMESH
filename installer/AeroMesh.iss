@@ -144,11 +144,13 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 ; Silently install Visual C++ Runtime if bundled and needed
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Check: FileExists(ExpandConstant('{tmp}\vc_redist.x64.exe')); Flags: waituntilterminated
 
-; Configure Windows Defender Firewall rules for TCP 50052 (Worker) and TCP 50053 (Cluster Pairing) when selected in All-Users/Admin mode
+; Configure Windows Defender Firewall rules for TCP 50052 (Worker), TCP 50053 (Cluster Pairing), and TCP 50054 (Peer Model Sync)
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AeroMESH Worker (TCP 50052)"""; StatusMsg: "Updating Windows Firewall rules..."; Tasks: firewall; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""AeroMESH Worker (TCP 50052)"" dir=in action=allow protocol=TCP localport=50052 program=""{app}\{#AppCliName}"""; StatusMsg: "Allowing AeroMESH Worker through Windows Firewall..."; Tasks: firewall; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AeroMESH Cluster Pairing (TCP 50053)"""; StatusMsg: "Updating Windows Firewall rules..."; Tasks: firewall; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""AeroMESH Cluster Pairing (TCP 50053)"" dir=in action=allow protocol=TCP localport=50053 program=""{app}\{#AppExeName}"""; StatusMsg: "Allowing AeroMESH Cluster Pairing through Windows Firewall..."; Tasks: firewall; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AeroMESH Peer Model Sync (TCP 50054)"""; StatusMsg: "Updating Windows Firewall rules..."; Tasks: firewall; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""AeroMESH Peer Model Sync (TCP 50054)"" dir=in action=allow protocol=TCP localport=50054 program=""{app}\{#AppExeName}"""; StatusMsg: "Allowing AeroMESH Peer Model Sync through Windows Firewall..."; Tasks: firewall; Flags: runhidden waituntilterminated
 
 ; Optional Tailscale download page if user checked Tailscale and it is not already installed
 Filename: "https://tailscale.com/download/windows"; Description: "Download Tailscale for cross-network P2P clusters"; Components: tailscale; Check: not IsTailscaleInstalled; Flags: shellexec postinstall skipifsilent
@@ -159,6 +161,7 @@ Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait
 [UninstallRun]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AeroMESH Worker (TCP 50052)"""; Check: IsAdminInstallMode; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAeroMeshFirewallRule"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AeroMESH Cluster Pairing (TCP 50053)"""; Check: IsAdminInstallMode; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAeroMeshPairingFirewallRule"
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AeroMESH Peer Model Sync (TCP 50054)"""; Check: IsAdminInstallMode; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAeroMeshSyncFirewallRule"
 
 [Code]
 var

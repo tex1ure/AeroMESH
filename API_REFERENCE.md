@@ -251,6 +251,26 @@ Or with explicit host and PIN:
 }
 ```
 
+### 7.1 Automatic Multi-Node Model Check & Peer Model Sync (`:50054`)
+
+Every AeroMESH gateway runs an authenticated TCP sync daemon (`aeromesh-sync-v1`, default port `50054`) using mutual challenge-response HMAC-SHA256 derived from `AEROMESH_WORKER_SECRET` to verify exact `.gguf` header + content fingerprints across nodes and stream missing models over LAN or Tailscale (resumable `.aeromesh-sync.part` chunks). Runtime inference remains strictly `0.0 MB` weight transfer.
+
+| Method | Route | Description |
+|:---|:---|:---|
+| `POST` | `/api/cluster/models/check` | Queries paired peers (or explicit `peers` CSV/list and optional `model`) on TCP `:50054` and returns a per-model compatibility matrix (`ready`, `needs_sync`, `mismatch`, `missing_locally`, `peers_offline`). |
+| `POST` | `/api/cluster/models/sync` | Starts a background resumable `push` (local -> peer) or `pull` (peer -> local) GGUF transfer (`direction`, `model`, `peer_id` or `peer_host`, optional `sync_port`). |
+| `GET` | `/api/cluster/models/sync/jobs` | Lists active and recent peer model sync jobs with `percent`, `transferred_label`, `speed_mbps`, `eta_seconds`, and `resumed_from_bytes`. |
+| `POST` | `/api/cluster/models/sync/cancel` | Cancels an active sync transfer (`{"id": "sync-..."}`), preserving partial `.aeromesh-sync.part` progress for later resume. |
+
+### 7.2 Hardware-Aware VRAM Fit Meter & Auto Layer-Split Planner
+
+Computes per-node VRAM and System RAM budgets across heterogeneous GPUs (e.g., an 8 GB RTX 4060 coordinator paired with a 6 GB RTX 3060 worker and 16 GB system RAM) using exact binary GGUF v2/v3 KV headers for local files and architecture profiles for pre-download catalog/Hugging Face models.
+
+| Method | Route | Description |
+|:---|:---|:---|
+| `GET` | `/api/cluster/hardware` | Returns detected local GPU VRAM + System RAM alongside paired worker VRAM/RAM totals (`nodes`, `total_vram_mb`, `total_ram_mb`). |
+| `POST` | `/api/cluster/fit/plan` | Computes a proportional layer-split plan and fit verdict (`fits_vram`, `tight_vram`, `ram_offload`, `wont_fit`), per-stage VRAM/RAM usage, exact `--layers <start>..<end>` flags, and quantization/context recommendations. Accepts `model`, optional `context_length` (512..131072), `size_bytes` / `size_hint`, `mode` (`cluster` \| `local`), `peers`, or `custom_nodes` (up to 8 simulated nodes). |
+
 ---
 
 ## 8. Model Hub (Discovery, Downloads & Custom Folders)
@@ -277,13 +297,14 @@ Hosted by the FastAPI gateway (`:7860`) so users can search, download, upload, o
 
 Hosted by the FastAPI gateway (`:7860`) for starting, stopping, and inspecting local coordinator or worker processes from the UI or scripts.
 
-- **`GET /api/node/state`** — Returns local role, detected GPU, Wi-Fi/Tailscale IPs, cluster fingerprint, installed models, and recent node logs.
-- **`POST /api/node/start`** — Spawns a local coordinator or worker process:
+- **`GET /api/node/state`** — Returns local role, detected GPU, structured `hardware` VRAM/RAM metrics, Wi-Fi/Tailscale IPs, cluster fingerprint, installed models, and recent node logs.
+- **`POST /api/node/start`** — Spawns a local coordinator or worker process (optionally passing a strictly validated `--layers <start>..<end>` range from the Auto Layer-Split Planner):
   ```json
   {
-    "role": "worker",
-    "model": "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
-    "port": 50052
+    "role": "coordinator",
+    "model": "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+    "peers": "100.64.0.29:50052",
+    "layers": "0..27"
   }
   ```
 - **`POST /api/node/stop`** — Gracefully stops the managed child process.

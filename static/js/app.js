@@ -2031,6 +2031,25 @@ window.getApiUrl = window.getApiUrl || function(path) {
           </div>
         </div>
 
+        <div id="rm-preflight-bar" class="rm-preflight-bar" style="display:none;">
+          <div id="rm-preflight-text" style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;"></div>
+          <div id="rm-preflight-actions" style="display:flex;align-items:center;gap:8px;flex-shrink:0;"></div>
+        </div>
+
+        <div id="rm-vram-fit-bar" class="rm-vram-fit-bar" style="display:none;">
+          <div class="rm-vram-fit-top">
+            <div id="rm-vram-fit-left" class="rm-vram-fit-left"></div>
+            <div class="rm-vram-fit-right">
+              <label id="rm-auto-layers-wrap" class="rm-auto-layers-label" style="display:none;" title="Pass hardware-calculated --layers range when starting Coordinator or Worker">
+                <input type="checkbox" id="rm-auto-layers-chk" checked>
+                <span>Auto-Split <code id="rm-auto-layers-code"></code></span>
+              </label>
+              <button id="rm-open-planner-btn" class="mh-btn mh-btn-ghost mh-btn-sm" type="button">Full Planner</button>
+            </div>
+          </div>
+          <div id="rm-split-mini" class="rm-split-mini"></div>
+        </div>
+
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;">
           <div class="suggestion-card" id="rm-card-auto" style="cursor:pointer;border:1px solid rgba(26,136,255,0.45);background:rgba(26,136,255,0.08);">
             <div class="suggestion-tag" style="color:#1a88ff;display:inline-flex;align-items:center;gap:6px;"><i data-lucide="server" style="width: 13px; height: 13px;"></i><span>ROLE 1 • COORDINATOR + UI</span></div>
@@ -2082,6 +2101,275 @@ window.getApiUrl = window.getApiUrl || function(path) {
     document.getElementById('rm-card-auto').onclick = () => startNodeRole('coordinator');
     document.getElementById('rm-card-worker').onclick = () => startNodeRole('worker');
     document.getElementById('rm-card-all').onclick = () => startNodeRole('all');
+
+    const openPlannerBtn = document.getElementById('rm-open-planner-btn');
+    if (openPlannerBtn) {
+      openPlannerBtn.onclick = () => {
+        closeRoleModal();
+        if (typeof window.openModelHub === 'function') window.openModelHub('discover');
+      };
+    }
+
+    const selEl = document.getElementById('rm-model-select');
+    const peersEl = document.getElementById('rm-custom-peers');
+    if (selEl) selEl.addEventListener('change', () => schedulePreflightCheck());
+    if (peersEl) peersEl.addEventListener('input', () => schedulePreflightCheck());
+  }
+
+  let preflightTimer = null;
+  let preflightSyncTimer = null;
+  let lastRoleFitPlan = null;
+
+  function schedulePreflightCheck() {
+    if (preflightTimer) clearTimeout(preflightTimer);
+    preflightTimer = setTimeout(() => {
+      runRolePreflightCheck();
+      runRoleVramFitPlan();
+    }, 260);
+  }
+
+  async function runRoleVramFitPlan() {
+    const bar = document.getElementById('rm-vram-fit-bar');
+    const leftEl = document.getElementById('rm-vram-fit-left');
+    const miniEl = document.getElementById('rm-split-mini');
+    const autoWrap = document.getElementById('rm-auto-layers-wrap');
+    const autoCode = document.getElementById('rm-auto-layers-code');
+    const sel = document.getElementById('rm-model-select');
+    const customInput = document.getElementById('rm-custom-peers');
+    if (!bar || !leftEl || !miniEl || !sel) return;
+
+    const model = (sel.value || '').trim();
+    if (!model) {
+      bar.style.display = 'none';
+      lastRoleFitPlan = null;
+      return;
+    }
+
+    const peersCsv = (customInput && customInput.value) ? customInput.value.trim() : '';
+    const esc = window.escapeHtml || ((v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
+    const colors = ['#2563eb', '#0d9488', '#7c3aed', '#d97706', '#059669', '#db2777'];
+
+    try {
+      const resp = await fetch(window.getApiUrl('/api/cluster/fit/plan'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          peers: peersCsv,
+          mode: peersCsv ? 'cluster' : 'local',
+          context_length: 4096,
+        }),
+      });
+      if (!resp.ok) {
+        bar.style.display = 'none';
+        lastRoleFitPlan = null;
+        return;
+      }
+      const plan = await resp.json();
+      lastRoleFitPlan = plan;
+      const cls = plan.fit_status === 'fits_vram'
+        ? 'is-ok'
+        : plan.fit_status === 'tight_vram'
+          ? 'is-tight'
+          : plan.fit_status === 'ram_offload'
+            ? 'is-spill'
+            : 'is-oom';
+
+      const totals = plan.cluster_totals || {};
+      const stages = Array.isArray(plan.stages) ? plan.stages : [];
+      bar.style.display = 'flex';
+      bar.className = `rm-vram-fit-bar ${cls}`;
+      leftEl.innerHTML = `
+        <span class="mh-fit-badge ${cls}">${esc(plan.fit_label || '')}</span>
+        <span><strong>${esc(totals.model_total_label || '')}</strong> needed · <strong>${esc(totals.vram_total_label || '')}</strong> VRAM pool · ${esc(plan.speed_tier || '')}</span>
+      `;
+
+      if (autoWrap && autoCode) {
+        if (stages.length > 1 && plan.coordinator_layers) {
+          autoWrap.style.display = 'inline-flex';
+          autoCode.textContent = `--layers ${plan.coordinator_layers}`;
+        } else {
+          autoWrap.style.display = 'none';
+        }
+      }
+
+      miniEl.innerHTML = stages.map((st, idx) => {
+        const pct = Math.max(8, Math.min(100, Number(st.share_percent || 0)));
+        const bg = colors[idx % colors.length];
+        const ramTag = Number(st.ram_layers || 0) > 0 ? ` +${st.ram_layers}L RAM` : '';
+        const txt = `${st.node_name} L${st.layer_range || '-'} (${Math.round(Number(st.vram_percent || 0))}% VRAM${ramTag})`;
+        return `<div class="rm-split-mini-seg" style="width:${pct}%;background-color:${bg};" title="${esc(txt)}">${esc(txt)}</div>`;
+      }).join('');
+    } catch (_) {
+      bar.style.display = 'none';
+      lastRoleFitPlan = null;
+    }
+  }
+
+  async function runRolePreflightCheck() {
+    const bar = document.getElementById('rm-preflight-bar');
+    const textEl = document.getElementById('rm-preflight-text');
+    const actEl = document.getElementById('rm-preflight-actions');
+    const sel = document.getElementById('rm-model-select');
+    const customInput = document.getElementById('rm-custom-peers');
+    if (!bar || !textEl || !actEl || !sel) return;
+
+    const model = (sel.value || '').trim();
+    const peersCsv = (customInput && customInput.value) ? customInput.value.trim() : '';
+    if (!model || !peersCsv) {
+      bar.style.display = 'none';
+      return;
+    }
+
+    const esc = window.escapeHtml || ((v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
+    bar.style.display = 'flex';
+    bar.className = 'rm-preflight-bar';
+    textEl.textContent = `Checking GGUF hash of ${model} on worker peer(s)...`;
+    actEl.innerHTML = '';
+
+    try {
+      const resp = await fetch(window.getApiUrl('/api/cluster/models/check'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, peers: peersCsv }),
+      });
+      if (!resp.ok) {
+        bar.style.display = 'none';
+        return;
+      }
+      const report = await resp.json();
+      const row = report.selected;
+      if (!row || !row.total_peers) {
+        bar.style.display = 'none';
+        return;
+      }
+
+      const nodes = Array.isArray(row.nodes) ? row.nodes : [];
+      const needSync = nodes.filter((n) => n.state === 'missing_on_peer' || n.state === 'mismatch');
+      const authBad = nodes.filter((n) => n.state === 'auth_mismatch');
+      const offline = nodes.filter((n) => n.state === 'offline');
+
+      if (row.overall_status === 'ready') {
+        bar.className = 'rm-preflight-bar is-ready';
+        textEl.innerHTML = `<strong>✔ Pre-Flight Verified:</strong> <span>${esc(model)} matches exact GGUF hash (${esc(row.fingerprint_short || '')}) on ${row.ready_peers}/${row.online_peers} worker(s).</span>`;
+        actEl.innerHTML = '';
+      } else if (needSync.length > 0) {
+        const names = needSync.map((n) => n.node_name || n.host).join(', ');
+        const isMismatch = needSync.some((n) => n.state === 'mismatch');
+        bar.className = isMismatch ? 'rm-preflight-bar is-err' : 'rm-preflight-bar is-warn';
+        textEl.innerHTML = isMismatch
+          ? `<strong>⚠ GGUF Hash Mismatch:</strong> <span>${esc(names)} has a different copy of ${esc(model)}.</span>`
+          : `<strong>⚠ Model Missing on Worker:</strong> <span>${esc(names)} does not have ${esc(model)} yet.</span>`;
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.id = 'rm-preflight-sync-btn';
+        btn.className = 'mh-btn mh-btn-primary mh-btn-sm';
+        btn.textContent = isMismatch ? 'Overwrite & Sync to Worker' : 'Sync Model to Worker';
+        btn.onclick = async () => {
+          btn.disabled = true;
+          btn.textContent = 'Starting Sync...';
+          let failedMsg = '';
+          for (const t of needSync) {
+            try {
+              const syncResp = await fetch(window.getApiUrl('/api/cluster/models/sync'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  direction: 'push',
+                  model,
+                  peer_id: t.peer_id || '',
+                  peer_host: t.host || '',
+                  sync_port: Number(t.sync_port || 50054),
+                  peer_name: t.node_name || t.host || '',
+                }),
+              });
+              if (!syncResp.ok) {
+                const errJson = await syncResp.json().catch(() => ({}));
+                failedMsg = errJson.detail || `Sync request failed (HTTP ${syncResp.status})`;
+              }
+            } catch (syncErr) {
+              failedMsg = syncErr.message || 'Network error starting peer sync.';
+            }
+          }
+          if (failedMsg) {
+            bar.className = 'rm-preflight-bar is-err';
+            textEl.innerHTML = `<strong>⚠ Sync Failed:</strong> <span>${esc(failedMsg)}</span>`;
+            btn.disabled = false;
+            btn.textContent = 'Retry Sync';
+            return;
+          }
+          pollPreflightSyncProgress(model);
+        };
+        actEl.innerHTML = '';
+        actEl.appendChild(btn);
+      } else if (authBad.length > 0) {
+        bar.className = 'rm-preflight-bar is-err';
+        textEl.innerHTML = `<strong>⚠ Cluster Key Mismatch:</strong> <span>Pair ${esc(authBad[0].node_name || authBad[0].host)} in the Cluster tab to sync secrets first.</span>`;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'mh-btn mh-btn-ghost mh-btn-sm';
+        btn.textContent = 'Open Cluster Pairing';
+        btn.onclick = () => {
+          closeRoleModal();
+          if (typeof window.openClusterPairing === 'function') window.openClusterPairing();
+        };
+        actEl.innerHTML = '';
+        actEl.appendChild(btn);
+      } else if (offline.length > 0) {
+        bar.className = 'rm-preflight-bar';
+        textEl.innerHTML = `<span>Peer model check skipped (${esc(offline[0].host)}:50054 unreachable — ensure AeroMESH is open on the worker PC).</span>`;
+        actEl.innerHTML = '';
+      }
+    } catch (_) {
+      bar.style.display = 'none';
+    }
+  }
+
+  function pollPreflightSyncProgress(model) {
+    if (preflightSyncTimer) clearInterval(preflightSyncTimer);
+    const esc = window.escapeHtml || ((v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
+    const tick = async () => {
+      const bar = document.getElementById('rm-preflight-bar');
+      const textEl = document.getElementById('rm-preflight-text');
+      const actEl = document.getElementById('rm-preflight-actions');
+      if (!bar || !textEl) return;
+      try {
+        const resp = await fetch(window.getApiUrl('/api/cluster/models/sync/jobs'));
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const jobs = (data.jobs || []).filter((j) => j.filename === model);
+        const active = jobs.find((j) => j.status === 'queued' || j.status === 'syncing');
+        if (active) {
+          bar.className = 'rm-preflight-bar';
+          const pct = Number(active.percent || 0).toFixed(1);
+          const spd = active.speed_mbps > 0 ? ` · ${active.speed_mbps} MB/s` : '';
+          textEl.textContent = `⏳ Syncing ${model} to ${active.peer_name || active.peer_host}: ${pct}% (${active.transferred_label || ''} / ${active.total_label || ''}${spd})`;
+          if (actEl) actEl.innerHTML = '';
+          return;
+        }
+        clearInterval(preflightSyncTimer);
+        preflightSyncTimer = null;
+        const latest = jobs[0];
+        if (latest && latest.status === 'error') {
+          bar.className = 'rm-preflight-bar is-err';
+          textEl.innerHTML = `<strong>⚠ Sync Error:</strong> <span>${esc(latest.error || 'Transfer failed.')}</span>`;
+          if (actEl) {
+            const retryBtn = document.createElement('button');
+            retryBtn.type = 'button';
+            retryBtn.className = 'mh-btn mh-btn-ghost mh-btn-sm';
+            retryBtn.textContent = 'Re-Check';
+            retryBtn.onclick = () => runRolePreflightCheck();
+            actEl.innerHTML = '';
+            actEl.appendChild(retryBtn);
+          }
+          return;
+        }
+        await runRolePreflightCheck();
+      } catch (_) {}
+    };
+    tick();
+    preflightSyncTimer = setInterval(tick, 1000);
   }
 
   async function scanPeersIntoModal() {
@@ -2103,6 +2391,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
         if (customInput && !customInput.value.trim()) {
           customInput.value = peers.map(p => p.endpoint).join(',');
         }
+        schedulePreflightCheck();
       }
     } catch (_) {
       if (listEl) listEl.textContent = 'Local Mode Ready';
@@ -2186,17 +2475,27 @@ window.getApiUrl = window.getApiUrl || function(path) {
   async function startNodeRole(role) {
     const sel = document.getElementById('rm-model-select');
     const customInput = document.getElementById('rm-custom-peers');
+    const autoChk = document.getElementById('rm-auto-layers-chk');
     const model = (sel && sel.value) ? sel.value : 'test.gguf';
     const peers = (customInput && customInput.value) ? customInput.value.trim() : '';
+    let layers = '';
+    if (autoChk && autoChk.checked && lastRoleFitPlan && Array.isArray(lastRoleFitPlan.stages) && lastRoleFitPlan.stages.length > 1) {
+      if (role === 'coordinator' && lastRoleFitPlan.coordinator_layers) {
+        layers = lastRoleFitPlan.coordinator_layers;
+      } else if (role === 'worker' && Array.isArray(lastRoleFitPlan.worker_layers) && lastRoleFitPlan.worker_layers.length > 0) {
+        layers = lastRoleFitPlan.worker_layers[0].layer_range || '';
+      }
+    }
     const title = document.getElementById('rm-console-title');
-    if (title) title.textContent = `⏳ Starting ${role.toUpperCase()} (${model})... Watch live logs below:`;
+    const layerNote = layers ? ` [--layers ${layers}]` : '';
+    if (title) title.textContent = `⏳ Starting ${role.toUpperCase()} (${model}${layerNote})... Watch live logs below:`;
 
     try {
       startLogPolling();
       await fetch(window.getApiUrl('/api/node/start'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role, model, peers }),
+        body: JSON.stringify({ role, model, peers, layers }),
       });
 
       await refreshNodeState();
@@ -2230,7 +2529,8 @@ window.getApiUrl = window.getApiUrl || function(path) {
     if (modal) modal.style.display = 'flex';
     // Check state and peers ONCE on open (only poll continuously if a node is actively running!)
     const st = await refreshNodeState();
-    scanPeersIntoModal();
+    await scanPeersIntoModal();
+    schedulePreflightCheck();
     if (st && st.running) {
       startLogPolling();
     } else {
@@ -2242,6 +2542,10 @@ window.getApiUrl = window.getApiUrl || function(path) {
     const modal = document.getElementById('aeromesh-role-modal');
     if (modal) modal.style.display = 'none';
     stopLogPolling();
+    if (preflightSyncTimer) {
+      clearInterval(preflightSyncTimer);
+      preflightSyncTimer = null;
+    }
   }
 
   window.openRoleModalWithPeer = async function (endpoint) {
@@ -2257,6 +2561,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
       }
       customInput.value = existing.join(',');
       customInput.focus();
+      schedulePreflightCheck();
     }
   };
 

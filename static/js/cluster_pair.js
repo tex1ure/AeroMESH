@@ -11,7 +11,11 @@
   const state = {
     status: null,
     nearbyHosts: [],
+    modelReport: null,
+    syncJobs: [],
+    checkingModels: false,
     pollTimer: null,
+    syncPollTimer: null,
     countdownTimer: null,
     localExpiresIn: 0,
     confirmRotate: false,
@@ -73,6 +77,12 @@
 
     dom.peersCount = document.getElementById('cp-peers-count');
     dom.peersList = document.getElementById('cp-peers-list');
+
+    dom.syncJobsPanel = document.getElementById('cp-sync-jobs-panel');
+    dom.syncJobsList = document.getElementById('cp-sync-jobs-list');
+    dom.checkModelsBtn = document.getElementById('cp-check-models-btn');
+    dom.modelCheckSummary = document.getElementById('cp-model-check-summary');
+    dom.modelMatrixList = document.getElementById('cp-model-matrix-list');
   }
 
   let feedbackTimer = null;
@@ -224,14 +234,32 @@
       const shared = Array.isArray(p.shared_models)
         ? p.shared_models
         : peerModels.filter((m) => localModels.includes(m));
-      const modelNote = shared.length > 0
+      const peerCheck = (state.modelReport && Array.isArray(state.modelReport.peers))
+        ? state.modelReport.peers.find((pc) => pc.id === p.id || pc.worker_endpoint === p.worker_endpoint)
+        : null;
+      let modelNote = shared.length > 0
         ? `${shared.length} matching GGUF ${shared.length === 1 ? 'model' : 'models'} ready`
         : (peerModels.length > 0
           ? `0 matching models (peer has ${peerModels.length})`
           : 'No GGUF models reported yet');
+      if (peerCheck && peerCheck.status === 'online' && Array.isArray(state.modelReport.models)) {
+        const verifiedForPeer = state.modelReport.models.filter((m) =>
+          Array.isArray(m.nodes) && m.nodes.some((n) => (n.peer_id === peerCheck.id || n.host === peerCheck.host) && n.state === 'verified')
+        ).length;
+        const mismatchForPeer = state.modelReport.models.filter((m) =>
+          Array.isArray(m.nodes) && m.nodes.some((n) => (n.peer_id === peerCheck.id || n.host === peerCheck.host) && n.state === 'mismatch')
+        ).length;
+        modelNote = `${verifiedForPeer} hash-verified ${verifiedForPeer === 1 ? 'model' : 'models'}${mismatchForPeer > 0 ? ` (${mismatchForPeer} mismatch)` : ''}`;
+      }
       const syncClass = synced ? 'cp-sync-ok' : 'cp-sync-warn';
       const syncText = synced ? 'Secret Synced' : 'Key Changed — Re-Pair';
       const isConfirming = state.confirmUnpairId === p.id;
+
+      const syncStatusNote = peerCheck
+        ? (peerCheck.status === 'online'
+          ? `Sync :${peerCheck.sync_port || 50054} Online${peerCheck.rtt_ms != null ? ` (${peerCheck.rtt_ms}ms)` : ''}${peerCheck.disk_free_label ? ` · ${peerCheck.disk_free_label} free` : ''}`
+          : (peerCheck.status === 'auth_mismatch' ? 'Cluster Key Mismatch' : 'Sync Offline'))
+        : (p.disk_free_label ? `${p.disk_free_label} free` : '');
 
       return `
         <div class="mh-row">
@@ -243,12 +271,222 @@
               <span>${esc(p.gpu || 'GPU / CPU')}</span>
               <span>&middot;</span>
               <span>${esc(modelNote)}</span>
+              ${syncStatusNote ? `<span>&middot;</span><span>${esc(syncStatusNote)}</span>` : ''}
             </div>
             <div class="mh-row-path">Worker: ${esc(p.worker_endpoint || '')} &middot; Key: ${esc(p.cluster_fingerprint || 'UNSET')}</div>
           </div>
           <div class="mh-row-actions">
             <button class="mh-btn mh-btn-primary mh-btn-sm cp-use-worker-btn" type="button" data-endpoint="${esc(p.worker_endpoint || '')}">Use as Worker</button>
             <button class="mh-btn mh-btn-danger-ghost mh-btn-sm cp-unpair-btn" type="button" data-peer-id="${esc(p.id || '')}" data-peer-name="${esc(p.node_name || '')}">${isConfirming ? 'Confirm Unpair?' : 'Unpair'}</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function formatEta(secs) {
+    if (secs == null || !Number.isFinite(Number(secs))) return '';
+    const s = Math.max(0, Math.floor(Number(secs)));
+    if (s < 60) return `${s}s left`;
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}m ${String(r).padStart(2, '0')}s left`;
+  }
+
+  function renderSyncJobs() {
+    if (!dom.syncJobsPanel || !dom.syncJobsList) return;
+    const jobs = Array.isArray(state.syncJobs) ? state.syncJobs : [];
+    const visible = jobs.filter((j) => j.status === 'queued' || j.status === 'syncing' || j.status === 'error' || (j.status === 'completed' && (Date.now() / 1000 - (j.finished_at || 0)) < 45));
+    if (visible.length === 0) {
+      dom.syncJobsPanel.style.display = 'none';
+      dom.syncJobsList.innerHTML = '';
+      return;
+    }
+
+    dom.syncJobsPanel.style.display = 'flex';
+    dom.syncJobsList.innerHTML = visible.map((j) => {
+      const dirLabel = j.direction === 'pull'
+        ? `Pull from ${j.peer_name || j.peer_host}`
+        : `Push to ${j.peer_name || j.peer_host}`;
+      const pct = Math.max(0, Math.min(100, Number(j.percent || 0)));
+      const isDone = j.status === 'completed';
+      const isErr = j.status === 'error' || j.status === 'cancelled';
+      const fillClass = isDone ? 'is-done' : (isErr ? 'is-err' : '');
+      const metaParts = [dirLabel];
+      if (j.status === 'syncing') {
+        metaParts.push(`${pct.toFixed(1)}%`);
+        if (j.transferred_label && j.total_label) metaParts.push(`${j.transferred_label} / ${j.total_label}`);
+        if (j.speed_mbps > 0) metaParts.push(`${j.speed_mbps} MB/s`);
+        const eta = formatEta(j.eta_seconds);
+        if (eta) metaParts.push(eta);
+        if (j.resumed_from_bytes > 0) metaParts.push('Resumed');
+      } else if (isDone) {
+        metaParts.push(`Verified & Synced (${j.total_label || ''})`);
+      } else if (j.status === 'queued') {
+        metaParts.push('Connecting...');
+      } else {
+        metaParts.push(j.error || j.status);
+      }
+      const canCancel = j.status === 'queued' || j.status === 'syncing';
+      return `
+        <div class="mh-dl-row">
+          <div class="mh-dl-top">
+            <div class="mh-dl-name">${esc(j.filename)}</div>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+              <span class="mh-dl-meta">${esc(metaParts.join(' · '))}</span>
+              ${canCancel ? `<button type="button" class="mh-btn mh-btn-danger-ghost mh-btn-sm cp-cancel-sync-btn" data-job-id="${esc(j.id)}">Cancel</button>` : ''}
+            </div>
+          </div>
+          <div class="mh-progress-track">
+            <div class="mh-progress-fill ${fillClass}" style="width:${pct}%"></div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function renderModelMatrix() {
+    if (!dom.modelMatrixList) return;
+    const report = state.modelReport;
+    if (!report) {
+      return;
+    }
+
+    const peers = Array.isArray(report.peers) ? report.peers : [];
+    const models = Array.isArray(report.models) ? report.models : [];
+    const onlinePeers = peers.filter((p) => p.status === 'online').length;
+    const readyModels = models.filter((m) => m.overall_status === 'ready').length;
+
+    if (dom.modelCheckSummary) {
+      if (peers.length === 0) {
+        dom.modelCheckSummary.textContent = `${report.local_count || 0} local GGUF model(s) indexed. Pair a second PC to enable automatic cross-node verification and LAN/Tailscale sync.`;
+      } else {
+        dom.modelCheckSummary.textContent = `${onlinePeers}/${peers.length} paired node(s) reachable on :50054 · ${readyModels}/${models.length} model(s) hash-verified across cluster.`;
+      }
+    }
+
+    if (models.length === 0) {
+      dom.modelMatrixList.innerHTML = `
+        <div class="mh-empty-state">
+          No <code>.gguf</code> models found locally or on paired peers. Download or add a model in the <strong>Models</strong> tab first.
+        </div>
+      `;
+      return;
+    }
+
+    const statusBadge = (overall, readyCount, onlineCount) => {
+      if (overall === 'ready') return `<span class="cp-status-tag is-ready">Verified Match (${readyCount}/${onlineCount})</span>`;
+      if (overall === 'needs_sync') return `<span class="cp-status-tag is-warn">Missing on Peer</span>`;
+      if (overall === 'missing_locally') return `<span class="cp-status-tag is-info">Available on Peer</span>`;
+      if (overall === 'mismatch') return `<span class="cp-status-tag is-err">GGUF Hash Mismatch</span>`;
+      if (overall === 'peers_offline') return `<span class="cp-status-tag is-muted">Peers Offline</span>`;
+      return `<span class="cp-status-tag is-muted">Local Only</span>`;
+    };
+
+    dom.modelMatrixList.innerHTML = models.map((m) => {
+      const nodes = Array.isArray(m.nodes) ? m.nodes : [];
+      const missingOrMismatchNodes = nodes.filter((n) => n.state === 'missing_on_peer' || n.state === 'mismatch');
+      const pullSources = Array.isArray(m.pull_sources) ? m.pull_sources : [];
+
+      let primaryActions = '';
+      if (m.local_present && missingOrMismatchNodes.length > 1) {
+        primaryActions += `
+          <button type="button" class="mh-btn mh-btn-primary mh-btn-sm cp-push-all-btn" data-model="${esc(m.name)}">
+            Push to All Missing (${missingOrMismatchNodes.length})
+          </button>
+        `;
+      } else if (m.local_present && missingOrMismatchNodes.length === 1) {
+        const target = missingOrMismatchNodes[0];
+        const label = target.state === 'mismatch'
+          ? `Overwrite & Sync to ${target.node_name}`
+          : `Push to ${target.node_name}`;
+        primaryActions += `
+          <button type="button" class="mh-btn mh-btn-primary mh-btn-sm cp-sync-action-btn"
+            data-direction="push" data-model="${esc(m.name)}"
+            data-peer-id="${esc(target.peer_id)}" data-peer-host="${esc(target.host)}"
+            data-sync-port="${esc(target.sync_port || 50054)}" data-peer-name="${esc(target.node_name)}">
+            ${esc(label)}
+          </button>
+        `;
+      } else if (!m.local_present && pullSources.length > 0) {
+        const src = pullSources[0];
+        primaryActions += `
+          <button type="button" class="mh-btn mh-btn-primary mh-btn-sm cp-sync-action-btn"
+            data-direction="pull" data-model="${esc(m.name)}"
+            data-peer-id="${esc(src.peer_id)}" data-peer-host="${esc(src.host)}"
+            data-sync-port="${esc(src.sync_port || 50054)}" data-peer-name="${esc(src.node_name)}">
+            Pull from ${esc(src.node_name)}
+          </button>
+        `;
+      }
+
+      const localChip = `
+        <div class="cp-node-chip ${m.local_present ? 'is-verified' : 'is-missing'}">
+          <span class="cp-node-chip-name">This PC</span>
+          <span class="cp-node-chip-state">${m.local_present ? 'Installed' : 'Missing'}</span>
+        </div>
+      `;
+
+      const showInlineChipBtn = nodes.length > 1;
+      const peerChips = nodes.map((n) => {
+        let cls = '';
+        let stLabel = n.state;
+        let inlineBtn = '';
+        if (n.state === 'verified') {
+          cls = 'is-verified';
+          stLabel = 'Hash Verified';
+        } else if (n.state === 'missing_on_peer') {
+          cls = 'is-missing';
+          stLabel = 'Missing';
+          if (showInlineChipBtn) {
+            inlineBtn = `<button type="button" class="cp-node-chip-btn cp-sync-action-btn" data-direction="push" data-model="${esc(m.name)}" data-peer-id="${esc(n.peer_id)}" data-peer-host="${esc(n.host)}" data-sync-port="${esc(n.sync_port || 50054)}" data-peer-name="${esc(n.node_name)}">Push</button>`;
+          }
+        } else if (n.state === 'mismatch') {
+          cls = 'is-mismatch';
+          stLabel = `Hash Mismatch (${n.fingerprint_short || '?'})`;
+          if (showInlineChipBtn) {
+            inlineBtn = `<button type="button" class="cp-node-chip-btn cp-sync-action-btn" data-direction="push" data-model="${esc(m.name)}" data-peer-id="${esc(n.peer_id)}" data-peer-host="${esc(n.host)}" data-sync-port="${esc(n.sync_port || 50054)}" data-peer-name="${esc(n.node_name)}">Sync Over</button>`;
+          }
+        } else if (n.state === 'available_on_peer') {
+          cls = 'is-available';
+          stLabel = `Has Copy (${n.size_label || ''})`;
+          if (showInlineChipBtn) {
+            inlineBtn = `<button type="button" class="cp-node-chip-btn cp-sync-action-btn" data-direction="pull" data-model="${esc(m.name)}" data-peer-id="${esc(n.peer_id)}" data-peer-host="${esc(n.host)}" data-sync-port="${esc(n.sync_port || 50054)}" data-peer-name="${esc(n.node_name)}">Pull</button>`;
+          }
+        } else if (n.state === 'auth_mismatch') {
+          cls = 'is-mismatch';
+          stLabel = 'Key Mismatch';
+        } else {
+          stLabel = 'Offline';
+        }
+        return `
+          <div class="cp-node-chip ${cls}" title="${esc(n.detail || '')}">
+            <span class="cp-node-chip-name">${esc(n.node_name)}</span>
+            <span class="cp-node-chip-state">${esc(stLabel)}</span>
+            ${inlineBtn}
+          </div>
+        `;
+      }).join('');
+
+      return `
+        <div class="cp-model-row">
+          <div class="cp-model-row-top">
+            <div class="cp-model-row-info">
+              <div class="cp-model-row-title-line">
+                <span class="mh-row-title">${esc(m.name)}</span>
+                ${statusBadge(m.overall_status, m.ready_peers, m.online_peers)}
+              </div>
+              <div class="mh-row-meta">
+                <span>${esc(m.quant || 'GGUF')}</span>
+                ${m.size_label ? `<span>&middot;</span><span>${esc(m.size_label)}</span>` : ''}
+                ${m.fingerprint_short ? `<span>&middot;</span><span>Hash <code>${esc(m.fingerprint_short)}</code></span>` : ''}
+              </div>
+            </div>
+            <div class="cp-model-row-actions">${primaryActions}</div>
+          </div>
+          <div class="cp-node-grid">
+            ${localChip}
+            ${peerChips}
           </div>
         </div>
       `;
@@ -482,6 +720,110 @@
   }
 
   // ---------------------------------------------------------------------------
+  // MULTI-NODE MODEL CHECK & PEER MODEL SYNC
+  // ---------------------------------------------------------------------------
+  async function runClusterModelCheck(silent) {
+    if (state.checkingModels) return null;
+    state.checkingModels = true;
+    if (dom.checkModelsBtn) {
+      dom.checkModelsBtn.disabled = true;
+      dom.checkModelsBtn.textContent = 'Checking Nodes...';
+    }
+    try {
+      const resp = await fetch(getApiUrl('/api/cluster/models/check'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      state.modelReport = data;
+      renderModelMatrix();
+      if (state.status) {
+        renderPairedPeers(
+          Array.isArray(state.status.paired_peers) ? state.status.paired_peers : [],
+          Array.isArray(state.status.local_models) ? state.status.local_models : []
+        );
+      }
+      return data;
+    } catch (err) {
+      if (!silent) showFeedback(`Multi-node model check failed: ${err.message || err}`, 'error');
+      return null;
+    } finally {
+      state.checkingModels = false;
+      if (dom.checkModelsBtn) {
+        dom.checkModelsBtn.disabled = false;
+        dom.checkModelsBtn.innerHTML = '<i data-lucide="shield-check" style="width: 14px; height: 14px;"></i><span>Check All Nodes</span>';
+        if (window.lucide) lucide.createIcons();
+      }
+    }
+  }
+
+  async function refreshSyncJobs() {
+    try {
+      const prevActive = state.syncJobs.some((j) => j.status === 'queued' || j.status === 'syncing');
+      const resp = await fetch(getApiUrl('/api/cluster/models/sync/jobs'));
+      if (!resp.ok) return;
+      const data = await resp.json();
+      state.syncJobs = Array.isArray(data.jobs) ? data.jobs : [];
+      renderSyncJobs();
+
+      const nowActive = state.syncJobs.some((j) => j.status === 'queued' || j.status === 'syncing');
+      if (nowActive && !state.syncPollTimer) {
+        state.syncPollTimer = setInterval(() => { refreshSyncJobs(); }, 1100);
+      } else if (!nowActive && state.syncPollTimer) {
+        clearInterval(state.syncPollTimer);
+        state.syncPollTimer = null;
+      }
+
+      if (prevActive && !nowActive) {
+        await runClusterModelCheck(true);
+        await refreshStatus(true);
+        if (typeof window.fetchModels === 'function') window.fetchModels();
+        if (typeof window.refreshModelHub === 'function') window.refreshModelHub();
+      }
+    } catch (_) {}
+  }
+
+  async function triggerPeerModelSync(opts) {
+    try {
+      const resp = await fetch(getApiUrl('/api/cluster/models/sync'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          direction: opts.direction,
+          model: opts.model,
+          peer_id: opts.peerId || '',
+          peer_host: opts.peerHost || '',
+          sync_port: Number(opts.syncPort || 50054),
+          peer_name: opts.peerName || '',
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      const verb = opts.direction === 'pull' ? 'Pulling' : 'Pushing';
+      showFeedback(`${verb} ${opts.model} (${opts.peerName || opts.peerHost}) over encrypted LAN/Tailscale sync...`, 'info');
+      await refreshSyncJobs();
+    } catch (err) {
+      showFeedback(`Model sync could not start: ${err.message || err}`, 'error');
+    }
+  }
+
+  async function cancelPeerSyncJob(jobId) {
+    try {
+      const resp = await fetch(getApiUrl('/api/cluster/models/sync/cancel'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: jobId }),
+      });
+      if (resp.ok) {
+        showFeedback('Peer model transfer cancelled. Partial progress is kept for resume.', 'info');
+        await refreshSyncJobs();
+      }
+    } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------------------
   // EVENT BINDINGS
   // ---------------------------------------------------------------------------
   function bindEvents() {
@@ -575,16 +917,68 @@
         }
       });
     }
+    if (dom.checkModelsBtn) {
+      dom.checkModelsBtn.addEventListener('click', () => runClusterModelCheck(false));
+    }
+
+    if (dom.syncJobsList) {
+      dom.syncJobsList.addEventListener('click', (e) => {
+        const cancelBtn = e.target.closest('.cp-cancel-sync-btn');
+        if (cancelBtn) {
+          cancelPeerSyncJob(cancelBtn.getAttribute('data-job-id'));
+        }
+      });
+    }
+
+    if (dom.modelMatrixList) {
+      dom.modelMatrixList.addEventListener('click', async (e) => {
+        const pushAllBtn = e.target.closest('.cp-push-all-btn');
+        if (pushAllBtn) {
+          const modelName = pushAllBtn.getAttribute('data-model') || '';
+          const row = (state.modelReport && Array.isArray(state.modelReport.models))
+            ? state.modelReport.models.find((m) => m.name === modelName)
+            : null;
+          if (!row) return;
+          const targets = (row.nodes || []).filter((n) => n.state === 'missing_on_peer' || n.state === 'mismatch');
+          for (const t of targets) {
+            await triggerPeerModelSync({
+              direction: 'push',
+              model: modelName,
+              peerId: t.peer_id,
+              peerHost: t.host,
+              syncPort: t.sync_port || 50054,
+              peerName: t.node_name,
+            });
+          }
+          return;
+        }
+
+        const actBtn = e.target.closest('.cp-sync-action-btn');
+        if (actBtn) {
+          await triggerPeerModelSync({
+            direction: actBtn.getAttribute('data-direction') || 'push',
+            model: actBtn.getAttribute('data-model') || '',
+            peerId: actBtn.getAttribute('data-peer-id') || '',
+            peerHost: actBtn.getAttribute('data-peer-host') || '',
+            syncPort: actBtn.getAttribute('data-sync-port') || 50054,
+            peerName: actBtn.getAttribute('data-peer-name') || '',
+          });
+        }
+      });
+    }
   }
 
-  window.refreshClusterPairing = function () {
-    refreshStatus();
+  window.refreshClusterPairing = async function () {
+    await refreshStatus();
+    await refreshSyncJobs();
+    await runClusterModelCheck(true);
   };
 
   function boot() {
     cacheDom();
     bindEvents();
     refreshStatus(true);
+    refreshSyncJobs();
   }
 
   if (document.readyState === 'loading') {

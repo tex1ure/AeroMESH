@@ -30,6 +30,17 @@
       .replace(/'/g, '&#39;');
   };
 
+  const STAGE_COLORS = ['#2563eb', '#0d9488', '#7c3aed', '#d97706', '#059669', '#db2777', '#0284c7', '#65a30d'];
+
+  const SIM_PRESETS = {
+    'rtx3060-6g': { name: 'Sim RTX 3060', gpu_name: 'NVIDIA GeForce RTX 3060 Laptop GPU', vram_total_mb: 6144, ram_total_mb: 16384 },
+    'rtx4060-8g': { name: 'Sim RTX 4060', gpu_name: 'NVIDIA GeForce RTX 4060', vram_total_mb: 8192, ram_total_mb: 16384 },
+    'rtx4070-12g': { name: 'Sim RTX 4070', gpu_name: 'NVIDIA GeForce RTX 4070', vram_total_mb: 12288, ram_total_mb: 32768 },
+    'rtx4080-16g': { name: 'Sim RTX 4080', gpu_name: 'NVIDIA GeForce RTX 4080', vram_total_mb: 16384, ram_total_mb: 32768 },
+    'rtx4090-24g': { name: 'Sim RTX 4090', gpu_name: 'NVIDIA GeForce RTX 4090', vram_total_mb: 24576, ram_total_mb: 65536 },
+    'cpu-16g': { name: 'Sim CPU Worker', gpu_name: 'CPU Only (System RAM)', vram_total_mb: 0, ram_total_mb: 16384 },
+  };
+
   const state = {
     activeView: 'chat', // 'chat' | 'models'
     activeSubTab: 'discover', // 'discover' | 'local'
@@ -39,6 +50,15 @@
     downloadPollTimer: null,
     pendingDeleteName: null,
     expandedRepos: {}, // repo -> { loading, error, files }
+    // Hardware-Aware VRAM Fit Meter & Auto Layer-Split Planner
+    fitMode: 'cluster', // 'cluster' | 'local'
+    fitContext: 4096,
+    hardwareNodes: [],
+    simulatedNodes: [],
+    selectedFitModel: null, // { name, displayName, params, quant, size_bytes, size_hint }
+    fitPlan: null,
+    fitLoading: false,
+    fitRequestSeq: 0,
   };
 
   const dom = {};
@@ -63,6 +83,16 @@
 
     dom.downloadsPanel = document.getElementById('mh-downloads-panel');
     dom.downloadsList = document.getElementById('mh-downloads-list');
+
+    dom.fitCard = document.getElementById('mh-fit-planner-card');
+    dom.fitPoolSummary = document.getElementById('mh-fit-pool-summary');
+    dom.fitModeCluster = document.getElementById('mh-fit-mode-cluster');
+    dom.fitModeLocal = document.getElementById('mh-fit-mode-local');
+    dom.fitCtxSelect = document.getElementById('mh-fit-ctx-select');
+    dom.fitSimSelect = document.getElementById('mh-fit-sim-select');
+    dom.fitSimAddBtn = document.getElementById('mh-fit-sim-add-btn');
+    dom.fitNodeChips = document.getElementById('mh-fit-node-chips');
+    dom.fitPlanBody = document.getElementById('mh-fit-plan-body');
 
     dom.paneDiscover = document.getElementById('mh-pane-discover');
     dom.paneLocal = document.getElementById('mh-pane-local');
@@ -206,6 +236,428 @@
   };
 
   // ---------------------------------------------------------------------------
+  // HARDWARE-AWARE VRAM FIT METER & AUTO LAYER-SPLIT PLANNER
+  // ---------------------------------------------------------------------------
+  function mbToGbLabel(mb) {
+    const n = Number(mb || 0);
+    if (n >= 1024) return `${(n / 1024).toFixed(1)} GB`;
+    return `${Math.round(n)} MB`;
+  }
+
+  function fitStatusClass(status) {
+    if (status === 'fits_vram') return 'is-ok';
+    if (status === 'tight_vram') return 'is-tight';
+    if (status === 'ram_offload') return 'is-spill';
+    return 'is-oom';
+  }
+
+  function getActiveHardwareNodes() {
+    const detected = Array.isArray(state.hardwareNodes) ? state.hardwareNodes : [];
+    const base = detected.length > 0
+      ? detected
+      : [{ id: 'local', name: 'This PC', role: 'coordinator', gpu_name: 'Local GPU / CPU', vram_total_mb: 0, ram_total_mb: 16384 }];
+
+    if (state.fitMode === 'local') {
+      return [base[0]];
+    }
+    return [...base, ...state.simulatedNodes].slice(0, 8);
+  }
+
+  function parseHintToMb(sizeBytes, sizeHint) {
+    if (Number(sizeBytes) > 0) return Number(sizeBytes) / (1024 * 1024);
+    const m = String(sizeHint || '').match(/(\d+(?:\.\d+)?)\s*(TB|GB|MB)/i);
+    if (!m) return 0;
+    const val = parseFloat(m[1]);
+    const unit = m[2].toUpperCase();
+    if (unit === 'TB') return val * 1024 * 1024;
+    if (unit === 'GB') return val * 1024;
+    return val;
+  }
+
+  function estimateParamsB(paramsHint, nameHint, weightMb) {
+    const src = `${paramsHint || ''} ${nameHint || ''}`;
+    const m = src.match(/(?:^|[^A-Za-z0-9])(\d+(?:\.\d+)?)\s*[bB](?:[^A-Za-z0-9]|$)/);
+    if (m) return parseFloat(m[1]);
+    if (weightMb > 0) return Math.max(0.5, (weightMb * 8) / (4.85 * 1000));
+    return 7.0;
+  }
+
+  function quickFitSummary({ name, sizeBytes, sizeHint, paramsHint }) {
+    // If this model matches the currently computed server-side plan, mirror its exact verdict
+    if (
+      state.fitPlan &&
+      state.selectedFitModel &&
+      (state.selectedFitModel.name || '').toLowerCase() === String(name || '').toLowerCase()
+    ) {
+      return {
+        status: state.fitPlan.fit_status,
+        cls: fitStatusClass(state.fitPlan.fit_status),
+        label: state.fitPlan.fit_label,
+      };
+    }
+
+    const nodes = getActiveHardwareNodes();
+    const weightMb = parseHintToMb(sizeBytes, sizeHint);
+    if (weightMb <= 0) return null;
+
+    const paramsB = estimateParamsB(paramsHint, name, weightMb);
+    // Approximate GQA FP16 KV cache at 4K ctx (matches vram_planner.py profiles closely)
+    let kv4kMb = 224;
+    if (paramsB <= 2.2) kv4kMb = 112;
+    else if (paramsB <= 4.5) kv4kMb = 144;
+    else if (paramsB <= 9.5) kv4kMb = 224;
+    else if (paramsB <= 18) kv4kMb = 768;
+    else if (paramsB <= 42) kv4kMb = 1024;
+    else kv4kMb = 1280;
+
+    const kvMb = kv4kMb * (Number(state.fitContext || 4096) / 4096.0);
+    const totalModelMb = weightMb + kvMb;
+
+    let totalVramMb = 0;
+    let totalUsableVramMb = 0;
+    let totalScratchMb = 0;
+    let totalUsableRamMb = 0;
+    let localUsableVramMb = 0;
+
+    nodes.forEach((n, idx) => {
+      const vram = Math.max(0, Number(n.vram_total_mb || 0));
+      const ram = Math.max(2048, Number(n.ram_total_mb || 16384));
+      totalVramMb += vram;
+      if (vram > 0) {
+        const osRes = Math.min(Math.max(512, vram * 0.08), 1536);
+        const scratch = Math.min(Math.max(280, vram * 0.05), 900);
+        const usable = Math.max(0, vram - osRes - scratch);
+        totalScratchMb += scratch;
+        totalUsableVramMb += usable;
+        if (idx === 0) localUsableVramMb = usable;
+      }
+      totalUsableRamMb += Math.max(0, ram * 0.72 - 1536);
+    });
+
+    if (totalVramMb > 0 && totalModelMb <= totalUsableVramMb) {
+      const pct = ((totalModelMb + totalScratchMb) / Math.max(1, totalVramMb)) * 100;
+      if (pct <= 88) {
+        if (nodes.length > 1 && localUsableVramMb > 0 && totalModelMb <= localUsableVramMb) {
+          return { status: 'fits_vram', cls: 'is-ok', label: 'Fits Local GPU' };
+        }
+        return {
+          status: 'fits_vram',
+          cls: 'is-ok',
+          label: nodes.length > 1 ? `${nodes.length}-Node VRAM Fit` : 'Full VRAM Fit',
+        };
+      }
+      return { status: 'tight_vram', cls: 'is-tight', label: 'Tight VRAM Fit' };
+    }
+    if (totalModelMb <= totalUsableVramMb + totalUsableRamMb) {
+      return {
+        status: 'ram_offload',
+        cls: 'is-spill',
+        label: totalVramMb > 0 ? 'GPU + RAM Spill' : 'CPU RAM Only',
+      };
+    }
+    return { status: 'wont_fit', cls: 'is-oom', label: 'Exceeds Memory' };
+  }
+
+  function renderFitHardwareHeader() {
+    if (!dom.fitCard) return;
+    const nodes = getActiveHardwareNodes();
+    const totalVram = nodes.reduce((a, n) => a + Number(n.vram_total_mb || 0), 0);
+    const totalRam = nodes.reduce((a, n) => a + Number(n.ram_total_mb || 0), 0);
+
+    if (dom.fitModeCluster) dom.fitModeCluster.classList.toggle('active', state.fitMode === 'cluster');
+    if (dom.fitModeLocal) dom.fitModeLocal.classList.toggle('active', state.fitMode === 'local');
+
+    if (dom.fitPoolSummary) {
+      const scopeLabel = state.fitMode === 'local' ? 'This PC only' : `${nodes.length} node${nodes.length === 1 ? '' : 's'} pooled`;
+      const simCount = state.fitMode === 'cluster' ? state.simulatedNodes.length : 0;
+      const simNote = simCount > 0 ? ` (${simCount} simulated)` : '';
+      dom.fitPoolSummary.textContent = `${scopeLabel}${simNote} · ${mbToGbLabel(totalVram)} VRAM · ${mbToGbLabel(totalRam)} System RAM · ${(state.fitContext / 1024)}K context`;
+    }
+
+    if (dom.fitNodeChips) {
+      dom.fitNodeChips.innerHTML = '';
+      nodes.forEach((n, idx) => {
+        const chip = document.createElement('div');
+        const isSim = Boolean(n._simulated);
+        chip.className = 'mh-fit-node-chip' + (isSim ? ' is-sim' : '');
+        const color = STAGE_COLORS[idx % STAGE_COLORS.length];
+        const roleTag = idx === 0 ? 'Coord' : (isSim ? 'Sim Worker' : 'Worker');
+        const vramTxt = Number(n.vram_total_mb || 0) > 0 ? `${mbToGbLabel(n.vram_total_mb)} VRAM` : 'CPU Only';
+        const ramTxt = `${mbToGbLabel(n.ram_total_mb || 16384)} RAM`;
+
+        chip.innerHTML = `
+          <span class="mh-fit-node-dot" style="background-color:${color};"></span>
+          <span class="mh-fit-node-name">${esc(n.name || roleTag)}</span>
+          <span class="mh-fit-node-spec">${esc(roleTag)} · ${esc(vramTxt)} · ${esc(ramTxt)}</span>
+        `;
+
+        if (isSim) {
+          const rmBtn = document.createElement('button');
+          rmBtn.type = 'button';
+          rmBtn.className = 'mh-fit-node-remove';
+          rmBtn.title = 'Remove simulated worker';
+          rmBtn.setAttribute('aria-label', `Remove ${n.name || 'simulated worker'}`);
+          rmBtn.textContent = '×';
+          rmBtn.onclick = () => {
+            state.simulatedNodes = state.simulatedNodes.filter((s) => s.id !== n.id);
+            onHardwareConfigChanged();
+          };
+          chip.appendChild(rmBtn);
+        }
+        dom.fitNodeChips.appendChild(chip);
+      });
+    }
+  }
+
+  function renderFitPlanBody() {
+    if (!dom.fitPlanBody) return;
+    if (state.fitLoading && !state.fitPlan) {
+      dom.fitPlanBody.innerHTML = '<div class="mh-meta-line">Computing exact VRAM budget and proportional layer split…</div>';
+      return;
+    }
+    const plan = state.fitPlan;
+    if (!plan || !plan.model) {
+      dom.fitPlanBody.innerHTML = '<div class="mh-meta-line">Click <strong>Plan Split</strong> on any model below to calculate exact VRAM budgets and layer ranges.</div>';
+      return;
+    }
+
+    const m = plan.model;
+    const totals = plan.cluster_totals || {};
+    const stages = Array.isArray(plan.stages) ? plan.stages : [];
+    const recs = Array.isArray(plan.recommendations) ? plan.recommendations : [];
+    const badgeCls = fitStatusClass(plan.fit_status);
+    const displayName = (state.selectedFitModel && state.selectedFitModel.displayName) || m.name;
+    const archTag = m.arch_source === 'gguf_header' ? 'Exact GGUF header' : 'Estimated arch';
+
+    const splitSegsHtml = stages.map((st, idx) => {
+      const pct = Math.max(4, Math.min(100, Number(st.share_percent || 0)));
+      const bg = STAGE_COLORS[idx % STAGE_COLORS.length];
+      const hasRamSpill = Number(st.ram_layers || 0) > 0;
+      const spillSuffix = hasRamSpill ? ` · ${st.ram_layers}L RAM` : '';
+      const fullLabel = `${st.node_name} · L${st.layer_range || '-'} (${st.layer_count}L${spillSuffix})`;
+      const visibleLabel = pct < 14
+        ? `L${st.layer_range || '-'}`
+        : pct < 26
+          ? `L${st.layer_range || '-'} (${st.layer_count}L)`
+          : fullLabel;
+      return `<div class="mh-split-seg" style="width:${pct}%;background-color:${bg};" title="${esc(fullLabel)}"><span class="mh-split-seg-label">${esc(visibleLabel)}</span></div>`;
+    }).join('');
+
+    const stageCardsHtml = stages.map((st, idx) => {
+      const color = STAGE_COLORS[idx % STAGE_COLORS.length];
+      const roleTitle = idx === 0 ? 'Stage 0 · Coordinator' : `Stage ${idx} · Worker`;
+      const vramPct = Math.max(0, Math.min(100, Number(st.vram_percent || 0)));
+      const vramFillCls = Number(st.ram_layers || 0) > 0 ? 'is-spill' : (vramPct > 88 ? 'is-tight' : 'is-ok');
+      const ramPct = Math.max(0, Math.min(100, Number(st.ram_percent || 0)));
+      const ramFillCls = Number(st.ram_used_mb || 0) > Number(st.ram_total_mb || 1) * 0.72 ? 'is-oom' : 'is-spill';
+      const extras = [
+        st.includes_embeddings ? 'Embeddings' : '',
+        st.includes_lm_head ? 'LM Head' : '',
+        `${mbToGbLabel(st.weights_mb)} weights`,
+        `${mbToGbLabel(st.kv_cache_mb)} KV`,
+      ].filter(Boolean).join(' · ');
+
+      const vramRow = Number(st.vram_total_mb || 0) > 0
+        ? `
+          <div class="mh-meter-row">
+            <div class="mh-meter-head">
+              <span>GPU VRAM (${st.gpu_layers}/${st.layer_count} layers)</span>
+              <span class="mh-meter-val">${esc(st.vram_used_label)} / ${esc(st.vram_total_label)} (${Math.round(vramPct)}%)</span>
+            </div>
+            <div class="mh-meter-track">
+              <div class="mh-meter-fill ${vramFillCls}" style="width:${vramPct}%;"></div>
+            </div>
+          </div>
+        `
+        : `<div class="mh-meter-head"><span>GPU VRAM</span><span class="mh-meter-val">No discrete GPU (CPU RAM)</span></div>`;
+
+      const ramRow = Number(st.ram_used_mb || 0) > 0
+        ? `
+          <div class="mh-meter-row">
+            <div class="mh-meter-head">
+              <span>System RAM Spill (${st.ram_layers} layers)</span>
+              <span class="mh-meter-val">${esc(st.ram_used_label)} / ${esc(st.ram_total_label)} (${Math.round(ramPct)}%)</span>
+            </div>
+            <div class="mh-meter-track">
+              <div class="mh-meter-fill ${ramFillCls}" style="width:${ramPct}%;"></div>
+            </div>
+          </div>
+        `
+        : `
+          <div class="mh-meter-row">
+            <div class="mh-meter-head">
+              <span>System RAM Spill</span>
+              <span class="mh-meter-val" style="color:#4ade80;">0 MB (100% GPU)</span>
+            </div>
+          </div>
+        `;
+
+      return `
+        <div class="mh-stage-card">
+          <div class="mh-stage-top">
+            <div style="min-width:0;">
+              <div class="mh-stage-node-title">
+                <span class="mh-fit-node-dot" style="background-color:${color};"></span>
+                <span>${esc(st.node_name)}</span>
+              </div>
+              <div class="mh-stage-gpu">${esc(roleTitle)} · ${esc(st.gpu_name)}</div>
+            </div>
+            ${st.cli_flag ? `<code class="mh-stage-flag" title="CLI layer slice flag">${esc(st.cli_flag)}</code>` : ''}
+          </div>
+          ${vramRow}
+          ${ramRow}
+          <div class="mh-stage-foot">${esc(extras)}</div>
+        </div>
+      `;
+    }).join('');
+
+    const recsHtml = recs.length > 0
+      ? `
+        <div class="mh-fit-recs">
+          <div class="mh-fit-rec-title">Fit Recommendations</div>
+          ${recs.map((r) => `<div class="mh-fit-rec-item">• ${esc(r)}</div>`).join('')}
+        </div>
+      `
+      : '';
+
+    dom.fitPlanBody.innerHTML = `
+      <div class="mh-fit-verdict-row">
+        <div class="mh-fit-model-heading">
+          <div class="mh-fit-model-name">${esc(displayName)}</div>
+          <div class="mh-fit-model-meta">
+            ${esc(m.params_label || '')} · ${esc(m.quant || '')} · ${esc(m.size_label || '')} weights · ${esc(totals.kv_cache_label || '')} KV (${Math.round((plan.context_length || 4096) / 1024)}K ctx) · ${m.layers} layers · ${m.per_token_kb} KB/tok wire (${esc(archTag)})
+          </div>
+        </div>
+        <div class="mh-fit-verdict-right">
+          <span class="mh-fit-speed-tier">${esc(plan.speed_tier || '')}</span>
+          <span id="mh-fit-verdict-badge" class="mh-fit-badge ${badgeCls}">${esc(plan.fit_label || '')}</span>
+        </div>
+      </div>
+      <p class="mh-fit-summary-text">${esc(plan.summary || '')}</p>
+      <div id="mh-split-bar" class="mh-split-bar" role="img" aria-label="Proportional multi-node layer split">${splitSegsHtml}</div>
+      <div class="mh-stage-grid">${stageCardsHtml}</div>
+      ${recsHtml}
+    `;
+  }
+
+  async function requestFitPlan(modelInfo, scrollIntoView = false) {
+    if (!modelInfo || !modelInfo.name) return;
+    state.selectedFitModel = modelInfo;
+    state.fitLoading = true;
+    const reqId = ++state.fitRequestSeq;
+
+    renderFitHardwareHeader();
+    renderCatalog();
+    renderInstalledModels();
+    if (scrollIntoView && dom.fitCard) {
+      dom.fitCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    const activeNodes = getActiveHardwareNodes();
+    const payload = {
+      model: modelInfo.name,
+      size_bytes: Number(modelInfo.size_bytes || 0),
+      size_hint: modelInfo.size_hint || '',
+      params: modelInfo.params || '',
+      quant: modelInfo.quant || '',
+      context_length: Number(state.fitContext || 4096),
+      mode: state.fitMode,
+    };
+    if (state.fitMode === 'cluster' && state.simulatedNodes.length > 0) {
+      payload.custom_nodes = activeNodes.map((n) => ({
+        id: n.id,
+        name: n.name,
+        role: n.role,
+        gpu_name: n.gpu_name,
+        vram_total_mb: Number(n.vram_total_mb || 0),
+        ram_total_mb: Number(n.ram_total_mb || 16384),
+        endpoint: n.endpoint || '',
+      }));
+    }
+
+    try {
+      const resp = await fetch(getApiUrl('/api/cluster/fit/plan'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const plan = await resp.json();
+      if (reqId !== state.fitRequestSeq) return;
+      state.fitPlan = plan;
+      state.fitLoading = false;
+      renderFitPlanBody();
+      renderCatalog();
+      renderInstalledModels();
+      if (lastHfResults.length > 0) renderHfResults(lastHfResults);
+    } catch (err) {
+      if (reqId !== state.fitRequestSeq) return;
+      state.fitLoading = false;
+      if (dom.fitPlanBody) {
+        dom.fitPlanBody.innerHTML = `<div class="mh-meta-line" style="color:#fca5a5;">Could not compute VRAM split plan: ${esc(err.message || err)}</div>`;
+      }
+    }
+  }
+
+  function onHardwareConfigChanged() {
+    renderFitHardwareHeader();
+    renderCatalog();
+    renderInstalledModels();
+    if (lastHfResults.length > 0) renderHfResults(lastHfResults);
+    if (state.selectedFitModel) {
+      requestFitPlan(state.selectedFitModel, false);
+    }
+  }
+
+  function pickDefaultFitModel(lib) {
+    if (!lib) return null;
+    const catalog = Array.isArray(lib.catalog) ? lib.catalog : [];
+    const models = Array.isArray(lib.models) ? lib.models.filter((m) => m.kind === 'llm') : [];
+    // Prefer a 14B catalog or installed model so users immediately see a clear multi-node split
+    const installed14 = models.find((m) => /14b/i.test(m.name));
+    if (installed14) {
+      return {
+        name: installed14.name,
+        displayName: installed14.name,
+        quant: installed14.quant || '',
+        size_bytes: installed14.size_bytes || 0,
+        size_hint: installed14.size_label || '',
+      };
+    }
+    const cat14 = catalog.find((c) => /14b/i.test(c.id || c.params || c.name || ''));
+    if (cat14) {
+      return {
+        name: cat14.recommended_file || cat14.name,
+        displayName: `${cat14.name} (${cat14.quant})`,
+        params: cat14.params || '',
+        quant: cat14.quant || '',
+        size_hint: cat14.size_hint || '',
+      };
+    }
+    if (models.length > 0) {
+      const largest = [...models].sort((a, b) => Number(b.size_bytes || 0) - Number(a.size_bytes || 0))[0];
+      return {
+        name: largest.name,
+        displayName: largest.name,
+        quant: largest.quant || '',
+        size_bytes: largest.size_bytes || 0,
+        size_hint: largest.size_label || '',
+      };
+    }
+    if (catalog.length > 0) {
+      const c = catalog[0];
+      return {
+        name: c.recommended_file || c.name,
+        displayName: `${c.name} (${c.quant})`,
+        params: c.params || '',
+        quant: c.quant || '',
+        size_hint: c.size_hint || '',
+      };
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
   // API CALLS
   // ---------------------------------------------------------------------------
   async function refreshLibrary() {
@@ -215,9 +667,18 @@
       const data = await resp.json();
       state.library = data;
       state.downloads = Array.isArray(data.downloads) ? data.downloads : [];
+      if (data.cluster_hardware && Array.isArray(data.cluster_hardware.nodes)) {
+        state.hardwareNodes = data.cluster_hardware.nodes;
+      }
       renderLibrary();
       renderTransfers();
       updateDownloadPolling();
+      if (!state.selectedFitModel) {
+        const defModel = pickDefaultFitModel(data);
+        if (defModel) requestFitPlan(defModel, false);
+      } else {
+        requestFitPlan(state.selectedFitModel, false);
+      }
     } catch (err) {
       showFeedback(`Could not load model library: ${err.message || err}`, 'error');
     }
@@ -593,6 +1054,8 @@
       dom.installedCount.textContent = `(${totalModels})`;
     }
 
+    renderFitHardwareHeader();
+    renderFitPlanBody();
     renderCatalog();
     renderInstalledModels();
     renderFolders();
@@ -689,13 +1152,36 @@
       const vramTxt = f.est_vram_gb > 0 ? `Est. ${f.est_vram_gb} GB VRAM` : '';
       const recTxt = f.recommended ? 'Recommended' : '';
       const meta = [f.quant, f.size_label, vramTxt, recTxt].filter(Boolean).join(' · ');
+      const fit = quickFitSummary({
+        name: f.filename,
+        sizeBytes: f.size_bytes,
+        sizeHint: f.size_label,
+      });
+      const fitBadgeHtml = fit ? `<span class="mh-fit-badge ${fit.cls}">${esc(fit.label)}</span>` : '';
 
       opt.innerHTML = `
         <div style="min-width: 0; flex: 1;">
-          <div class="mh-file-option-name">${esc(f.filename)}</div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <div class="mh-file-option-name">${esc(f.filename)}</div>
+            ${fitBadgeHtml}
+          </div>
           <div class="mh-meta-line">${esc(meta)}</div>
         </div>
       `;
+
+      const planBtn = document.createElement('button');
+      planBtn.type = 'button';
+      planBtn.className = 'clay-btn mh-btn-secondary';
+      planBtn.textContent = 'Plan Split';
+      planBtn.onclick = () => requestFitPlan({
+        name: f.filename,
+        displayName: f.filename,
+        quant: f.quant || '',
+        size_bytes: Number(f.size_bytes || 0),
+        size_hint: f.size_label || '',
+      }, true);
+      opt.appendChild(planBtn);
+
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = f.recommended ? 'mh-btn-primary mh-btn-sm' : 'clay-btn mh-btn-secondary';
@@ -715,11 +1201,25 @@
 
     catalog.forEach((item) => {
       const card = document.createElement('div');
-      card.className = 'mh-catalog-card';
+      const modelKey = (item.recommended_file || item.name || '').toLowerCase();
+      const isPlanned = Boolean(
+        state.selectedFitModel &&
+        (state.selectedFitModel.name || '').toLowerCase() === modelKey
+      );
+      card.className = 'mh-catalog-card' + (isPlanned ? ' is-planned' : '');
       const isInstalled = installedNames.has((item.recommended_file || '').toLowerCase());
+      const fit = quickFitSummary({
+        name: item.recommended_file || item.name,
+        sizeHint: item.size_hint,
+        paramsHint: item.params,
+      });
+      const fitBadgeHtml = fit ? `<span class="mh-fit-badge ${fit.cls}">${esc(fit.label)}</span>` : '';
 
       card.innerHTML = `
-        <div class="mh-card-title">${esc(item.name)}</div>
+        <div class="mh-card-head-row">
+          <div class="mh-card-title">${esc(item.name)}</div>
+          ${fitBadgeHtml}
+        </div>
         <div class="mh-meta-line">
           <span>${esc(item.params)}</span>
           <span class="mh-meta-sep" aria-hidden="true">·</span>
@@ -749,6 +1249,20 @@
         dlBtn.onclick = () => startDownload({ repo: item.repo, filename: item.recommended_file });
         actions.appendChild(dlBtn);
       }
+
+      const planBtn = document.createElement('button');
+      planBtn.type = 'button';
+      planBtn.className = 'clay-btn mh-btn-secondary';
+      planBtn.setAttribute('data-plan-model', item.id || item.recommended_file || item.name);
+      planBtn.textContent = isPlanned ? 'Planned ✓' : 'Plan Split';
+      planBtn.onclick = () => requestFitPlan({
+        name: item.recommended_file || item.name,
+        displayName: `${item.name} (${item.quant})`,
+        params: item.params || '',
+        quant: item.quant || '',
+        size_hint: item.size_hint || '',
+      }, true);
+      actions.appendChild(planBtn);
 
       const quantBtn = document.createElement('button');
       quantBtn.type = 'button';
@@ -823,10 +1337,17 @@
       const kindLabel = m.kind === 'diffusion' ? 'Diffusion' : 'LLM';
       const locLabel = m.managed ? 'Managed' : 'Linked Path';
       const meta = [kindLabel, m.quant, m.size_label, locLabel].filter(Boolean).join(' · ');
+      const fit = m.kind === 'llm'
+        ? quickFitSummary({ name: m.name, sizeBytes: m.size_bytes, sizeHint: m.size_label })
+        : null;
+      const fitBadgeHtml = fit ? `<span class="mh-fit-badge ${fit.cls}">${esc(fit.label)}</span>` : '';
 
       row.innerHTML = `
         <div class="mh-list-main">
-          <div class="mh-list-name">${esc(m.name)}</div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <div class="mh-list-name">${esc(m.name)}</div>
+            ${fitBadgeHtml}
+          </div>
           <div class="mh-meta-line">${esc(meta)}</div>
           <div class="mh-list-path">${esc(m.path)}</div>
         </div>
@@ -835,6 +1356,19 @@
 
       const actions = row.querySelector('[data-model-actions]');
       if (m.kind === 'llm') {
+        const planBtn = document.createElement('button');
+        planBtn.type = 'button';
+        planBtn.className = 'clay-btn mh-btn-secondary';
+        planBtn.textContent = 'Plan Split';
+        planBtn.onclick = () => requestFitPlan({
+          name: m.name,
+          displayName: m.name,
+          quant: m.quant || '',
+          size_bytes: Number(m.size_bytes || 0),
+          size_hint: m.size_label || '',
+        }, true);
+        actions.appendChild(planBtn);
+
         const loadBtn = document.createElement('button');
         loadBtn.type = 'button';
         loadBtn.className = 'mh-btn-primary mh-btn-sm';
@@ -916,6 +1450,50 @@
     if (dom.tabDiscover) dom.tabDiscover.addEventListener('click', () => setSubTab('discover'));
     if (dom.tabLocal) dom.tabLocal.addEventListener('click', () => setSubTab('local'));
     if (dom.refreshBtn) dom.refreshBtn.addEventListener('click', refreshLibrary);
+
+    // VRAM Fit Meter & Auto Layer-Split Planner controls
+    if (dom.fitModeCluster) {
+      dom.fitModeCluster.addEventListener('click', () => {
+        state.fitMode = 'cluster';
+        onHardwareConfigChanged();
+      });
+    }
+    if (dom.fitModeLocal) {
+      dom.fitModeLocal.addEventListener('click', () => {
+        state.fitMode = 'local';
+        onHardwareConfigChanged();
+      });
+    }
+    if (dom.fitCtxSelect) {
+      dom.fitCtxSelect.addEventListener('change', () => {
+        state.fitContext = Number(dom.fitCtxSelect.value || 4096);
+        onHardwareConfigChanged();
+      });
+    }
+    if (dom.fitSimAddBtn && dom.fitSimSelect) {
+      dom.fitSimAddBtn.addEventListener('click', () => {
+        const presetKey = dom.fitSimSelect.value;
+        const preset = SIM_PRESETS[presetKey];
+        if (!preset) return;
+        const activeCount = (state.hardwareNodes.length || 1) + state.simulatedNodes.length;
+        if (activeCount >= 8) {
+          showFeedback('Maximum of 8 cluster nodes supported in the split planner.', 'info');
+          return;
+        }
+        state.fitMode = 'cluster';
+        const simIdx = state.simulatedNodes.length + 1;
+        state.simulatedNodes.push({
+          id: `sim-${Date.now()}-${simIdx}`,
+          name: `${preset.name} #${simIdx}`,
+          role: 'worker',
+          gpu_name: preset.gpu_name,
+          vram_total_mb: preset.vram_total_mb,
+          ram_total_mb: preset.ram_total_mb,
+          _simulated: true,
+        });
+        onHardwareConfigChanged();
+      });
+    }
 
     if (dom.hfSearchBtn) dom.hfSearchBtn.addEventListener('click', runHfSearch);
     if (dom.hfQuery) {

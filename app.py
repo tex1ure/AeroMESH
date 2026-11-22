@@ -22,6 +22,28 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Optional
 
+from peer_model_sync import (
+    DEFAULT_SYNC_PORT,
+    PeerModelSyncServer,
+    PeerSyncJobManager,
+    build_cluster_model_matrix,
+    build_local_model_manifest,
+    extract_host_from_endpoint,
+    fetch_peer_manifest,
+    resolve_confined_gguf,
+    validate_gguf_filename,
+    validate_peer_host,
+)
+from vram_planner import (
+    build_model_spec,
+    detect_local_hardware,
+    mb_to_gb_label,
+    normalize_cluster_nodes,
+    parse_gpu_vram_mb,
+    plan_layer_split,
+    validate_layer_range_arg,
+)
+
 # Ensure UTF-8 output on Windows consoles
 if sys.platform == "win32":
     try:
@@ -363,9 +385,23 @@ def get_backend_client() -> httpx.AsyncClient:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manages shared HTTP client lifecycle across gateway execution."""
+    """Manages shared HTTP client and authenticated peer model sync daemon."""
     client = get_backend_client()
+    if os.environ.get("AEROMESH_DISABLE_SYNC_SERVER", "").strip() not in ("1", "true", "yes"):
+        try:
+            sync_port = int(os.environ.get("AEROMESH_SYNC_PORT", str(DEFAULT_SYNC_PORT)))
+            await peer_sync_server.start(bind_host="0.0.0.0", port=sync_port)
+        except Exception as exc:
+            logger.warning("Peer Model Sync daemon did not bind TCP port: %s", exc)
     yield
+    try:
+        await peer_sync_server.stop()
+    except Exception:
+        pass
+    try:
+        await pairing_manager.stop()
+    except Exception:
+        pass
     if client and not client.is_closed:
         await client.aclose()
 
@@ -849,13 +885,14 @@ class NodeRuntimeManager:
             self.role = "idle"
             self.logs.append("[AeroMesh Studio] Node stopped by user.")
 
-    def start(self, role: str, model: str, peers: str) -> dict:
+    def start(self, role: str, model: str, peers: str, layers: str = "") -> dict:
         role_clean = str(role or "").strip().lower()
         if role_clean not in ("worker", "coordinator", "all"):
             return {"status": "error", "message": f"Invalid role: {role!r}"}
         try:
             model_path = _resolve_confined_model_file(model)
             safe_peers = _validate_peers_csv(peers)
+            safe_layers = validate_layer_range_arg(layers)
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
 
@@ -873,10 +910,14 @@ class NodeRuntimeManager:
         cmd = [engine_exe]
         if role_clean == "worker":
             cmd += ["start", "--role", "worker", "--port", "50052", "--model", model_path]
+            if safe_layers:
+                cmd += ["--layers", safe_layers]
         elif role_clean == "coordinator":
             cmd += ["start", "--role", "coordinator", "--model", model_path, "--port", "8080"]
             if safe_peers:
                 cmd += ["--peers", safe_peers]
+            if safe_layers:
+                cmd += ["--layers", safe_layers]
         else:
             cmd += ["start", "--role", "all", "--model", model_path, "--port", "8080"]
 
@@ -949,6 +990,7 @@ async def node_state():
         "model": model,
         "peers": peers,
         "gpu": get_gpu_summary(),
+        "hardware": detect_local_hardware(),
         "wifi_ip": get_local_wifi_ip(),
         "tailscale_ip": get_tailscale_ip(),
         "models_dir": get_models_dirs()[0],
@@ -966,6 +1008,7 @@ async def node_start(request: Request):
     role = str(body.get("role", "all")).strip().lower()
     model = str(body.get("model", "")).strip()
     peers = str(body.get("peers", "")).strip()
+    layers = str(body.get("layers", "") or "").strip()
 
     if role == "auto":
         discovered = await asyncio.to_thread(discover_mesh_workers_sync, 50052)
@@ -975,7 +1018,7 @@ async def node_start(request: Request):
         else:
             role = "all"
 
-    res = node_manager.start(role, model, peers)
+    res = node_manager.start(role, model, peers, layers=layers)
     status_code = 200 if res.get("status") == "ok" else 400
     return JSONResponse(status_code=status_code, content=res)
 
@@ -1514,6 +1557,18 @@ CURATED_MODEL_CATALOG = [
         "category": "Coding Cluster",
         "description": "High-accuracy local software engineering model designed for distributed VRAM pooling.",
     },
+    {
+        "id": "qwen2.5-32b",
+        "name": "Qwen 2.5 32B Instruct",
+        "repo": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+        "recommended_file": "Qwen2.5-32B-Instruct-Q4_K_M.gguf",
+        "params": "32B",
+        "quant": "Q4_K_M",
+        "size_hint": "~19.8 GB",
+        "vram_hint": "24 GB+ / 3-Node Cluster",
+        "category": "Heavyweight Cluster",
+        "description": "Frontier-class 32B model for 24 GB+ multi-GPU pools or hybrid GPU + System RAM layer pipelines.",
+    },
 ]
 
 _DOWNLOAD_LOCK = threading.Lock()
@@ -1644,6 +1699,7 @@ def _list_model_library() -> dict:
         "models": models,
         "catalog": CURATED_MODEL_CATALOG,
         "downloads": downloads,
+        "cluster_hardware": _get_cluster_hardware_payload(),
     }
 
 
@@ -2559,6 +2615,8 @@ class ClusterPairingManager:
             "wifi_ip": wifi_ip,
             "tailscale_ip": ts_ip,
             "worker_endpoint": _preferred_worker_endpoint(wifi_ip, ts_ip),
+            "sync_port": peer_sync_server.port if peer_sync_server.active else DEFAULT_SYNC_PORT,
+            "sync_active": peer_sync_server.active,
             "secret_configured": bool(secret),
             "cluster_fingerprint": fp,
             "local_models": local_models,
@@ -2783,6 +2841,452 @@ async def cluster_pair_remove(request: Request):
     body = await _read_json_body(request)
     remove_paired_peer(str(body.get("id", "")))
     return JSONResponse(status_code=200, content={"status": "removed", "pair_status": pairing_manager.status_payload()})
+
+
+# ============================================================================
+# AUTOMATIC MULTI-NODE MODEL CHECK & PEER MODEL SYNC (aeromesh-sync-v1)
+# ============================================================================
+def _sync_node_meta() -> dict:
+    secret = os.environ.get("AEROMESH_WORKER_SECRET", "").strip()
+    hw = detect_local_hardware()
+    return {
+        "node_name": _local_node_name(),
+        "gpu": get_gpu_summary(),
+        "vram_total_mb": hw["vram_total_mb"],
+        "vram_free_mb": hw["vram_free_mb"],
+        "ram_total_mb": hw["ram_total_mb"],
+        "ram_available_mb": hw["ram_available_mb"],
+        "wifi_ip": get_local_wifi_ip(),
+        "tailscale_ip": get_tailscale_ip(),
+        "cluster_fingerprint": _secret_fingerprint(secret),
+    }
+
+
+peer_sync_server = PeerModelSyncServer(
+    get_secret=lambda: os.environ.get("AEROMESH_WORKER_SECRET", "").strip(),
+    get_models_dirs=get_models_dirs,
+    get_primary_dir=get_primary_models_dir,
+    get_node_meta=_sync_node_meta,
+)
+peer_sync_jobs = PeerSyncJobManager()
+
+
+def _resolve_check_targets(explicit_peers: list) -> list:
+    """Combine saved paired peers and any explicitly requested worker endpoints."""
+    targets = []
+    seen_hosts = set()
+    saved = load_paired_peers()
+    saved_by_host = {}
+    for p in saved:
+        h = extract_host_from_endpoint(p.get("worker_endpoint", "")) or p.get("tailscale_ip") or p.get("wifi_ip") or ""
+        if h and h not in ("Not Connected", "Local"):
+            saved_by_host[h] = p
+
+    if explicit_peers:
+        for raw_ep in explicit_peers:
+            ep_str = str(raw_ep or "").strip()
+            if not ep_str:
+                continue
+            host = extract_host_from_endpoint(ep_str)
+            if not host or host in seen_hosts:
+                continue
+            seen_hosts.add(host)
+            existing = saved_by_host.get(host) or {}
+            sync_port = int(existing.get("sync_port") or DEFAULT_SYNC_PORT)
+            targets.append({
+                "id": existing.get("id") or hashlib.sha256(f"{host}:50052".encode("utf-8")).digest()[:6].hex(),
+                "node_name": existing.get("node_name") or host,
+                "host": host,
+                "worker_endpoint": existing.get("worker_endpoint") or (ep_str if ":" in ep_str else f"{host}:50052"),
+                "sync_port": sync_port,
+                "saved_peer": existing if existing else None,
+            })
+        return targets
+
+    for p in saved:
+        host = extract_host_from_endpoint(p.get("worker_endpoint", ""))
+        if not host or host in seen_hosts:
+            continue
+        seen_hosts.add(host)
+        targets.append({
+            "id": p.get("id") or hashlib.sha256(host.encode("utf-8")).digest()[:6].hex(),
+            "node_name": p.get("node_name") or host,
+            "host": host,
+            "worker_endpoint": p.get("worker_endpoint") or f"{host}:50052",
+            "sync_port": int(p.get("sync_port") or DEFAULT_SYNC_PORT),
+            "saved_peer": p,
+        })
+    return targets
+
+
+@app.post("/api/cluster/models/check", dependencies=[Depends(verify_gateway_access)])
+async def cluster_models_check(request: Request):
+    """
+    Query paired (or explicitly specified) cluster peers over authenticated TCP :50054
+    and verify exact GGUF header + content fingerprints across all nodes.
+    """
+    body = await _read_json_body(request)
+    target_model = str(body.get("model", "") or "").strip()
+    raw_peers = body.get("peers")
+    explicit_peers = []
+    if isinstance(raw_peers, str):
+        explicit_peers = [p.strip() for p in raw_peers.split(",") if p.strip()]
+    elif isinstance(raw_peers, list):
+        explicit_peers = [str(p).strip() for p in raw_peers if str(p).strip()]
+
+    secret = os.environ.get("AEROMESH_WORKER_SECRET", "").strip()
+    local_models = await asyncio.to_thread(build_local_model_manifest, get_models_dirs())
+    targets = _resolve_check_targets(explicit_peers)
+
+    async def _query_one(t: dict) -> dict:
+        if not secret:
+            return {
+                **t,
+                "status": "auth_mismatch",
+                "error": "Cluster secret not configured locally. Pair nodes first.",
+                "models": [],
+            }
+        try:
+            manifest = await fetch_peer_manifest(t["host"], int(t["sync_port"]), secret)
+            peer_models = manifest.get("models") if isinstance(manifest.get("models"), list) else []
+            # Refresh saved peer inventory if this peer is in paired_peers.json
+            if t.get("saved_peer"):
+                updated = dict(t["saved_peer"])
+                updated["node_name"] = str(manifest.get("node_name") or updated.get("node_name") or t["host"])[:80]
+                updated["gpu"] = str(manifest.get("gpu") or updated.get("gpu") or "GPU / CPU")[:120]
+                if manifest.get("vram_total_mb"):
+                    updated["vram_total_mb"] = int(manifest.get("vram_total_mb") or 0)
+                    updated["vram_free_mb"] = int(manifest.get("vram_free_mb") or 0)
+                if manifest.get("ram_total_mb"):
+                    updated["ram_total_mb"] = int(manifest.get("ram_total_mb") or 0)
+                    updated["ram_available_mb"] = int(manifest.get("ram_available_mb") or 0)
+                updated["models"] = [m.get("name") for m in peer_models if isinstance(m, dict) and m.get("name")][:100]
+                updated["sync_port"] = int(manifest.get("sync_port") or t["sync_port"])
+                updated["disk_free_label"] = str(manifest.get("disk_free_label") or "")
+                updated["cluster_fingerprint"] = str(manifest.get("cluster_fingerprint") or updated.get("cluster_fingerprint") or "")
+                updated["last_seen_at"] = int(time.time())
+                upsert_paired_peer(updated)
+
+            return {
+                "id": t["id"],
+                "node_name": manifest.get("node_name") or t["node_name"],
+                "host": t["host"],
+                "worker_endpoint": t["worker_endpoint"],
+                "sync_port": int(manifest.get("sync_port") or t["sync_port"]),
+                "status": "online",
+                "error": "",
+                "rtt_ms": manifest.get("rtt_ms"),
+                "gpu": manifest.get("gpu") or "",
+                "disk_free_bytes": int(manifest.get("disk_free_bytes") or 0),
+                "disk_free_label": str(manifest.get("disk_free_label") or ""),
+                "cluster_fingerprint": str(manifest.get("cluster_fingerprint") or ""),
+                "models": peer_models,
+            }
+        except PermissionError as exc:
+            return {
+                "id": t["id"],
+                "node_name": t["node_name"],
+                "host": t["host"],
+                "worker_endpoint": t["worker_endpoint"],
+                "sync_port": t["sync_port"],
+                "status": "auth_mismatch",
+                "error": str(exc),
+                "models": [],
+            }
+        except Exception as exc:
+            return {
+                "id": t["id"],
+                "node_name": t["node_name"],
+                "host": t["host"],
+                "worker_endpoint": t["worker_endpoint"],
+                "sync_port": t["sync_port"],
+                "status": "offline",
+                "error": f"Sync daemon unreachable on {t['host']}:{t['sync_port']} ({exc})",
+                "models": [],
+            }
+
+    peer_checks = list(await asyncio.gather(*(_query_one(t) for t in targets))) if targets else []
+    report = build_cluster_model_matrix(local_models, peer_checks, target_model=target_model)
+    report["sync_port"] = peer_sync_server.port if peer_sync_server.active else DEFAULT_SYNC_PORT
+    report["sync_active"] = peer_sync_server.active
+    return JSONResponse(status_code=200, content=report)
+
+
+@app.post("/api/cluster/models/sync", dependencies=[Depends(verify_gateway_access)])
+async def cluster_models_sync(request: Request):
+    """Start an authenticated, resumable peer-to-peer GGUF push or pull transfer."""
+    body = await _read_json_body(request)
+    direction = str(body.get("direction", "push") or "push").strip().lower()
+    if direction not in ("push", "pull"):
+        raise HTTPException(status_code=400, detail="direction must be 'push' or 'pull'.")
+
+    raw_model = str(body.get("model", "") or "").strip()
+    try:
+        safe_model = validate_gguf_filename(raw_model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    secret = os.environ.get("AEROMESH_WORKER_SECRET", "").strip()
+    if not secret:
+        raise HTTPException(status_code=400, detail="Cluster secret is not configured. Pair your nodes first.")
+
+    peer_id = str(body.get("peer_id", "") or "").strip()
+    peer_host_raw = str(body.get("peer_host", "") or "").strip()
+    try:
+        sync_port = int(body.get("sync_port") or DEFAULT_SYNC_PORT)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="sync_port must be a valid integer port.")
+    peer_name = str(body.get("peer_name", "") or "").strip()
+
+    if peer_id and not peer_host_raw:
+        for p in load_paired_peers():
+            if p.get("id") == peer_id:
+                peer_host_raw = extract_host_from_endpoint(p.get("worker_endpoint", ""))
+                sync_port = int(p.get("sync_port") or DEFAULT_SYNC_PORT)
+                peer_name = peer_name or str(p.get("node_name") or peer_host_raw)
+                break
+
+    if not peer_host_raw:
+        raise HTTPException(status_code=400, detail="Specify a valid peer_id or peer_host to sync with.")
+
+    try:
+        host, port = validate_peer_host(
+            peer_host_raw if ":" in peer_host_raw else f"{peer_host_raw}:{sync_port}",
+            default_port=DEFAULT_SYNC_PORT,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        if direction == "push":
+            local_path = resolve_confined_gguf(safe_model, get_models_dirs())
+            if not local_path:
+                raise HTTPException(status_code=404, detail=f"Local model '{safe_model}' not found.")
+            job = peer_sync_jobs.start_push(
+                peer_name=peer_name or host,
+                host=host,
+                port=port,
+                filename=safe_model,
+                local_path=local_path,
+                secret=secret,
+            )
+        else:
+            job = peer_sync_jobs.start_pull(
+                peer_name=peer_name or host,
+                host=host,
+                port=port,
+                filename=safe_model,
+                primary_dir=get_primary_models_dir(),
+                secret=secret,
+            )
+        return JSONResponse(status_code=200, content={"status": "started", "job": job})
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/cluster/models/sync/jobs", dependencies=[Depends(verify_gateway_access)])
+async def cluster_models_sync_jobs():
+    return JSONResponse(
+        status_code=200,
+        content={
+            "sync_port": peer_sync_server.port if peer_sync_server.active else DEFAULT_SYNC_PORT,
+            "sync_active": peer_sync_server.active,
+            "jobs": peer_sync_jobs.list_jobs(),
+        },
+    )
+
+
+@app.post("/api/cluster/models/sync/cancel", dependencies=[Depends(verify_gateway_access)])
+async def cluster_models_sync_cancel(request: Request):
+    body = await _read_json_body(request)
+    job_id = str(body.get("id", "") or "").strip()
+    if not job_id:
+        raise HTTPException(status_code=400, detail="Missing sync job id.")
+    cancelled = peer_sync_jobs.cancel_job(job_id)
+    if not cancelled:
+        raise HTTPException(status_code=404, detail="Sync job not found.")
+    return JSONResponse(status_code=200, content={"status": "cancelled", "id": job_id})
+
+
+# ============================================================================
+# HARDWARE-AWARE VRAM FIT METER & AUTO LAYER-SPLIT PLANNER
+# ============================================================================
+def _get_cluster_hardware_payload(explicit_peers: Optional[list] = None, include_paired: bool = True) -> dict:
+    hw = detect_local_hardware()
+    nodes = [
+        {
+            "id": "local",
+            "name": _local_node_name(),
+            "role": "coordinator",
+            "gpu_name": hw["gpu_name"],
+            "vram_total_mb": hw["vram_total_mb"],
+            "vram_free_mb": hw["vram_free_mb"],
+            "ram_total_mb": hw["ram_total_mb"],
+            "ram_available_mb": hw["ram_available_mb"],
+            "online": True,
+            "endpoint": "127.0.0.1:8080",
+        }
+    ]
+    saved = load_paired_peers()
+    saved_by_host = {}
+    for p in saved:
+        h = extract_host_from_endpoint(p.get("worker_endpoint", "")) or p.get("tailscale_ip") or p.get("wifi_ip") or ""
+        if h:
+            saved_by_host[h] = p
+
+    if explicit_peers is not None and len(explicit_peers) > 0:
+        seen = set()
+        for idx, raw_ep in enumerate(explicit_peers[:7]):
+            ep = str(raw_ep or "").strip()
+            host = extract_host_from_endpoint(ep)
+            if not host or host in seen:
+                continue
+            seen.add(host)
+            p = saved_by_host.get(host) or {}
+            gpu_str = str(p.get("gpu") or "Remote Worker GPU, 8192 MiB")
+            g_name, g_vram, g_used = parse_gpu_vram_mb(gpu_str)
+            vram_tot = int(p.get("vram_total_mb") or g_vram)
+            vram_free = int(p.get("vram_free_mb") or max(0, vram_tot - g_used))
+            ram_tot = int(p.get("ram_total_mb") or 16384)
+            ram_avail = int(p.get("ram_available_mb") or int(ram_tot * 0.72))
+            nodes.append({
+                "id": p.get("id") or f"worker-{idx+1}",
+                "name": str(p.get("node_name") or host),
+                "role": "worker",
+                "gpu_name": g_name,
+                "vram_total_mb": vram_tot,
+                "vram_free_mb": vram_free,
+                "ram_total_mb": ram_tot,
+                "ram_available_mb": ram_avail,
+                "online": True,
+                "endpoint": ep if ":" in ep else f"{host}:50052",
+            })
+    elif include_paired:
+        for idx, p in enumerate(saved[:7]):
+            gpu_str = str(p.get("gpu") or "GPU / CPU")
+            g_name, g_vram, g_used = parse_gpu_vram_mb(gpu_str)
+            vram_tot = int(p.get("vram_total_mb") or g_vram)
+            vram_free = int(p.get("vram_free_mb") or max(0, vram_tot - g_used))
+            ram_tot = int(p.get("ram_total_mb") or 16384)
+            ram_avail = int(p.get("ram_available_mb") or int(ram_tot * 0.72))
+            nodes.append({
+                "id": p.get("id") or f"worker-{idx+1}",
+                "name": str(p.get("node_name") or f"Worker-{idx+1}"),
+                "role": "worker",
+                "gpu_name": g_name,
+                "vram_total_mb": vram_tot,
+                "vram_free_mb": vram_free,
+                "ram_total_mb": ram_tot,
+                "ram_available_mb": ram_avail,
+                "online": True,
+                "endpoint": str(p.get("worker_endpoint") or ""),
+            })
+
+    norm = normalize_cluster_nodes(nodes)
+    tot_vram = sum(n["vram_total_mb"] for n in norm)
+    tot_ram = sum(n["ram_total_mb"] for n in norm)
+    return {
+        "local": hw,
+        "nodes": norm,
+        "total_vram_mb": tot_vram,
+        "total_vram_label": mb_to_gb_label(tot_vram),
+        "total_ram_mb": tot_ram,
+        "total_ram_label": mb_to_gb_label(tot_ram),
+    }
+
+
+@app.get("/api/cluster/hardware", dependencies=[Depends(verify_gateway_access)])
+async def cluster_hardware_info():
+    return JSONResponse(status_code=200, content=_get_cluster_hardware_payload())
+
+
+@app.post("/api/cluster/fit/plan", dependencies=[Depends(verify_gateway_access)])
+async def cluster_fit_plan(request: Request):
+    """
+    Compute a hardware-aware VRAM fit analysis and heterogeneous multi-node
+    layer-split plan for any local GGUF or pre-download catalog/HF model.
+    """
+    body = await _read_json_body(request)
+    model_name = str(body.get("model") or body.get("name") or "").strip()
+    if not model_name or len(model_name) > 260:
+        raise HTTPException(status_code=400, detail="Provide a valid model name or filename.")
+
+    try:
+        context_length = max(512, min(131072, int(body.get("context_length") or 4096)))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="context_length must be an integer between 512 and 131072.")
+
+    try:
+        size_bytes = max(0, int(body.get("size_bytes") or 0))
+    except (TypeError, ValueError):
+        size_bytes = 0
+
+    size_hint = str(body.get("size_hint") or "").strip()[:40]
+    params_hint = str(body.get("params") or "").strip()[:20]
+    quant_hint = str(body.get("quant") or "").strip()[:20]
+    mode = str(body.get("mode") or "cluster").strip().lower()
+
+    # Check if this model exists locally so we can parse its exact GGUF v2/v3 KV header
+    local_file = None
+    try:
+        local_file = resolve_confined_gguf(model_name, get_models_dirs())
+    except ValueError:
+        local_file = None
+
+    spec = await asyncio.to_thread(
+        build_model_spec,
+        name=model_name,
+        size_bytes=size_bytes,
+        size_hint=size_hint,
+        params_hint=params_hint,
+        quant_hint=quant_hint,
+        file_path=local_file,
+    )
+
+    # Resolve target node list: custom_nodes (simulator) OR explicit peers OR live cluster / local-only
+    custom_nodes = body.get("custom_nodes")
+    if isinstance(custom_nodes, list) and len(custom_nodes) > 0:
+        sanitized_nodes = []
+        for idx, cn in enumerate(custom_nodes[:8]):
+            if not isinstance(cn, dict):
+                continue
+            try:
+                vram_mb = max(0, min(524288, int(cn.get("vram_total_mb") or 0)))
+                ram_mb = max(2048, min(2097152, int(cn.get("ram_total_mb") or 16384)))
+            except (TypeError, ValueError):
+                continue
+            sanitized_nodes.append({
+                "id": str(cn.get("id") or f"sim-{idx}")[:40],
+                "name": str(cn.get("name") or f"Node-{idx+1}")[:60],
+                "role": "coordinator" if idx == 0 else "worker",
+                "gpu_name": str(cn.get("gpu_name") or cn.get("gpu") or "GPU")[:80],
+                "vram_total_mb": vram_mb,
+                "vram_free_mb": vram_mb,
+                "ram_total_mb": ram_mb,
+                "ram_available_mb": int(ram_mb * 0.78),
+                "online": bool(cn.get("online", True)),
+                "endpoint": str(cn.get("endpoint") or "")[:64],
+            })
+        target_nodes = sanitized_nodes
+    else:
+        raw_peers = body.get("peers")
+        explicit_peers = None
+        if isinstance(raw_peers, str) and raw_peers.strip():
+            explicit_peers = [p.strip() for p in raw_peers.split(",") if p.strip()]
+        elif isinstance(raw_peers, list) and raw_peers:
+            explicit_peers = [str(p).strip() for p in raw_peers if str(p).strip()]
+        hw_payload = _get_cluster_hardware_payload(
+            explicit_peers=explicit_peers,
+            include_paired=(mode != "local"),
+        )
+        target_nodes = hw_payload["nodes"]
+
+    plan = plan_layer_split(spec, target_nodes, context_length=context_length)
+    return JSONResponse(status_code=200, content=plan)
 
 
 # ---------------------------------------------------------------------------

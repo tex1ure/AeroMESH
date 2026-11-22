@@ -8,7 +8,7 @@ Notable changes to AeroMESH are documented here following [Keep a Changelog](htt
 
 ### Added
 - **Windows Setup Wizard (`installer/AeroMesh.iss`, `installer/build-installer.ps1`)**:
-  - Full Inno Setup x64 installer (`AeroMesh-Setup-x64.exe`) with VS Code-style component checkboxes: NVIDIA CUDA / CPU `llama.cpp` runtime DLLs, Tailscale VPN check, Desktop / Start Menu shortcuts, PATH registration, and Windows Firewall rules for `:50052` and `:50053`.
+  - Full Inno Setup x64 installer (`AeroMesh-Setup-x64.exe`) with VS Code-style component checkboxes: NVIDIA CUDA / CPU `llama.cpp` runtime DLLs, Tailscale VPN check, Desktop / Start Menu shortcuts, PATH registration, and Windows Firewall rules for `:50052`, `:50053`, and `:50054`.
   - Bundled standalone Python embeddable runtime so end users do not need to install Python, Rust, or Visual Studio.
   - Portable `setup.ps1` improvements including `-CloneLlamaCpp` support and dynamic FFI loading without requiring MinGW `dlltool.exe`.
 - **Model Hub Tab (`static/js/models_hub.js`, `app.py` `/api/models/*`)**:
@@ -20,6 +20,14 @@ Notable changes to AeroMESH are documented here following [Keep a Changelog](htt
   - Ephemeral encrypted pairing listener on TCP `:50053` protected by a 6-digit one-time PIN (PBKDF2-HMAC-SHA256 + Encrypt-then-MAC HMAC-SHA256, 5-minute TTL, 5-attempt lockout).
   - Copyable one-click invite tokens (`AERO-<ip>:50053-<pin>`) for both Tailscale and Wi-Fi LAN, plus automatic nearby host discovery.
   - Saved peer registry showing live GPU info, key fingerprint match (`KEY-XXXX-XXXX`), matching GGUF models, one-click **Use as Worker**, and one-click **Rotate Cluster Key**.
+- **Automatic Multi-Node Model Check & Peer Model Sync (`peer_model_sync.py`, `app.py` `/api/cluster/models/*`)**:
+  - Background TCP `:50054` sync daemon (`aeromesh-sync-v1`) using mutual challenge-response HMAC-SHA256 derived from `AEROMESH_WORKER_SECRET` with fast deterministic GGUF header + content fingerprinting (`size` + head/mid/tail SHA-256).
+  - Cluster tab **Multi-Node Model Check & Peer Sync** matrix detecting `Verified Match`, `Missing on Peer`, `GGUF Hash Mismatch`, and `Available on Peer` with one-click resumable LAN/Tailscale **Push**, **Push to All Missing**, **Overwrite & Sync**, and **Pull** transfers (live progress, MB/s, ETA, and Cancel).
+  - Automatic **Pre-Flight Model Check** inside the **Node Control Center** modal with inline one-click **Sync Model to Worker** before launching distributed inference.
+- **Hardware-Aware VRAM Fit Meter & Auto Layer-Split Planner (`vram_planner.py`, `app.py` `/api/cluster/hardware` & `/api/cluster/fit/plan`, `static/js/model_hub.js`)**:
+  - Fast binary GGUF v2/v3 KV metadata header reader + pre-download model architecture profiler and heterogeneous multi-node GPU VRAM + System RAM layer allocator.
+  - Interactive **VRAM Fit Meter & Auto Layer-Split Planner** in the **Model Hub** with live `Cluster` / `This PC` toggle, context length selector (`2K`–`32K`), `+ Simulate Worker` GPU presets, proportional multi-node layer split bar, per-node GPU VRAM & System RAM spill meters with exact `--layers` CLI flags, quantization/context recommendations, and live fit badges (`Fits Local GPU`, `2-Node VRAM Fit`, `Tight VRAM Fit`, `GPU + RAM Spill`, `Exceeds Memory`) across Catalog cards, Hugging Face quantizations, and Local Library rows.
+  - Inline **VRAM Fit & Auto-Split Bar** inside the **Node Control Center** modal with optional one-click `Auto-Split (--layers ...)` launch support wired through `POST /api/node/start`.
 - **Offline Vendored UI Assets (`static/vendor/`)**:
   - Bundled Lucide, Marked, DOMPurify, Highlight.js, and KaTeX locally with automatic SRI-pinned CDN fallback so the Studio works reliably offline.
 
