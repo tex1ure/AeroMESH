@@ -245,7 +245,40 @@ impl Utf8StreamAccumulator {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    #[serde(default)]
+    pub content: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl ChatMessage {
+    /// Extracts flattened text content from string or multimodal OpenAI content-part arrays.
+    pub fn text_content(&self) -> String {
+        match &self.content {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Array(parts)) => {
+                let mut chunks = Vec::new();
+                for p in parts {
+                    if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
+                        if !t.is_empty() {
+                            chunks.push(t.to_string());
+                        }
+                    } else if let Some(s) = p.as_str() {
+                        if !s.is_empty() {
+                            chunks.push(s.to_string());
+                        }
+                    }
+                }
+                chunks.join("\n")
+            }
+            Some(serde_json::Value::Null) | None => String::new(),
+            Some(other) => other.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +298,12 @@ pub struct ChatCompletionRequest {
     pub session_id: Option<u64>,
     #[serde(default)]
     pub reasoning: Option<bool>,
+    #[serde(default)]
+    pub tools: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
+    #[serde(default)]
+    pub response_format: Option<serde_json::Value>,
 }
 
 impl ChatCompletionRequest {
@@ -300,7 +339,12 @@ impl ChatCompletionRequest {
                     Some("invalid_value"),
                 ));
             }
-            if msg.content.trim().is_empty() {
+            let has_tool_calls = msg
+                .tool_calls
+                .as_ref()
+                .map(|tc| !tc.is_empty())
+                .unwrap_or(false);
+            if msg.text_content().trim().is_empty() && !(role == "assistant" && has_tool_calls) {
                 return Err(ApiErrorResponse::unprocessable(
                     format!("Message at index {} has empty 'content'.", i),
                     Some("messages.content"),
@@ -388,6 +432,8 @@ pub struct ChatCompletionChunkDelta {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -885,10 +931,124 @@ fn sanitize_chat_content(content: &str) -> String {
     clean.trim().to_string()
 }
 
+fn build_tool_and_json_system_directive(
+    tools: Option<&[serde_json::Value]>,
+    tool_choice: Option<&serde_json::Value>,
+    response_format: Option<&serde_json::Value>,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+
+    let tool_choice_is_none = tool_choice
+        .and_then(|v| v.as_str())
+        .map(|s| s.eq_ignore_ascii_case("none"))
+        .unwrap_or(false);
+
+    if let Some(tool_list) = tools {
+        if !tool_list.is_empty() && !tool_choice_is_none {
+            let tools_json = serde_json::to_string_pretty(tool_list).unwrap_or_default();
+            parts.push(format!(
+                "# Tools\nYou may call one or more functions to assist with the user query.\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{}\n</tools>\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": \"<function-name>\", \"arguments\": {{<args-json-object>}}}}\n</tool_call>",
+                tools_json
+            ));
+        }
+    }
+
+    if let Some(rf) = response_format {
+        let rf_type = rf.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if rf_type == "json_object" {
+            parts.push(
+                "# Output Format\nYou MUST respond with a single valid JSON object only. Do not include markdown fences or explanatory prose outside the JSON object."
+                    .to_string(),
+            );
+        } else if rf_type == "json_schema" {
+            let schema_str = rf
+                .get("json_schema")
+                .map(|s| serde_json::to_string(s).unwrap_or_default())
+                .unwrap_or_default();
+            parts.push(format!(
+                "# Output Format\nYou MUST respond with a single valid JSON object matching this schema: {}. Do not include markdown fences or prose.",
+                schema_str
+            ));
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+fn extract_tool_calls_from_text(text: &str, session_id: u64) -> Option<Vec<serde_json::Value>> {
+    let mut calls = Vec::new();
+    let mut rest = text;
+    let mut idx = 0usize;
+    while let Some(start) = rest.find("<tool_call>") {
+        let after_start = &rest[start + "<tool_call>".len()..];
+        let Some(end) = after_start.find("</tool_call>") else {
+            break;
+        };
+        let raw = after_start[..end].trim();
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
+                let args_val = parsed
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let args_str = match args_val {
+                    serde_json::Value::String(s) => s,
+                    other => serde_json::to_string(&other).unwrap_or_else(|_| "{}".to_string()),
+                };
+                calls.push(serde_json::json!({
+                    "id": format!("call_{}_{}", session_id, idx),
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": args_str
+                    }
+                }));
+                idx += 1;
+            }
+        }
+        rest = &after_start[end + "</tool_call>".len()..];
+    }
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls)
+    }
+}
+
+fn format_message_body(msg: &ChatMessage) -> String {
+    let role = msg.role.trim().to_lowercase();
+    let base = sanitize_chat_content(&msg.text_content());
+    if role == "tool" || role == "function" {
+        let label = msg
+            .name
+            .as_deref()
+            .or(msg.tool_call_id.as_deref())
+            .unwrap_or("tool");
+        return format!("<tool_response name=\"{}\">\n{}\n</tool_response>", label, base);
+    }
+    if role == "assistant" {
+        if let Some(ref tc) = msg.tool_calls {
+            if !tc.is_empty() {
+                let serialized = serde_json::to_string(tc).unwrap_or_default();
+                if base.is_empty() {
+                    return format!("<tool_call>\n{}\n</tool_call>", serialized);
+                }
+                return format!("{}\n<tool_call>\n{}\n</tool_call>", base, serialized);
+            }
+        }
+    }
+    base
+}
+
 fn format_chat_prompt(
     messages: &[ChatMessage],
     format: ChatTemplateFormat,
     is_reasoning: bool,
+    extra_system: Option<&str>,
 ) -> String {
     if messages.is_empty() {
         return String::new();
@@ -898,10 +1058,13 @@ fn format_chat_prompt(
         ChatTemplateFormat::DeepSeek => {
             let mut prompt = String::new();
             let mut system_text = String::new();
+            if let Some(extra) = extra_system {
+                system_text.push_str(extra);
+            }
 
             for msg in messages {
                 let role = msg.role.trim().to_lowercase();
-                let clean = sanitize_chat_content(&msg.content);
+                let clean = format_message_body(msg);
                 if clean.is_empty() {
                     continue;
                 }
@@ -916,12 +1079,12 @@ fn format_chat_prompt(
             let mut is_first_user = true;
             for msg in messages {
                 let role = msg.role.trim().to_lowercase();
-                let clean = sanitize_chat_content(&msg.content);
+                let clean = format_message_body(msg);
                 if clean.is_empty() || role == "system" {
                     continue;
                 }
 
-                if role == "user" {
+                if role == "user" || role == "tool" || role == "function" {
                     prompt.push_str("<｜User｜>");
                     if is_first_user && !system_text.is_empty() {
                         prompt.push_str(&system_text);
@@ -947,19 +1110,36 @@ fn format_chat_prompt(
             let has_system = messages
                 .iter()
                 .any(|m| m.role.eq_ignore_ascii_case("system"));
-            if !has_system && !is_reasoning {
-                prompt.push_str(
-                    "<|im_start|>system\nYou are a helpful, intelligent AI assistant.<|im_end|>\n",
-                );
+            if !has_system {
+                if let Some(extra) = extra_system {
+                    prompt.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", extra));
+                } else if !is_reasoning {
+                    prompt.push_str(
+                        "<|im_start|>system\nYou are a helpful, intelligent AI assistant.<|im_end|>\n",
+                    );
+                }
             }
 
+            let mut appended_extra = !has_system;
             for msg in messages {
                 let role = msg.role.trim().to_lowercase();
-                let clean = sanitize_chat_content(&msg.content);
+                let mut clean = format_message_body(msg);
                 if clean.is_empty() {
                     continue;
                 }
-                prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, clean));
+                if role == "system" && !appended_extra {
+                    if let Some(extra) = extra_system {
+                        clean.push_str("\n\n");
+                        clean.push_str(extra);
+                    }
+                    appended_extra = true;
+                }
+                let mapped_role = if role == "tool" || role == "function" {
+                    "user"
+                } else {
+                    role.as_str()
+                };
+                prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", mapped_role, clean));
             }
 
             prompt.push_str("<|im_start|>assistant\n");
@@ -971,9 +1151,15 @@ fn format_chat_prompt(
         ChatTemplateFormat::Llama3 => {
             let mut prompt = String::new();
             prompt.push_str("<|begin_of_text|>");
+            if let Some(extra) = extra_system {
+                prompt.push_str(&format!(
+                    "<|start_header_id|>system<|end_header_id|>\n\n{}<|eot_id|>",
+                    extra
+                ));
+            }
             for msg in messages {
                 let role = msg.role.trim().to_lowercase();
-                let clean = sanitize_chat_content(&msg.content);
+                let clean = format_message_body(msg);
                 if clean.is_empty() {
                     continue;
                 }
@@ -986,9 +1172,12 @@ fn format_chat_prompt(
         }
         ChatTemplateFormat::Raw => {
             let mut prompt = String::new();
+            if let Some(extra) = extra_system {
+                prompt.push_str(&format!("system: {}\n", extra));
+            }
             for msg in messages {
                 let role = msg.role.trim().to_lowercase();
-                let clean = sanitize_chat_content(&msg.content);
+                let clean = format_message_body(msg);
                 if !clean.is_empty() {
                     prompt.push_str(&format!("{}: {}\n", role, clean));
                 }
@@ -1082,7 +1271,17 @@ async fn handle_chat_completions(
 
     let is_reasoning = req.reasoning.unwrap_or(is_reasoning_default) && is_reasoning_default;
     let is_streaming = req.stream.unwrap_or(true);
-    let prompt = format_chat_prompt(&req.messages, chat_format, is_reasoning);
+    let extra_system = build_tool_and_json_system_directive(
+        req.tools.as_deref(),
+        req.tool_choice.as_ref(),
+        req.response_format.as_ref(),
+    );
+    let prompt = format_chat_prompt(
+        &req.messages,
+        chat_format,
+        is_reasoning,
+        extra_system.as_deref(),
+    );
 
     let max_tokens = req
         .max_tokens
@@ -1154,6 +1353,7 @@ async fn handle_chat_completions(
                     delta: ChatCompletionChunkDelta {
                         role,
                         content: if text.is_empty() { None } else { Some(text) },
+                        tool_calls: None,
                     },
                     finish_reason: None,
                 }],
@@ -1177,6 +1377,7 @@ async fn handle_chat_completions(
                 delta: ChatCompletionChunkDelta {
                     role: None,
                     content: None,
+                    tool_calls: None,
                 },
                 finish_reason: Some("stop".to_string()),
             }],
@@ -1194,6 +1395,11 @@ async fn handle_chat_completions(
             .into_response()
     } else {
         let current_model = active_model.clone();
+        let has_tools = req
+            .tools
+            .as_ref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false);
         let mut client = state.coordinator.lock().await;
         match client
             .generate_pipeline(&prompt, max_tokens, temp, top_p, session_id, None)
@@ -1203,6 +1409,34 @@ async fn handle_chat_completions(
                 if is_reasoning && !generated_text.starts_with("<think>") {
                     generated_text = format!("<think>\n{}", generated_text);
                 }
+                let parsed_tools = if has_tools {
+                    extract_tool_calls_from_text(&generated_text, session_id)
+                } else {
+                    None
+                };
+                let (message, finish_reason) = if let Some(tool_calls) = parsed_tools {
+                    (
+                        ChatMessage {
+                            role: "assistant".to_string(),
+                            content: None,
+                            tool_calls: Some(tool_calls),
+                            tool_call_id: None,
+                            name: None,
+                        },
+                        "tool_calls".to_string(),
+                    )
+                } else {
+                    (
+                        ChatMessage {
+                            role: "assistant".to_string(),
+                            content: Some(serde_json::Value::String(generated_text)),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            name: None,
+                        },
+                        "stop".to_string(),
+                    )
+                };
                 let resp = ChatCompletionResponse {
                     id: format!("chatcmpl-{}", session_id),
                     object: "chat.completion".to_string(),
@@ -1213,11 +1447,8 @@ async fn handle_chat_completions(
                     model: current_model,
                     choices: vec![ChatChoice {
                         index: 0,
-                        message: ChatMessage {
-                            role: "assistant".to_string(),
-                            content: generated_text,
-                        },
-                        finish_reason: "stop".to_string(),
+                        message,
+                        finish_reason,
                     }],
                 };
                 Json(resp).into_response()
@@ -1280,7 +1511,10 @@ mod tests {
             model: Some("qwen2.5-0.5b-instruct.gguf".to_string()),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
-                content: "Hello AeroMESH".to_string(),
+                content: Some(serde_json::Value::String("Hello AeroMESH".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
             }],
             max_tokens: Some(256),
             temperature: Some(0.7),
@@ -1288,6 +1522,9 @@ mod tests {
             stream: Some(true),
             session_id: Some(12345),
             reasoning: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
         }
     }
 
@@ -1320,7 +1557,7 @@ mod tests {
     #[test]
     fn test_chat_completion_validation_empty_content_returns_422() {
         let mut req = sample_valid_request();
-        req.messages[0].content = "   \n\t  ".to_string();
+        req.messages[0].content = Some(serde_json::Value::String("   \n\t  ".to_string()));
         let (status, Json(err)) = req.validate().unwrap_err();
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(err.error.param, Some("messages.content".to_string()));

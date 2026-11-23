@@ -797,7 +797,18 @@ impl LlamaPipelineInstance {
         let mut capture_state = Box::new(ActivationCaptureState::default());
 
         let mut cparams = llama_call!(llama_context_default_params)?;
-        cparams.n_ctx = if n_ctx > 0 { n_ctx } else { DEFAULT_N_CTX };
+        let effective_n_ctx = if n_ctx > 0 {
+            n_ctx.clamp(512, 131_072)
+        } else if let Ok(env_ctx) = std::env::var("AEROMESH_N_CTX") {
+            env_ctx
+                .trim()
+                .parse::<u32>()
+                .map(|v| v.clamp(512, 131_072))
+                .unwrap_or(DEFAULT_N_CTX)
+        } else {
+            DEFAULT_N_CTX
+        };
+        cparams.n_ctx = effective_n_ctx;
         cparams.n_threads = physical_threads;
         cparams.n_threads_batch = physical_threads;
         if !slice_config.is_last_stage {

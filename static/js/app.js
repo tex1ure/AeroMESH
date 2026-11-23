@@ -38,9 +38,58 @@ window.getApiUrl = window.getApiUrl || function(path) {
   let lastClusterPayload = null;
 
   let maxTokens = 1024;
-  const tokenSteps = [256, 512, 1024, 2048, 4096];
+  const tokenSteps = [256, 512, 1024, 2048, 4096, 8192];
   let enableReasoning = true;
   let clearKvOnSend = false;
+
+  // --- INFERENCE SETTINGS & SYSTEM PROMPT PRESETS ---
+  const PRESETS_STORAGE_KEY = 'aeromesh_prompt_presets_v1';
+  const DEFAULT_CHAT_SETTINGS = {
+    temperature: 0.7,
+    topP: 0.9,
+    maxTokens: 1024,
+    systemPrompt: '',
+    presetId: 'default'
+  };
+  const BUILTIN_PROMPT_PRESETS = [
+    {
+      id: 'default',
+      name: 'Default Assistant (Neutral)',
+      builtin: true,
+      prompt: ''
+    },
+    {
+      id: 'coding',
+      name: 'Senior Systems & Code Engineer',
+      builtin: true,
+      prompt: 'You are a senior Rust, C++, and Python systems engineer. Provide direct, production-grade solutions with clean compilable code and exact performance or memory trade-offs.'
+    },
+    {
+      id: 'concise',
+      name: 'Concise Technical Writer',
+      builtin: true,
+      prompt: 'Be concise and direct. Lead with the answer, use crisp bullet points or short code blocks, and avoid filler.'
+    },
+    {
+      id: 'json_agent',
+      name: 'Structured JSON Extractor',
+      builtin: true,
+      prompt: 'Respond with valid, strictly structured JSON matching the user request without extra prose or markdown commentary.'
+    },
+    {
+      id: 'tutor',
+      name: 'Step-by-Step Socratic Tutor',
+      builtin: true,
+      prompt: 'Explain concepts clearly from first principles using concrete examples, step-by-step derivations, and brief recap checks.'
+    }
+  ];
+
+  let customPromptPresets = [];
+  let runtimeSettings = {
+    n_ctx: 4096,
+    ngl: -1,
+    customNglMemory: 40
+  };
 
   // --- DOM ELEMENTS ---
   const elements = {
@@ -61,6 +110,9 @@ window.getApiUrl = window.getApiUrl || function(path) {
     pillTokens: document.getElementById('pill-tokens'),
     maxTokensLabel: document.getElementById('max-tokens-label'),
     pillClearKv: document.getElementById('pill-clearkv'),
+    pillInferenceSettings: document.getElementById('pill-inference-settings'),
+    pillInferenceSummary: document.getElementById('pill-inference-summary'),
+    btnOpenSettings: document.getElementById('btn-open-settings'),
     btnResetSession: document.getElementById('btn-reset-session'),
     btnExportChat: document.getElementById('btn-export-chat'),
     btnClearAll: document.getElementById('btn-clear-all'),
@@ -79,7 +131,33 @@ window.getApiUrl = window.getApiUrl || function(path) {
     modalNodesContainer: document.getElementById('modal-nodes-container'),
     modalStatusDot: document.getElementById('modal-status-dot'),
     modalClusterStatus: document.getElementById('modal-cluster-status'),
-    suggestionCards: document.querySelectorAll('.suggestion-card')
+    suggestionCards: document.querySelectorAll('.suggestion-card'),
+    // Inference Settings Drawer
+    infDrawerBackdrop: document.getElementById('inference-drawer-backdrop'),
+    infDrawer: document.getElementById('inference-drawer'),
+    infDrawerClose: document.getElementById('inf-drawer-close'),
+    infChatScopeLabel: document.getElementById('inf-chat-scope-label'),
+    infTempRange: document.getElementById('inf-temp-range'),
+    infTempVal: document.getElementById('inf-temp-val'),
+    infToppRange: document.getElementById('inf-topp-range'),
+    infToppVal: document.getElementById('inf-topp-val'),
+    infMaxTokensSelect: document.getElementById('inf-maxtokens-select'),
+    infCtxVal: document.getElementById('inf-ctx-val'),
+    infCtxButtons: document.querySelectorAll('#inf-ctx-buttons .inf-seg-btn'),
+    infNglVal: document.getElementById('inf-ngl-val'),
+    infNglAllToggle: document.getElementById('inf-ngl-all-toggle'),
+    infNglRange: document.getElementById('inf-ngl-range'),
+    infNglNumber: document.getElementById('inf-ngl-number'),
+    infApplyRuntimeBtn: document.getElementById('inf-apply-runtime-btn'),
+    infRuntimeStatus: document.getElementById('inf-runtime-status'),
+    infPromptTokens: document.getElementById('inf-prompt-tokens'),
+    infPresetSelect: document.getElementById('inf-preset-select'),
+    infPresetDeleteBtn: document.getElementById('inf-preset-delete-btn'),
+    infSystemPrompt: document.getElementById('inf-system-prompt'),
+    infPresetNameInput: document.getElementById('inf-preset-name-input'),
+    infPresetSaveBtn: document.getElementById('inf-preset-save-btn'),
+    infPresetStatus: document.getElementById('inf-preset-status'),
+    infResetBtn: document.getElementById('inf-reset-btn')
   };
 
   // --- INITIALIZATION ---
@@ -104,6 +182,8 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
   async function init() {
     loadConversations();
+    loadCustomPromptPresets();
+    renderPresetOptions();
     setupEventListeners();
     configureMarked();
     initDockResizeObserver();
@@ -725,11 +805,275 @@ window.getApiUrl = window.getApiUrl || function(path) {
     return conversations.find((c) => c.id === currentChatId);
   }
 
+  function getChatSettings(chat) {
+    if (!chat) return { ...DEFAULT_CHAT_SETTINGS };
+    if (!chat.settings || typeof chat.settings !== 'object') {
+      chat.settings = { ...DEFAULT_CHAT_SETTINGS };
+    }
+    const s = chat.settings;
+    return {
+      temperature: Number.isFinite(Number(s.temperature)) ? Number(s.temperature) : DEFAULT_CHAT_SETTINGS.temperature,
+      topP: Number.isFinite(Number(s.topP)) ? Number(s.topP) : DEFAULT_CHAT_SETTINGS.topP,
+      maxTokens: Number.isFinite(Number(s.maxTokens)) ? Number(s.maxTokens) : DEFAULT_CHAT_SETTINGS.maxTokens,
+      systemPrompt: typeof s.systemPrompt === 'string' ? s.systemPrompt : '',
+      presetId: typeof s.presetId === 'string' ? s.presetId : 'default'
+    };
+  }
+
+  function updateCurrentChatSettings(patch) {
+    const chat = getCurrentChat();
+    if (!chat) return;
+    const current = getChatSettings(chat);
+    chat.settings = { ...current, ...patch };
+    maxTokens = chat.settings.maxTokens;
+    if (elements.maxTokensLabel) {
+      elements.maxTokensLabel.textContent = `Max Tokens: ${maxTokens}`;
+    }
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations));
+    } catch (e) {
+      console.error(e);
+    }
+    updateInferencePillSummary();
+  }
+
+  function loadCustomPromptPresets() {
+    try {
+      const raw = localStorage.getItem(PRESETS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          customPromptPresets = parsed.filter(
+            (p) => p && typeof p.id === 'string' && typeof p.name === 'string' && typeof p.prompt === 'string'
+          );
+        }
+      }
+    } catch (_) {
+      customPromptPresets = [];
+    }
+  }
+
+  function saveCustomPromptPresets() {
+    try {
+      localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(customPromptPresets));
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  function getAllPromptPresets() {
+    return [...BUILTIN_PROMPT_PRESETS, ...customPromptPresets];
+  }
+
+  function renderPresetOptions(selectedId) {
+    if (!elements.infPresetSelect) return;
+    const presets = getAllPromptPresets();
+    const curVal = selectedId || elements.infPresetSelect.value || 'default';
+    elements.infPresetSelect.innerHTML = '';
+
+    const builtinGroup = document.createElement('optgroup');
+    builtinGroup.label = 'Built-in Personas';
+    BUILTIN_PROMPT_PRESETS.forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      builtinGroup.appendChild(opt);
+    });
+    elements.infPresetSelect.appendChild(builtinGroup);
+
+    if (customPromptPresets.length > 0) {
+      const customGroup = document.createElement('optgroup');
+      customGroup.label = 'Saved Custom Presets';
+      customPromptPresets.forEach((p) => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name;
+        customGroup.appendChild(opt);
+      });
+      elements.infPresetSelect.appendChild(customGroup);
+    }
+
+    const customOpt = document.createElement('option');
+    customOpt.value = 'custom';
+    customOpt.textContent = 'Custom (Unsaved for this chat)';
+    elements.infPresetSelect.appendChild(customOpt);
+
+    const hasMatch = presets.some((p) => p.id === curVal) || curVal === 'custom';
+    elements.infPresetSelect.value = hasMatch ? curVal : 'default';
+
+    if (elements.infPresetDeleteBtn) {
+      const isUserPreset = customPromptPresets.some((p) => p.id === elements.infPresetSelect.value);
+      elements.infPresetDeleteBtn.style.display = isUserPreset ? 'inline' : 'none';
+    }
+  }
+
+  function formatCtxShort(nCtx) {
+    const n = Number(nCtx || 4096);
+    return n >= 1024 ? `${Math.round(n / 1024)}K` : String(n);
+  }
+
+  function updateInferencePillSummary() {
+    const chat = getCurrentChat();
+    const s = getChatSettings(chat);
+    const hasCustomPrompt = Boolean((s.systemPrompt || '').trim());
+    const tempStr = Number(s.temperature).toFixed(2).replace(/0$/, '');
+    const ctxShort = formatCtxShort(runtimeSettings.n_ctx);
+    if (elements.pillInferenceSummary) {
+      elements.pillInferenceSummary.textContent = hasCustomPrompt
+        ? `T ${tempStr} · ${ctxShort} · Persona`
+        : `T ${tempStr} · ${ctxShort}`;
+    }
+    if (elements.pillInferenceSettings) {
+      elements.pillInferenceSettings.classList.toggle('active', hasCustomPrompt || Math.abs(s.temperature - 0.7) > 0.01);
+    }
+    if (elements.infPromptTokens) {
+      const chars = (s.systemPrompt || '').trim().length;
+      const approxTokens = chars ? Math.max(1, Math.round(chars / 4)) : 0;
+      elements.infPromptTokens.textContent = `~${approxTokens} tok`;
+    }
+  }
+
+  function renderRuntimeControls() {
+    const nCtx = Number(runtimeSettings.n_ctx || 4096);
+    const ngl = Number(runtimeSettings.ngl ?? -1);
+    if (elements.infCtxVal) {
+      elements.infCtxVal.textContent = nCtx.toLocaleString();
+    }
+    if (elements.infCtxButtons) {
+      elements.infCtxButtons.forEach((btn) => {
+        btn.classList.toggle('active', Number(btn.getAttribute('data-ctx')) === nCtx);
+      });
+    }
+    const isAllGpu = ngl < 0;
+    if (elements.infNglAllToggle) {
+      elements.infNglAllToggle.checked = isAllGpu;
+    }
+    if (elements.infNglRange) {
+      elements.infNglRange.disabled = isAllGpu;
+      elements.infNglRange.value = String(isAllGpu ? runtimeSettings.customNglMemory : Math.min(99, Math.max(0, ngl)));
+    }
+    if (elements.infNglNumber) {
+      elements.infNglNumber.disabled = isAllGpu;
+      elements.infNglNumber.value = String(isAllGpu ? runtimeSettings.customNglMemory : Math.max(0, ngl));
+    }
+    if (elements.infNglVal) {
+      elements.infNglVal.textContent = isAllGpu
+        ? 'All GPU (-1)'
+        : (ngl === 0 ? '0 (CPU Only)' : `${ngl} layers`);
+    }
+    updateInferencePillSummary();
+  }
+
+  function syncDrawerToCurrentChat() {
+    const chat = getCurrentChat();
+    const s = getChatSettings(chat);
+    maxTokens = s.maxTokens;
+    if (elements.maxTokensLabel) {
+      elements.maxTokensLabel.textContent = `Max Tokens: ${maxTokens}`;
+    }
+    if (elements.infChatScopeLabel) {
+      const title = (chat && chat.title) ? chat.title : 'Current Chat';
+      elements.infChatScopeLabel.textContent = `Chat: "${title}" · Saved per chat`;
+    }
+    if (elements.infTempRange) elements.infTempRange.value = String(s.temperature);
+    if (elements.infTempVal) elements.infTempVal.textContent = Number(s.temperature).toFixed(2);
+    if (elements.infToppRange) elements.infToppRange.value = String(s.topP);
+    if (elements.infToppVal) elements.infToppVal.textContent = Number(s.topP).toFixed(2);
+    if (elements.infMaxTokensSelect) elements.infMaxTokensSelect.value = String(s.maxTokens);
+    if (elements.infSystemPrompt) elements.infSystemPrompt.value = s.systemPrompt || '';
+    renderPresetOptions(s.presetId || 'default');
+    renderRuntimeControls();
+  }
+
+  function openInferenceDrawer() {
+    syncDrawerToCurrentChat();
+    if (elements.infDrawerBackdrop) {
+      elements.infDrawerBackdrop.classList.add('open');
+      elements.infDrawerBackdrop.setAttribute('aria-hidden', 'false');
+    }
+    if (elements.infDrawer) {
+      elements.infDrawer.classList.add('open');
+      elements.infDrawer.setAttribute('aria-hidden', 'false');
+    }
+    if (window.lucide) lucide.createIcons();
+  }
+
+  function closeInferenceDrawer() {
+    if (elements.infDrawerBackdrop) {
+      elements.infDrawerBackdrop.classList.remove('open');
+      elements.infDrawerBackdrop.setAttribute('aria-hidden', 'true');
+    }
+    if (elements.infDrawer) {
+      elements.infDrawer.classList.remove('open');
+      elements.infDrawer.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  window.openInferenceDrawer = openInferenceDrawer;
+  window.closeInferenceDrawer = closeInferenceDrawer;
+  window.syncInferenceRuntimeFromServer = function (cfg) {
+    if (!cfg) return;
+    if (cfg.n_ctx) runtimeSettings.n_ctx = Number(cfg.n_ctx);
+    if (cfg.ngl !== undefined && cfg.ngl !== null) {
+      runtimeSettings.ngl = Number(cfg.ngl);
+      if (runtimeSettings.ngl >= 0) {
+        runtimeSettings.customNglMemory = runtimeSettings.ngl;
+      }
+    }
+    renderRuntimeControls();
+  };
+
+  function showDrawerNote(el, text, isErr) {
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'inf-runtime-status' + (isErr ? ' is-error' : ' is-ok');
+    el.style.display = 'block';
+    clearTimeout(el._hideTimer);
+    el._hideTimer = setTimeout(() => {
+      el.style.display = 'none';
+    }, 5000);
+  }
+
+  async function applyRuntimeSettingsToServer() {
+    if (!elements.infApplyRuntimeBtn) return;
+    const orig = elements.infApplyRuntimeBtn.innerHTML;
+    elements.infApplyRuntimeBtn.disabled = true;
+    elements.infApplyRuntimeBtn.innerHTML = '<span>Saving…</span>';
+    try {
+      const resp = await fetch(getApiUrl('/api/server/config'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          n_ctx: runtimeSettings.n_ctx,
+          ngl: runtimeSettings.ngl,
+          apply_restart: true
+        })
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      window.syncInferenceRuntimeFromServer(data);
+      if (typeof window.refreshDevServerPanel === 'function') {
+        window.refreshDevServerPanel();
+      }
+      const msg = data.restarted
+        ? `Saved (n_ctx=${data.n_ctx}, ngl=${data.ngl}) & restarted active node.`
+        : `Saved runtime defaults (n_ctx=${data.n_ctx}, ngl=${data.ngl}).`;
+      showDrawerNote(elements.infRuntimeStatus, msg, false);
+    } catch (err) {
+      showDrawerNote(elements.infRuntimeStatus, `Failed to save runtime: ${err.message}`, true);
+    } finally {
+      elements.infApplyRuntimeBtn.disabled = false;
+      elements.infApplyRuntimeBtn.innerHTML = orig;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+
   function createNewChat() {
     const newChat = {
       id: 'chat_' + Date.now(),
       title: 'New Conversation',
       createdAt: new Date().toISOString(),
+      settings: { ...DEFAULT_CHAT_SETTINGS },
       messages: []
     };
     conversations.unshift(newChat);
@@ -747,6 +1091,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
     currentChatId = chatId;
     renderHistoryList();
     renderMessages();
+    syncDrawerToCurrentChat();
     updateSendButtonState(activeStreams.has(currentChatId));
   }
 
@@ -1370,10 +1715,20 @@ window.getApiUrl = window.getApiUrl || function(path) {
     const assistantMessageIndex = chat.messages.length;
     chat.messages.push({ role: 'assistant', content: '', metrics: null });
 
-    const formattedMessages = chat.messages.slice(0, -1).map((m) => ({
-      role: m.role,
-      content: m.content
-    }));
+    const chatSettings = getChatSettings(chat);
+    const formattedMessages = [];
+    if (chatSettings.systemPrompt && chatSettings.systemPrompt.trim()) {
+      formattedMessages.push({
+        role: 'system',
+        content: chatSettings.systemPrompt.trim()
+      });
+    }
+    chat.messages.slice(0, -1).forEach((m) => {
+      formattedMessages.push({
+        role: m.role,
+        content: m.content
+      });
+    });
 
     // Session identity. The engine clears its KV cache when the session id
     // changes, so a collision would silently reuse another conversation's
@@ -1385,7 +1740,9 @@ window.getApiUrl = window.getApiUrl || function(path) {
     const payload = {
       model: activeModel !== 'Loading...' && activeModel !== 'Coordinator Offline' ? activeModel : undefined,
       messages: formattedMessages,
-      max_tokens: maxTokens,
+      max_tokens: chatSettings.maxTokens || maxTokens,
+      temperature: chatSettings.temperature,
+      top_p: chatSettings.topP,
       stream: true,
       session_id: numericSessionId,
       reasoning: enableReasoning
@@ -1648,8 +2005,14 @@ window.getApiUrl = window.getApiUrl || function(path) {
     });
 
     window.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && activeStreams.has(currentChatId)) {
-        stopChatGeneration(currentChatId);
+      if (e.key === 'Escape') {
+        if (elements.infDrawer && elements.infDrawer.classList.contains('open')) {
+          closeInferenceDrawer();
+          return;
+        }
+        if (activeStreams.has(currentChatId)) {
+          stopChatGeneration(currentChatId);
+        }
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
         e.preventDefault();
@@ -1680,13 +2043,169 @@ window.getApiUrl = window.getApiUrl || function(path) {
     elements.pillTokens.onclick = () => {
       const nextIdx = (tokenSteps.indexOf(maxTokens) + 1) % tokenSteps.length;
       maxTokens = tokenSteps[nextIdx];
-      elements.maxTokensLabel.textContent = `Max Tokens: ${maxTokens}`;
+      updateCurrentChatSettings({ maxTokens });
+      if (elements.infMaxTokensSelect) elements.infMaxTokensSelect.value = String(maxTokens);
     };
 
     elements.pillClearKv.onclick = () => {
       clearKvOnSend = !clearKvOnSend;
       elements.pillClearKv.classList.toggle('active', clearKvOnSend);
     };
+
+    // --- Inference Settings Drawer Events ---
+    if (elements.btnOpenSettings) {
+      elements.btnOpenSettings.onclick = () => openInferenceDrawer();
+    }
+    if (elements.pillInferenceSettings) {
+      elements.pillInferenceSettings.onclick = () => openInferenceDrawer();
+    }
+    if (elements.infDrawerClose) {
+      elements.infDrawerClose.onclick = () => closeInferenceDrawer();
+    }
+    if (elements.infDrawerBackdrop) {
+      elements.infDrawerBackdrop.onclick = () => closeInferenceDrawer();
+    }
+    if (elements.infTempRange) {
+      elements.infTempRange.addEventListener('input', (e) => {
+        const val = parseFloat(e.target.value);
+        if (elements.infTempVal) elements.infTempVal.textContent = val.toFixed(2);
+        updateCurrentChatSettings({ temperature: val });
+      });
+    }
+    document.querySelectorAll('.inf-chip-btn[data-temp]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const val = parseFloat(btn.getAttribute('data-temp'));
+        if (!Number.isFinite(val)) return;
+        if (elements.infTempRange) elements.infTempRange.value = String(val);
+        if (elements.infTempVal) elements.infTempVal.textContent = val.toFixed(2);
+        updateCurrentChatSettings({ temperature: val });
+      });
+    });
+    if (elements.infToppRange) {
+      elements.infToppRange.addEventListener('input', (e) => {
+        const val = parseFloat(e.target.value);
+        if (elements.infToppVal) elements.infToppVal.textContent = val.toFixed(2);
+        updateCurrentChatSettings({ topP: val });
+      });
+    }
+    if (elements.infMaxTokensSelect) {
+      elements.infMaxTokensSelect.addEventListener('change', (e) => {
+        const val = parseInt(e.target.value, 10) || 1024;
+        updateCurrentChatSettings({ maxTokens: val });
+      });
+    }
+    if (elements.infCtxButtons) {
+      elements.infCtxButtons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const val = parseInt(btn.getAttribute('data-ctx'), 10);
+          if (val) {
+            runtimeSettings.n_ctx = val;
+            renderRuntimeControls();
+          }
+        });
+      });
+    }
+    if (elements.infNglAllToggle) {
+      elements.infNglAllToggle.addEventListener('change', (e) => {
+        runtimeSettings.ngl = e.target.checked ? -1 : runtimeSettings.customNglMemory;
+        renderRuntimeControls();
+      });
+    }
+    if (elements.infNglRange) {
+      elements.infNglRange.addEventListener('input', (e) => {
+        const val = parseInt(e.target.value, 10);
+        runtimeSettings.customNglMemory = Number.isFinite(val) ? val : 0;
+        runtimeSettings.ngl = runtimeSettings.customNglMemory;
+        renderRuntimeControls();
+      });
+    }
+    if (elements.infNglNumber) {
+      elements.infNglNumber.addEventListener('input', (e) => {
+        const val = Math.max(0, Math.min(999, parseInt(e.target.value, 10) || 0));
+        runtimeSettings.customNglMemory = val;
+        runtimeSettings.ngl = val;
+        renderRuntimeControls();
+      });
+    }
+    if (elements.infApplyRuntimeBtn) {
+      elements.infApplyRuntimeBtn.addEventListener('click', () => applyRuntimeSettingsToServer());
+    }
+    if (elements.infPresetSelect) {
+      elements.infPresetSelect.addEventListener('change', (e) => {
+        const selectedId = e.target.value;
+        const found = getAllPromptPresets().find((p) => p.id === selectedId);
+        if (found) {
+          if (elements.infSystemPrompt) elements.infSystemPrompt.value = found.prompt;
+          updateCurrentChatSettings({ systemPrompt: found.prompt, presetId: found.id });
+        } else {
+          updateCurrentChatSettings({ presetId: 'custom' });
+        }
+        if (elements.infPresetDeleteBtn) {
+          const isUserPreset = customPromptPresets.some((p) => p.id === selectedId);
+          elements.infPresetDeleteBtn.style.display = isUserPreset ? 'inline' : 'none';
+        }
+      });
+    }
+    if (elements.infSystemPrompt) {
+      elements.infSystemPrompt.addEventListener('input', (e) => {
+        const text = e.target.value;
+        const matching = getAllPromptPresets().find((p) => p.prompt === text);
+        const presetId = matching ? matching.id : 'custom';
+        updateCurrentChatSettings({ systemPrompt: text, presetId });
+        if (elements.infPresetSelect) elements.infPresetSelect.value = presetId;
+        if (elements.infPresetDeleteBtn) {
+          const isUserPreset = customPromptPresets.some((p) => p.id === presetId);
+          elements.infPresetDeleteBtn.style.display = isUserPreset ? 'inline' : 'none';
+        }
+      });
+    }
+    if (elements.infPresetSaveBtn) {
+      elements.infPresetSaveBtn.addEventListener('click', () => {
+        const name = (elements.infPresetNameInput && elements.infPresetNameInput.value || '').trim();
+        const prompt = (elements.infSystemPrompt && elements.infSystemPrompt.value || '').trim();
+        if (!name) {
+          showDrawerNote(elements.infPresetStatus, 'Enter a preset name first.', true);
+          return;
+        }
+        if (!prompt) {
+          showDrawerNote(elements.infPresetStatus, 'Write a system prompt before saving a preset.', true);
+          return;
+        }
+        const existing = customPromptPresets.find((p) => p.name.toLowerCase() === name.toLowerCase());
+        let targetId;
+        if (existing) {
+          existing.prompt = prompt;
+          targetId = existing.id;
+        } else {
+          targetId = 'user_' + Date.now();
+          customPromptPresets.push({ id: targetId, name, builtin: false, prompt });
+        }
+        saveCustomPromptPresets();
+        updateCurrentChatSettings({ systemPrompt: prompt, presetId: targetId });
+        renderPresetOptions(targetId);
+        if (elements.infPresetNameInput) elements.infPresetNameInput.value = '';
+        showDrawerNote(elements.infPresetStatus, `Saved reusable preset "${name}".`, false);
+      });
+    }
+    if (elements.infPresetDeleteBtn) {
+      elements.infPresetDeleteBtn.addEventListener('click', () => {
+        const idToRemove = elements.infPresetSelect ? elements.infPresetSelect.value : '';
+        const idx = customPromptPresets.findIndex((p) => p.id === idToRemove);
+        if (idx === -1) return;
+        const removed = customPromptPresets.splice(idx, 1)[0];
+        saveCustomPromptPresets();
+        updateCurrentChatSettings({ presetId: 'custom' });
+        renderPresetOptions('custom');
+        showDrawerNote(elements.infPresetStatus, `Deleted preset "${removed.name}".`, false);
+      });
+    }
+    if (elements.infResetBtn) {
+      elements.infResetBtn.addEventListener('click', () => {
+        updateCurrentChatSettings({ ...DEFAULT_CHAT_SETTINGS });
+        syncDrawerToCurrentChat();
+        showDrawerNote(elements.infPresetStatus, 'Reset sampling & system prompt for this chat.', false);
+      });
+    }
 
     elements.btnOpenTelemetry.onclick = () => {
       fetchClusterStatus();

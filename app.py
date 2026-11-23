@@ -43,6 +43,21 @@ from vram_planner import (
     plan_layer_split,
     validate_layer_range_arg,
 )
+from openai_compat import (
+    DEFAULT_N_CTX,
+    DEFAULT_NGL,
+    build_tool_call_sse_frames,
+    generate_api_key,
+    generate_integration_snippets,
+    load_server_config_file,
+    mask_api_key,
+    prepare_openai_request,
+    save_server_config_file,
+    transform_completion_response,
+    validate_n_ctx,
+    validate_ngl,
+    validate_runtime_config,
+)
 
 # Ensure UTF-8 output on Windows consoles
 if sys.platform == "win32":
@@ -836,12 +851,55 @@ def _validate_peers_csv(raw_peers: str) -> str:
     return ",".join(validated)
 
 
+def get_server_config_file() -> str:
+    return os.path.join(get_data_dir(), "server_config.json")
+
+
+def _load_server_config() -> dict:
+    cfg = load_server_config_file(get_server_config_file())
+    if os.environ.get("AEROMESH_N_CTX"):
+        try:
+            cfg["n_ctx"] = validate_n_ctx(os.environ.get("AEROMESH_N_CTX"))
+        except Exception:
+            pass
+    if os.environ.get("AEROMESH_NGL"):
+        try:
+            cfg["ngl"] = validate_ngl(os.environ.get("AEROMESH_NGL"))
+        except Exception:
+            pass
+    return cfg
+
+
+def _save_server_config(cfg: dict) -> dict:
+    saved = save_server_config_file(get_server_config_file(), cfg)
+    try:
+        _upsert_env_var("AEROMESH_N_CTX", str(saved["n_ctx"]))
+        _upsert_env_var("AEROMESH_NGL", str(saved["ngl"]))
+    except Exception as exc:
+        logger.warning("Could not mirror runtime config to .env: %s", exc)
+    return saved
+
+
+def _ensure_api_key() -> str:
+    cur = os.environ.get("AEROMESH_API_KEY", "").strip()
+    if cur:
+        return cur
+    fresh = generate_api_key()
+    _upsert_env_var("AEROMESH_API_KEY", fresh)
+    return fresh
+
+
 class NodeRuntimeManager:
     def __init__(self):
         self.lock = threading.RLock()
         self.role = "idle"
         self.model = "test.gguf"
         self.peers = ""
+        self.layers = ""
+        cfg = _load_server_config()
+        self.n_ctx = cfg.get("n_ctx", DEFAULT_N_CTX)
+        self.ngl = cfg.get("ngl", DEFAULT_NGL)
+        self.bind = cfg.get("bind_host", "127.0.0.1")
         self.process = None
         self.logs = ["[AeroMesh Studio] Ready. Click a Role Card above to start Coordinator, Worker, or Full Local Mesh."]
 
@@ -885,16 +943,33 @@ class NodeRuntimeManager:
             self.role = "idle"
             self.logs.append("[AeroMesh Studio] Node stopped by user.")
 
-    def start(self, role: str, model: str, peers: str, layers: str = "") -> dict:
+    def start(
+        self,
+        role: str,
+        model: str,
+        peers: str,
+        layers: str = "",
+        n_ctx: Optional[int] = None,
+        ngl: Optional[int] = None,
+        bind: Optional[str] = None,
+    ) -> dict:
         role_clean = str(role or "").strip().lower()
         if role_clean not in ("worker", "coordinator", "all"):
             return {"status": "error", "message": f"Invalid role: {role!r}"}
+        saved_cfg = _load_server_config()
         try:
             model_path = _resolve_confined_model_file(model)
             safe_peers = _validate_peers_csv(peers)
             safe_layers = validate_layer_range_arg(layers)
+            safe_n_ctx = validate_n_ctx(n_ctx if n_ctx is not None else saved_cfg.get("n_ctx", DEFAULT_N_CTX))
+            safe_ngl = validate_ngl(ngl if ngl is not None else saved_cfg.get("ngl", DEFAULT_NGL))
+            raw_bind = bind if bind is not None else saved_cfg.get("bind_host", "127.0.0.1")
+            safe_bind = "0.0.0.0" if str(raw_bind).strip() == "0.0.0.0" else "127.0.0.1"
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
+
+        if safe_bind == "0.0.0.0":
+            _ensure_api_key()
 
         self.stop()
         install_dir = get_install_dir()
@@ -909,26 +984,45 @@ class NodeRuntimeManager:
 
         cmd = [engine_exe]
         if role_clean == "worker":
-            cmd += ["start", "--role", "worker", "--port", "50052", "--model", model_path]
+            cmd += [
+                "start", "--role", "worker", "--port", "50052",
+                "--model", model_path, "--ctx", str(safe_n_ctx), "--ngl", str(safe_ngl),
+            ]
             if safe_layers:
                 cmd += ["--layers", safe_layers]
         elif role_clean == "coordinator":
-            cmd += ["start", "--role", "coordinator", "--model", model_path, "--port", "8080"]
+            cmd += [
+                "start", "--role", "coordinator", "--model", model_path,
+                "--port", "8080", "--bind", safe_bind,
+                "--ctx", str(safe_n_ctx), "--ngl", str(safe_ngl),
+            ]
             if safe_peers:
                 cmd += ["--peers", safe_peers]
             if safe_layers:
                 cmd += ["--layers", safe_layers]
         else:
-            cmd += ["start", "--role", "all", "--model", model_path, "--port", "8080"]
+            cmd += [
+                "start", "--role", "all", "--model", model_path,
+                "--port", "8080", "--bind", safe_bind,
+                "--ctx", str(safe_n_ctx), "--ngl", str(safe_ngl),
+            ]
+
+        child_env = os.environ.copy()
+        child_env["AEROMESH_N_CTX"] = str(safe_n_ctx)
+        child_env["AEROMESH_NGL"] = str(safe_ngl)
 
         with self.lock:
             self.logs.clear()
-            self.logs.append(f"[AeroMesh Studio] Started role '{role_clean.upper()}' with model '{os.path.basename(model_path)}'")
+            self.logs.append(
+                f"[AeroMesh Studio] Started role '{role_clean.upper()}' with model '{os.path.basename(model_path)}' "
+                f"(ctx={safe_n_ctx}, ngl={'ALL' if safe_ngl < 0 else safe_ngl}, bind={safe_bind})"
+            )
             try:
                 creationflags = 0x08000000 if sys.platform == "win32" else 0
                 proc = subprocess.Popen(
                     cmd,
                     cwd=data_dir,
+                    env=child_env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -941,6 +1035,10 @@ class NodeRuntimeManager:
                 self.role = role_clean
                 self.model = os.path.basename(model_path)
                 self.peers = safe_peers
+                self.layers = safe_layers
+                self.n_ctx = safe_n_ctx
+                self.ngl = safe_ngl
+                self.bind = safe_bind
 
                 def log_reader(p: subprocess.Popen):
                     for line in iter(p.stdout.readline, ""):
@@ -951,7 +1049,15 @@ class NodeRuntimeManager:
 
                 t = threading.Thread(target=log_reader, args=(proc,), daemon=True)
                 t.start()
-                return {"status": "ok", "role": role_clean, "model": self.model, "peers": safe_peers}
+                return {
+                    "status": "ok",
+                    "role": role_clean,
+                    "model": self.model,
+                    "peers": safe_peers,
+                    "n_ctx": safe_n_ctx,
+                    "ngl": safe_ngl,
+                    "bind_host": safe_bind,
+                }
             except Exception as e:
                 self.logs.append(f"[AeroMesh Studio] Failed to start aeromesh.exe: {e}")
                 return {"status": "error", "message": str(e)}
@@ -977,18 +1083,26 @@ async def node_state():
                         seen_img.add(f)
                         image_models.append(f)
 
+    cfg = _load_server_config()
     with node_manager.lock:
         role = node_manager.role
         model = node_manager.model
         peers = node_manager.peers
         running = node_manager.is_running()
         logs_copy = list(node_manager.logs)
+        active_n_ctx = node_manager.n_ctx if running else cfg.get("n_ctx", DEFAULT_N_CTX)
+        active_ngl = node_manager.ngl if running else cfg.get("ngl", DEFAULT_NGL)
+        active_bind = node_manager.bind if running else cfg.get("bind_host", "127.0.0.1")
 
     return {
         "role": role,
         "running": running,
         "model": model,
         "peers": peers,
+        "n_ctx": active_n_ctx,
+        "ngl": active_ngl,
+        "bind_host": active_bind,
+        "lan_exposed": active_bind == "0.0.0.0",
         "gpu": get_gpu_summary(),
         "hardware": detect_local_hardware(),
         "wifi_ip": get_local_wifi_ip(),
@@ -1009,6 +1123,11 @@ async def node_start(request: Request):
     model = str(body.get("model", "")).strip()
     peers = str(body.get("peers", "")).strip()
     layers = str(body.get("layers", "") or "").strip()
+    n_ctx = body.get("n_ctx")
+    ngl = body.get("ngl")
+    bind = body.get("bind_host") or body.get("bind")
+    if bind is None and "lan_exposed" in body:
+        bind = "0.0.0.0" if bool(body.get("lan_exposed")) else "127.0.0.1"
 
     if role == "auto":
         discovered = await asyncio.to_thread(discover_mesh_workers_sync, 50052)
@@ -1018,7 +1137,15 @@ async def node_start(request: Request):
         else:
             role = "all"
 
-    res = node_manager.start(role, model, peers, layers=layers)
+    res = node_manager.start(
+        role,
+        model,
+        peers,
+        layers=layers,
+        n_ctx=n_ctx,
+        ngl=ngl,
+        bind=bind,
+    )
     status_code = 200 if res.get("status") == "ok" else 400
     return JSONResponse(status_code=status_code, content=res)
 
@@ -1027,6 +1154,144 @@ async def node_start(request: Request):
 async def node_stop():
     node_manager.stop()
     return {"status": "stopped", "role": "idle"}
+
+
+async def _build_server_config_payload() -> dict:
+    cfg = _load_server_config()
+    api_key = _ensure_api_key()
+    wifi_ip = get_local_wifi_ip()
+    ts_ip = get_tailscale_ip()
+    ts_connected = bool(ts_ip and ts_ip != "Not Connected")
+
+    coordinator_online = False
+    active_model = ""
+    try:
+        client = get_backend_client()
+        resp = await client.get("/v1/models", headers=get_auth_headers(), timeout=1.5)
+        if resp.status_code == 200:
+            coordinator_online = True
+            data = resp.json()
+            models_list = data.get("data") or []
+            if models_list and isinstance(models_list[0], dict):
+                active_model = str(models_list[0].get("id") or "")
+    except Exception:
+        pass
+
+    with node_manager.lock:
+        node_running = node_manager.is_running()
+        node_role = node_manager.role
+        if not active_model and node_manager.model and node_manager.model != "test.gguf":
+            active_model = node_manager.model
+
+    if not active_model:
+        active_model = "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf"
+
+    lan_exposed = bool(cfg.get("lan_exposed", False))
+    bind_host = "0.0.0.0" if lan_exposed else "127.0.0.1"
+    base_url = f"{AEROMESH_BACKEND_URL.rstrip('/')}/v1"
+    gateway_base_url = f"http://127.0.0.1:{int(os.environ.get('AEROMESH_PORT', '7860'))}/v1"
+    lan_url = f"http://{wifi_ip}:8080/v1" if wifi_ip and wifi_ip != "127.0.0.1" else ""
+    tailscale_url = f"http://{ts_ip}:8080/v1" if ts_connected else ""
+    display_url = lan_url if (lan_exposed and lan_url) else base_url
+
+    snippets = generate_integration_snippets(
+        base_url=display_url,
+        api_key_placeholder="YOUR_AEROMESH_API_KEY",
+        model_name=active_model,
+    )
+
+    return {
+        "base_url": base_url,
+        "gateway_base_url": gateway_base_url,
+        "lan_url": lan_url,
+        "tailscale_url": tailscale_url,
+        "active_endpoint_url": display_url,
+        "lan_exposed": lan_exposed,
+        "bind_host": bind_host,
+        "api_key": api_key,
+        "api_key_masked": mask_api_key(api_key),
+        "api_key_configured": bool(api_key),
+        "n_ctx": cfg.get("n_ctx", DEFAULT_N_CTX),
+        "ngl": cfg.get("ngl", DEFAULT_NGL),
+        "active_model": active_model,
+        "coordinator_online": coordinator_online,
+        "node_running": node_running,
+        "node_role": node_role,
+        "capabilities": {
+            "chat_completions": True,
+            "streaming_sse": True,
+            "tool_calling": True,
+            "json_mode": True,
+            "json_schema": True,
+            "openai_compatible": True,
+        },
+        "snippets": snippets,
+    }
+
+
+@app.get("/api/server/config", dependencies=[Depends(verify_gateway_access)])
+async def get_server_config_endpoint():
+    return await _build_server_config_payload()
+
+
+@app.post("/api/server/config", dependencies=[Depends(verify_gateway_access)])
+async def update_server_config_endpoint(request: Request):
+    body = await _read_json_body(request)
+    current = _load_server_config()
+    try:
+        validated = validate_runtime_config(
+            n_ctx=body.get("n_ctx", current.get("n_ctx", DEFAULT_N_CTX)),
+            ngl=body.get("ngl", current.get("ngl", DEFAULT_NGL)),
+            lan_exposed=body.get("lan_exposed", current.get("lan_exposed", False)),
+            bind_host=body.get("bind_host"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    if validated["lan_exposed"]:
+        _ensure_api_key()
+
+    saved = _save_server_config(validated)
+
+    restarted = False
+    restart_error = None
+    if bool(body.get("apply_restart", False)):
+        with node_manager.lock:
+            is_running = node_manager.is_running()
+            cur_role = node_manager.role
+            cur_model = node_manager.model
+            cur_peers = node_manager.peers
+            cur_layers = node_manager.layers
+        if is_running and cur_role in ("coordinator", "worker", "all") and cur_model:
+            res = node_manager.start(
+                cur_role,
+                cur_model,
+                cur_peers,
+                layers=cur_layers,
+                n_ctx=saved["n_ctx"],
+                ngl=saved["ngl"],
+                bind=saved["bind_host"],
+            )
+            if res.get("status") == "ok":
+                restarted = True
+            else:
+                restart_error = res.get("message")
+
+    payload = await _build_server_config_payload()
+    payload["saved"] = True
+    payload["restarted"] = restarted
+    if restart_error:
+        payload["restart_error"] = restart_error
+    return payload
+
+
+@app.post("/api/server/api-key/rotate", dependencies=[Depends(verify_gateway_access)])
+async def rotate_api_key_endpoint():
+    fresh = generate_api_key()
+    _upsert_env_var("AEROMESH_API_KEY", fresh)
+    payload = await _build_server_config_payload()
+    payload["rotated"] = True
+    return payload
 
 
 async def _read_json_body(request: Request) -> dict:
@@ -1060,27 +1325,32 @@ def _sse_error_frame(message: str) -> str:
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_gateway_access)])
 @app.post("/api/chat", dependencies=[Depends(verify_gateway_access)])
 async def chat_completions(request: Request):
-    """OpenAI-compatible chat completions proxy.
+    """OpenAI-compatible chat completions proxy with full Tool-Calling & JSON-Mode support.
 
     Streaming requests (`stream: true`, the default) are delegated to the SSE
-    path. The body is parsed exactly once and passed down: the previous version
-    parsed it here and then handed the same `Request` to `chat_stream`, which
-    read it a second time.
+    path. Tool-calling (`tools`, `tool_choice`, `role: "tool"`) and structured
+    output (`response_format`: `json_object` / `json_schema`) are translated
+    cleanly so Continue.dev, Cline, Roo Code, Cursor, Open WebUI, and the
+    OpenAI Python SDK work out-of-the-box.
     """
     body = await _read_json_body(request)
+    upstream_body, compat_meta = prepare_openai_request(body)
 
     if body.get("stream", True):
-        return _stream_response(body)
+        return _stream_response(upstream_body, compat_meta=compat_meta)
 
     client = get_backend_client()
     try:
         resp = await client.post(
             "/v1/chat/completions",
-            json=body,
+            json=upstream_body,
             headers=get_auth_headers(),
             timeout=httpx.Timeout(180.0, connect=10.0),
         )
-        return JSONResponse(status_code=resp.status_code, content=resp.json())
+        content = resp.json()
+        if resp.status_code == 200 and (compat_meta.get("tools_enabled") or compat_meta.get("json_mode")):
+            content = transform_completion_response(content, compat_meta)
+        return JSONResponse(status_code=resp.status_code, content=content)
     except httpx.ConnectError:
         logger.warning("Backend unreachable during chat completion")
         return JSONResponse(
@@ -1122,18 +1392,23 @@ async def chat_abort():
 async def chat_stream_endpoint(request: Request):
     """SSE streaming endpoint used by the browser dashboard."""
     body = await _read_json_body(request)
-    return _stream_response(body)
+    upstream_body, compat_meta = prepare_openai_request(body)
+    return _stream_response(upstream_body, compat_meta=compat_meta)
 
 
-def _stream_response(body: dict) -> StreamingResponse:
+def _stream_response(body: dict, compat_meta: Optional[dict] = None) -> StreamingResponse:
     """Streams a chat completion as Server-Sent Events.
 
     Note on timeouts: `read=None` is deliberate. A finite read timeout would
-    terminate long reasoning traces mid-generation. The upstream connection is
-    closed when the client disconnects (StreamingResponse cancels the generator)
-    or when the coordinator ends the stream.
+    terminate long reasoning traces mid-generation. When tool-calling or JSON
+    mode is active, tokens are buffered and emitted as spec-compliant OpenAI
+    `tool_calls` or JSON SSE chunks; regular chat streams pass through with
+    zero added buffering latency.
     """
     client = get_backend_client()
+    needs_structured_parse = bool(
+        compat_meta and (compat_meta.get("tools_enabled") or compat_meta.get("json_mode"))
+    )
 
     async def stream_generator():
         try:
@@ -1153,8 +1428,49 @@ def _stream_response(body: dict) -> StreamingResponse:
                     )
                     return
 
-                async for chunk in response.aiter_raw():
-                    yield chunk
+                if not needs_structured_parse:
+                    async for chunk in response.aiter_raw():
+                        yield chunk
+                    return
+
+                # Structured tool-calling / JSON-mode stream framing
+                collected_parts = []
+                completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+                model_name = str(body.get("model") or "aeromesh-model")
+                buf = ""
+                async for raw_bytes in response.aiter_bytes():
+                    buf += raw_bytes.decode("utf-8", errors="ignore")
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        stripped = line.strip()
+                        if not stripped.startswith("data:"):
+                            continue
+                        data_str = stripped[5:].strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+                        try:
+                            evt = json.loads(data_str)
+                            if evt.get("id"):
+                                completion_id = str(evt["id"])
+                            if evt.get("model"):
+                                model_name = str(evt["model"])
+                            choices = evt.get("choices") or []
+                            if choices and isinstance(choices[0], dict):
+                                delta = choices[0].get("delta") or {}
+                                content_piece = delta.get("content")
+                                if isinstance(content_piece, str):
+                                    collected_parts.append(content_piece)
+                        except Exception:
+                            pass
+
+                full_text = "".join(collected_parts)
+                for frame in build_tool_call_sse_frames(
+                    full_text=full_text,
+                    meta=compat_meta or {},
+                    completion_id=completion_id,
+                    model=model_name,
+                ):
+                    yield frame
         except httpx.ConnectError:
             yield _sse_error_frame(
                 "❌ **AeroMesh coordinator is offline**\n\n"

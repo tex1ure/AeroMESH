@@ -22,6 +22,7 @@ Base URLs:
 9. [Node Lifecycle Management](#9-node-lifecycle-management)
 10. [Distributed Diffusion / Image Generation](#10-distributed-diffusion--image-generation)
 11. [Gateway Proxy Behavior](#11-gateway-proxy-behavior)
+12. [Developer API Server & Runtime Configuration](#12-developer-api-server--runtime-configuration)
 
 ---
 
@@ -76,10 +77,12 @@ Validation and runtime errors across `/v1/*` and `/api/*` use the standard OpenA
 ```
 
 ### Validation Rules
-- `messages`: non-empty array; `role` must be `system`, `user`, `assistant`, `tool`, or `function`; `content` must be non-blank.
+- `messages`: non-empty array; `role` must be `system`, `user`, `assistant`, `tool`, or `function`; `content` may be a string, OpenAI content-part array, or `null` when an `assistant` message carries `tool_calls`.
 - `temperature`: finite float in `[0.0, 2.0]` (default `0.7`).
 - `top_p`: finite float in `[0.0, 1.0]` (default `0.9`).
 - `max_tokens`: integer in `[1, 32768]`, and `prompt_tokens + max_tokens <= n_ctx` (default `256`).
+- `tools` & `tool_choice`: standard OpenAI function tool definitions (`[{"type":"function","function":{"name":...,"parameters":...}}]`) with `tool_choice` (`"auto"`, `"none"`, `"required"`, or `{"type":"function","function":{"name":...}}`). Extracted function invocations return `finish_reason: "tool_calls"` and `message.tool_calls` (both unary and SSE streaming).
+- `response_format`: supports `{"type":"json_object"}` and `{"type":"json_schema","json_schema":{...}}`, unwrapping markdown JSON fences automatically.
 - `model`: optional; if different from the active model, triggers a transactional hot-swap.
 - `stream`: boolean (default `true`).
 - `session_id`: optional 64-bit integer identifying the conversation turn.
@@ -339,3 +342,14 @@ The FastAPI gateway (`app.py`, port `7860`) sits in front of the Axum engine (`:
 - **RFC 7230 hop-by-hop stripping** for `Connection`, `Keep-Alive`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailers`, `Transfer-Encoding`, and `Upgrade`.
 - **Credential isolation**: caller `Authorization` headers are stripped and replaced with `AEROMESH_API_KEY` on loopback calls to `:8080`.
 - **Unbuffered SSE forwarding**: `Cache-Control: no-cache`, `X-Accel-Buffering: no`, and `httpx.Timeout(read=None)`.
+
+---
+
+## 12. Developer API Server & Runtime Configuration
+
+Hosted by the FastAPI gateway (`:7860`) and surfaced via the **API Server** tab and **Inference Settings Drawer**:
+
+- **`GET /api/server/config`** — Returns live OpenAI endpoint URLs (`base_url`, `gateway_base_url`, `lan_url`, `tailscale_url`), masked and live `AEROMESH_API_KEY`, LAN exposure state (`lan_exposed`, `bind_host`), active runtime defaults (`n_ctx`, `ngl`), capability flags (`tool_calling`, `json_mode`, `json_schema`), and copy-ready IDE/SDK snippets (`curl`, `python`, `tools_json`, `continue`, `cline`, `cursor`).
+- **`POST /api/server/config`** — Validates and persists `n_ctx` (`4096` / `8192` / `16384` / `32768`), `ngl` (`-1` for all GPU layers or `0..999`), and `lan_exposed` (`127.0.0.1` vs `0.0.0.0`). Enabling LAN exposure automatically ensures `AEROMESH_API_KEY` is generated in `.env`. Pass `"apply_restart": true` to restart the active managed node immediately with `--ctx`, `--ngl`, and `--bind`.
+- **`POST /api/server/api-key/rotate`** — Generates a new `sk-aeromesh-...` API key, persists it atomically to `.env`, and returns the updated configuration payload.
+

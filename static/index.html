@@ -74,7 +74,7 @@
           onerror="window.__loadCdnFallback('script',{src:'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js',integrity:'sha384-+VBxd3r6XgURycqtZ117nYw44OOcIax56Z4dCRWbxyPt0Koah1uHoK0o4+/RRE05',crossorigin:'anonymous',referrerpolicy:'no-referrer'})"></script>
 
   <!-- AeroMESH Kimi Desktop Design System -->
-  <link rel="stylesheet" href="/static/css/liquid_glass.css?v=kimi9">
+  <link rel="stylesheet" href="/static/css/liquid_glass.css?v=kimi10">
 </head>
 <body>
 
@@ -107,7 +107,7 @@
         <span>New Chat</span>
       </button>
 
-      <!-- Workspace View Switcher (Chat vs Models vs Cluster Pairing) -->
+      <!-- Workspace View Switcher (Chat vs Models vs Cluster vs API Server) -->
       <div class="workspace-nav" role="tablist" aria-label="Workspace View">
         <button id="nav-tab-chat" class="workspace-nav-btn active" role="tab" aria-selected="true" type="button">
           <i data-lucide="message-square" style="width: 13px; height: 13px;"></i>
@@ -122,6 +122,10 @@
           <i data-lucide="link-2" style="width: 13px; height: 13px;"></i>
           <span>Cluster</span>
           <span id="nav-cluster-pair-count" class="workspace-nav-count" style="display: none;"></span>
+        </button>
+        <button id="nav-tab-api" class="workspace-nav-btn" role="tab" aria-selected="false" type="button">
+          <i data-lucide="terminal" style="width: 13px; height: 13px;"></i>
+          <span>API Server</span>
         </button>
       </div>
     </div>
@@ -194,6 +198,11 @@
           <span class="status-dot" id="top-status-dot"></span>
           <span id="top-status-text">Connecting...</span>
         </div>
+
+        <button id="btn-open-settings" class="clay-btn" style="padding: 5px 12px; font-size: 12px;" title="Inference settings, context length, GPU offload layers & system prompt">
+          <i data-lucide="sliders-horizontal" style="width: 13px; height: 13px; color: var(--Colors-KMBlue);"></i>
+          <span>Inference</span>
+        </button>
 
         <button id="btn-reset-session" class="clay-btn" style="padding: 5px 12px; font-size: 12px;" title="Flush KV cache for clean multi-turn session">
           <i data-lucide="sparkles" style="width: 13px; height: 13px; color: var(--accent-orange);"></i>
@@ -301,6 +310,11 @@
               <div class="clay-tool-pill" id="pill-clearkv" title="Clear KV Cache on next generation">
                 <i data-lucide="refresh-cw" style="width: 13px; height: 13px;"></i>
                 <span>Reset KV on Send</span>
+              </div>
+
+              <div class="clay-tool-pill" id="pill-inference-settings" title="Open Inference Settings, Context Length &amp; System Prompt Drawer">
+                <i data-lucide="sliders-horizontal" style="width: 13px; height: 13px;"></i>
+                <span id="pill-inference-summary">T 0.7 &middot; 4K</span>
               </div>
             </div>
 
@@ -747,9 +761,367 @@
       </div>
     </section>
 
+    <!-- ==================================================================
+         DEVELOPER / OPENAI-COMPATIBLE LOCAL API SERVER VIEW
+         ================================================================== -->
+    <section id="dev-api-view" class="models-hub-view" style="display: none;" aria-label="OpenAI-Compatible Local API Server">
+      <div class="mh-container">
+
+        <div class="mh-header">
+          <div class="mh-header-text">
+            <h1 class="mh-title">OpenAI-Compatible Local API Server</h1>
+            <div class="mh-subtitle dev-subtitle-row">
+              <span id="dev-status-dot" class="dev-status-dot"></span>
+              <span id="dev-status-summary">Checking local OpenAI endpoint…</span>
+            </div>
+          </div>
+          <div class="mh-header-actions">
+            <button id="dev-test-endpoint-btn" class="mh-btn mh-btn-primary" type="button">
+              <i data-lucide="activity" style="width: 14px; height: 14px;"></i>
+              <span>Test Endpoint</span>
+            </button>
+            <button id="dev-refresh-btn" class="mh-btn mh-btn-ghost" type="button" title="Refresh server configuration">
+              <i data-lucide="refresh-cw" style="width: 14px; height: 14px;"></i>
+              <span>Refresh</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="dev-feedback" class="mh-feedback" style="display: none;" role="status"></div>
+
+        <!-- Primary 2-Column Server Config Grid -->
+        <div class="dev-grid-2">
+
+          <!-- LEFT: Live Endpoint & API Key -->
+          <div class="mh-panel dev-card">
+            <div class="cp-card-head">
+              <div>
+                <h2 class="mh-panel-title">Endpoint &amp; API Key</h2>
+                <p class="mh-panel-desc">Drop-in OpenAI-compatible <code>/v1</code> endpoint for Continue.dev, Cline, Roo Code, Cursor, Open WebUI, and Python scripts.</p>
+              </div>
+              <span id="dev-bind-badge" class="dev-bind-badge">127.0.0.1 Only</span>
+            </div>
+
+            <div class="dev-field-group">
+              <label class="cp-field-label" for="dev-base-url-input">Live Base URL (Coordinator)</label>
+              <div class="cp-copy-row">
+                <input id="dev-base-url-input" class="mh-input cp-mono-input" type="text" readonly value="http://127.0.0.1:8080/v1">
+                <button id="dev-copy-url-btn" class="mh-btn mh-btn-primary" type="button">
+                  <i data-lucide="copy" style="width: 14px; height: 14px;"></i>
+                  <span>Copy URL</span>
+                </button>
+              </div>
+              <div id="dev-alt-urls" class="dev-alt-urls"></div>
+            </div>
+
+            <div class="dev-field-group">
+              <label class="cp-field-label" for="dev-api-key-input">API Key (<code>AEROMESH_API_KEY</code>)</label>
+              <div class="cp-copy-row">
+                <input id="dev-api-key-input" class="mh-input cp-mono-input" type="text" readonly value="Loading...">
+                <button id="dev-key-reveal-btn" class="mh-btn mh-btn-ghost" type="button" title="Reveal or mask API key">
+                  <i data-lucide="eye" style="width: 14px; height: 14px;"></i>
+                  <span>Reveal</span>
+                </button>
+                <button id="dev-copy-key-btn" class="mh-btn mh-btn-primary" type="button">
+                  <i data-lucide="copy" style="width: 14px; height: 14px;"></i>
+                  <span>Copy Key</span>
+                </button>
+              </div>
+              <div class="dev-key-meta">
+                <span>Stored securely in local <code>.env</code>. Required when LAN exposure is enabled.</span>
+                <button id="dev-rotate-key-btn" class="cp-inline-link" type="button">Rotate Key</button>
+              </div>
+            </div>
+
+            <div class="dev-cap-strip" aria-label="Supported OpenAI Capabilities">
+              <span class="dev-cap-chip">Chat Completions</span>
+              <span class="dev-cap-chip">SSE Streaming</span>
+              <span class="dev-cap-chip is-accent">Tool Calling</span>
+              <span class="dev-cap-chip is-accent">JSON Mode</span>
+              <span class="dev-cap-chip">JSON Schema</span>
+            </div>
+          </div>
+
+          <!-- RIGHT: LAN Exposure & Engine Runtime Defaults -->
+          <div class="mh-panel dev-card">
+            <div class="cp-card-head">
+              <div>
+                <h2 class="mh-panel-title">Network Exposure &amp; Engine Defaults</h2>
+                <p class="mh-panel-desc">Control whether other laptops on your Wi-Fi or Tailscale tailnet can call this API server, plus default context &amp; GPU offload settings.</p>
+              </div>
+            </div>
+
+            <div class="dev-toggle-card">
+              <div class="dev-toggle-text">
+                <div class="dev-toggle-title">Expose OpenAI Server on LAN / Tailscale</div>
+                <div class="dev-toggle-desc" id="dev-lan-desc">
+                  Currently bound to <code>127.0.0.1</code> (this PC only). Toggle ON to bind <code>0.0.0.0:8080</code> with mandatory Bearer API Key auth.
+                </div>
+              </div>
+              <label class="dev-switch" aria-label="Toggle LAN and Tailscale API exposure">
+                <input id="dev-lan-toggle" type="checkbox">
+                <span class="dev-switch-track"></span>
+              </label>
+            </div>
+
+            <div class="dev-runtime-summary-grid">
+              <div class="dev-stat-box">
+                <span class="dev-stat-label">Context Length (<code>n_ctx</code>)</span>
+                <strong id="dev-stat-ctx" class="dev-stat-value">4,096 tok</strong>
+              </div>
+              <div class="dev-stat-box">
+                <span class="dev-stat-label">GPU Offload (<code>-ngl</code>)</span>
+                <strong id="dev-stat-ngl" class="dev-stat-value">All GPU (-1)</strong>
+              </div>
+              <div class="dev-stat-box">
+                <span class="dev-stat-label">Active Model</span>
+                <strong id="dev-stat-model" class="dev-stat-value dev-stat-mono">—</strong>
+              </div>
+            </div>
+
+            <div class="dev-compat-callout">
+              <div class="dev-compat-row">
+                <span class="dev-compat-key">Protocol</span>
+                <span>OpenAI <code>/v1/chat/completions</code> &amp; <code>/v1/models</code> (streaming SSE + unary)</span>
+              </div>
+              <div class="dev-compat-row">
+                <span class="dev-compat-key">Structured</span>
+                <span>Automatic <code>tools</code> / <code>tool_choice</code> &amp; <code>response_format</code> (<code>json_object</code>, <code>json_schema</code>)</span>
+              </div>
+              <div class="dev-compat-row">
+                <span class="dev-compat-key">Security</span>
+                <span>Loopback-only by default; enabling LAN automatically enforces Bearer <code>AEROMESH_API_KEY</code></span>
+              </div>
+            </div>
+
+            <div class="dev-card-actions">
+              <button id="dev-open-inf-drawer-btn" class="mh-btn mh-btn-ghost" type="button">
+                <i data-lucide="sliders-horizontal" style="width: 14px; height: 14px;"></i>
+                <span>Edit Context / GPU / Prompt</span>
+              </button>
+              <button id="dev-apply-restart-btn" class="mh-btn mh-btn-primary" type="button">
+                <i data-lucide="rotate-cw" style="width: 14px; height: 14px;"></i>
+                <span>Save &amp; Apply to Server</span>
+              </button>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- IDE & SDK Quick-Connect Snippets -->
+        <div class="mh-panel dev-snippets-panel">
+          <div class="dev-snippets-head">
+            <div>
+              <h2 class="mh-panel-title">IDE &amp; SDK Integration Snippets</h2>
+              <p class="mh-panel-desc">Copy-paste ready configuration pointing directly at your live AeroMESH base URL and active model.</p>
+            </div>
+            <div class="dev-snippets-controls">
+              <label class="mh-checkbox-label" title="Substitute your real API key into the snippet (kept masked by default for safe screen sharing)">
+                <input id="dev-include-key-toggle" type="checkbox">
+                <span>Include live API key</span>
+              </label>
+              <button id="dev-copy-snippet-btn" class="mh-btn mh-btn-primary" type="button">
+                <i data-lucide="copy" style="width: 14px; height: 14px;"></i>
+                <span>Copy Snippet</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="dev-snippet-tabs" role="tablist" aria-label="Integration Snippet Language">
+            <button class="dev-snippet-tab active" data-snippet="curl" role="tab" aria-selected="true" type="button">cURL</button>
+            <button class="dev-snippet-tab" data-snippet="python" role="tab" aria-selected="false" type="button">OpenAI Python SDK</button>
+            <button class="dev-snippet-tab" data-snippet="tools_json" role="tab" aria-selected="false" type="button">Tool Calling &amp; JSON</button>
+            <button class="dev-snippet-tab" data-snippet="continue" role="tab" aria-selected="false" type="button">Continue.dev</button>
+            <button class="dev-snippet-tab" data-snippet="cline" role="tab" aria-selected="false" type="button">Cline / Roo Code</button>
+            <button class="dev-snippet-tab" data-snippet="cursor" role="tab" aria-selected="false" type="button">Cursor / Open WebUI</button>
+          </div>
+
+          <pre class="dev-code-pre"><code id="dev-snippet-code">Loading integration snippet…</code></pre>
+        </div>
+
+        <!-- Interactive Quick Verifier: Models, JSON Mode, Tool Calling -->
+        <div class="mh-panel dev-tester-panel">
+          <div class="dev-snippets-head">
+            <div>
+              <h2 class="mh-panel-title">Live Protocol Verification (JSON Mode &amp; Tool Calling)</h2>
+              <p class="mh-panel-desc">Send a real OpenAI-formatted request to your local server and inspect the structured JSON or <code>tool_calls</code> response.</p>
+            </div>
+            <div class="dev-tester-btns">
+              <button id="dev-probe-models-btn" class="mh-btn mh-btn-ghost" type="button">
+                <i data-lucide="list" style="width: 14px; height: 14px;"></i>
+                <span>GET /v1/models</span>
+              </button>
+              <button id="dev-test-json-btn" class="mh-btn mh-btn-ghost" type="button">
+                <i data-lucide="braces" style="width: 14px; height: 14px;"></i>
+                <span>Test JSON Mode</span>
+              </button>
+              <button id="dev-test-tools-btn" class="mh-btn mh-btn-primary" type="button">
+                <i data-lucide="wrench" style="width: 14px; height: 14px;"></i>
+                <span>Test Tool Calling</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="dev-test-meta" class="dev-test-meta" style="display: none;"></div>
+          <pre id="dev-test-output" class="dev-code-pre dev-test-pre">Click "GET /v1/models", "Test JSON Mode", or "Test Tool Calling" to verify live OpenAI compatibility.</pre>
+        </div>
+
+      </div>
+    </section>
+
   </main>
 
 </div>
+
+<!-- ====================================================================
+     INFERENCE SETTINGS, CONTEXT LENGTH & SYSTEM PROMPT DRAWER
+     ==================================================================== -->
+<div id="inference-drawer-backdrop" class="inf-drawer-backdrop" aria-hidden="true"></div>
+<aside id="inference-drawer" class="inf-drawer" role="dialog" aria-modal="true" aria-label="Inference Settings, Context Length and System Prompt Drawer" aria-hidden="true">
+  <div class="inf-drawer-header">
+    <div>
+      <div class="inf-drawer-title-row">
+        <i data-lucide="sliders-horizontal" style="width: 16px; height: 16px; color: var(--Colors-KMBlue);"></i>
+        <h2 class="inf-drawer-title">Inference &amp; Prompt Settings</h2>
+      </div>
+      <div class="inf-drawer-subtitle" id="inf-chat-scope-label">Saved per chat &middot; Reusable presets</div>
+    </div>
+    <button id="inf-drawer-close" class="modal-close-btn" type="button" title="Close drawer (Esc)">
+      <i data-lucide="x"></i>
+    </button>
+  </div>
+
+  <div class="inf-drawer-body">
+
+    <!-- Section 1: Sampling Controls (Per Chat) -->
+    <div class="inf-section">
+      <div class="inf-section-head">
+        <span class="inf-section-title">Sampling Parameters</span>
+        <span class="inf-scope-tag">Per Chat</span>
+      </div>
+
+      <div class="inf-control">
+        <div class="inf-control-top">
+          <label for="inf-temp-range" class="inf-label">Temperature</label>
+          <span id="inf-temp-val" class="inf-value-mono">0.70</span>
+        </div>
+        <input id="inf-temp-range" class="inf-slider" type="range" min="0" max="2" step="0.05" value="0.7">
+        <div class="inf-quick-chips">
+          <button class="inf-chip-btn" type="button" data-temp="0.15">0.15 Code</button>
+          <button class="inf-chip-btn" type="button" data-temp="0.7">0.70 Balanced</button>
+          <button class="inf-chip-btn" type="button" data-temp="1.1">1.10 Creative</button>
+        </div>
+      </div>
+
+      <div class="inf-control">
+        <div class="inf-control-top">
+          <label for="inf-topp-range" class="inf-label">Top-P (Nucleus Sampling)</label>
+          <span id="inf-topp-val" class="inf-value-mono">0.90</span>
+        </div>
+        <input id="inf-topp-range" class="inf-slider" type="range" min="0.05" max="1" step="0.05" value="0.9">
+      </div>
+
+      <div class="inf-control">
+        <div class="inf-control-top">
+          <label for="inf-maxtokens-select" class="inf-label">Max Output Tokens</label>
+          <span class="inf-hint">Per completion</span>
+        </div>
+        <select id="inf-maxtokens-select" class="mh-input inf-select">
+          <option value="256">256 tokens (Quick)</option>
+          <option value="512">512 tokens</option>
+          <option value="1024" selected>1,024 tokens (Default)</option>
+          <option value="2048">2,048 tokens (Long / Reasoning)</option>
+          <option value="4096">4,096 tokens</option>
+          <option value="8192">8,192 tokens</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Section 2: Engine Runtime (Context Length & GPU Offload Layers) -->
+    <div class="inf-section">
+      <div class="inf-section-head">
+        <span class="inf-section-title">Context Length &amp; GPU Offload</span>
+        <span class="inf-scope-tag">Engine Runtime</span>
+      </div>
+
+      <div class="inf-control">
+        <div class="inf-control-top">
+          <span class="inf-label">Context Window (<code>n_ctx</code>)</span>
+          <span id="inf-ctx-val" class="inf-value-mono">4,096</span>
+        </div>
+        <div class="inf-seg-group" id="inf-ctx-buttons" role="group" aria-label="Context length">
+          <button class="inf-seg-btn active" type="button" data-ctx="4096">4K</button>
+          <button class="inf-seg-btn" type="button" data-ctx="8192">8K</button>
+          <button class="inf-seg-btn" type="button" data-ctx="16384">16K</button>
+          <button class="inf-seg-btn" type="button" data-ctx="32768">32K</button>
+        </div>
+        <div class="inf-helper-text">Larger contexts allocate more KV cache VRAM across cluster nodes.</div>
+      </div>
+
+      <div class="inf-control">
+        <div class="inf-control-top">
+          <label for="inf-ngl-range" class="inf-label">GPU Offload Layers (<code>-ngl</code>)</label>
+          <span id="inf-ngl-val" class="inf-value-mono">All GPU (-1)</span>
+        </div>
+        <label class="mh-checkbox-label inf-ngl-all-row">
+          <input id="inf-ngl-all-toggle" type="checkbox" checked>
+          <span>Offload all layers to GPU (<code>-ngl -1</code>)</span>
+        </label>
+        <div class="inf-ngl-slider-row">
+          <input id="inf-ngl-range" class="inf-slider" type="range" min="0" max="99" step="1" value="40" disabled>
+          <input id="inf-ngl-number" class="mh-input inf-num-input" type="number" min="0" max="999" value="40" disabled aria-label="Custom GPU layer count">
+        </div>
+      </div>
+
+      <div class="inf-runtime-actions">
+        <button id="inf-apply-runtime-btn" class="mh-btn mh-btn-primary inf-apply-btn" type="button">
+          <i data-lucide="save" style="width: 14px; height: 14px;"></i>
+          <span>Save &amp; Apply Runtime</span>
+        </button>
+        <div id="inf-runtime-status" class="inf-runtime-status" style="display: none;"></div>
+      </div>
+    </div>
+
+    <!-- Section 3: Custom System Prompts & Reusable Personas -->
+    <div class="inf-section">
+      <div class="inf-section-head">
+        <span class="inf-section-title">System Prompt &amp; Personas</span>
+        <span id="inf-prompt-tokens" class="inf-scope-tag">0 tok</span>
+      </div>
+
+      <div class="inf-control">
+        <div class="inf-control-top">
+          <label for="inf-preset-select" class="inf-label">Persona Preset</label>
+          <button id="inf-preset-delete-btn" class="cp-inline-link inf-delete-link" type="button" style="display: none;">Delete Preset</button>
+        </div>
+        <select id="inf-preset-select" class="mh-input inf-select"></select>
+      </div>
+
+      <div class="inf-control">
+        <label for="inf-system-prompt" class="inf-label">System Prompt (Sent on every turn of this chat)</label>
+        <textarea id="inf-system-prompt" class="mh-input inf-textarea" rows="5" placeholder="e.g. You are a senior Rust &amp; CUDA systems engineer. Be concise, cite exact memory layouts, and provide compilable code."></textarea>
+      </div>
+
+      <div class="inf-preset-save-row">
+        <input id="inf-preset-name-input" class="mh-input" type="text" maxlength="48" placeholder="New preset name...">
+        <button id="inf-preset-save-btn" class="mh-btn mh-btn-ghost" type="button">
+          <i data-lucide="bookmark-plus" style="width: 14px; height: 14px;"></i>
+          <span>Save Preset</span>
+        </button>
+      </div>
+      <div id="inf-preset-status" class="inf-runtime-status" style="display: none;"></div>
+    </div>
+
+  </div>
+
+  <div class="inf-drawer-footer">
+    <button id="inf-reset-btn" class="mh-btn mh-btn-ghost" type="button">
+      <i data-lucide="rotate-ccw" style="width: 13px; height: 13px;"></i>
+      <span>Reset Chat Defaults</span>
+    </button>
+    <span class="inf-autosave-note">Auto-saved per chat</span>
+  </div>
+</aside>
 
 <!-- ====================================================================
      DYNAMIC CLUSTER TELEMETRY & TOPOLOGY MODAL
@@ -790,9 +1162,10 @@
 
 <!-- Application Scripts -->
 <script src="/static/js/liquid_mesh.js"></script>
-<script src="/static/js/app.js?v=kimi9"></script>
-<script src="/static/js/model_hub.js?v=kimi9"></script>
-<script src="/static/js/cluster_pair.js?v=kimi9"></script>
+<script src="/static/js/app.js?v=kimi10"></script>
+<script src="/static/js/model_hub.js?v=kimi10"></script>
+<script src="/static/js/cluster_pair.js?v=kimi10"></script>
+<script src="/static/js/dev_server.js?v=kimi10"></script>
 
 </body>
 </html>

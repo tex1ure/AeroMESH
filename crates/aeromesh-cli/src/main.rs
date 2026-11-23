@@ -177,6 +177,14 @@ enum Commands {
         /// Port to bind HTTP API server
         #[arg(long, default_value_t = 8080)]
         port: u16,
+
+        /// Context length in tokens (e.g. 4096, 8192, 16384, 32768)
+        #[arg(long = "ctx")]
+        n_ctx: Option<u32>,
+
+        /// Number of layers to offload to GPU (-1 for all layers, 0 for CPU only)
+        #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
+        ngl: i32,
     },
 
     /// Unified 1-Click Cluster Launcher (Worker, Coordinator API, or Full Local Mesh)
@@ -204,6 +212,14 @@ enum Commands {
         /// Host IP to bind coordinator API (defaults to 127.0.0.1; pass 0.0.0.0 to expose on LAN/Tailscale)
         #[arg(long, default_value = "127.0.0.1")]
         bind: String,
+
+        /// Context length in tokens (e.g. 4096, 8192, 16384, 32768)
+        #[arg(long = "ctx")]
+        n_ctx: Option<u32>,
+
+        /// Number of layers to offload to GPU (-1 for all layers, 0 for CPU only)
+        #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
+        ngl: i32,
     },
 
     /// Slice a monolithic GGUF into Stage 1 (0..N) and Stage 2 (N..end) partition files
@@ -569,7 +585,13 @@ async fn main() -> Result<()> {
             peers,
             host,
             port,
+            n_ctx,
+            ngl,
         } => {
+            if let Some(ctx_val) = n_ctx {
+                std::env::set_var("AEROMESH_N_CTX", ctx_val.clamp(512, 131_072).to_string());
+            }
+            let resolved_ngl = resolve_ngl(ngl);
             let model_path = resolve_model_path(model.as_ref())?;
             let loader = GgufSliceLoader::open(&model_path)?;
             let total_layers = loader.total_layers;
@@ -604,7 +626,7 @@ async fn main() -> Result<()> {
                 &model_path,
                 worker_addrs,
                 custom_slice,
-                DEFAULT_GPU_OFFLOAD_LAYERS,
+                resolved_ngl,
             )?;
             let server = PipelineHttpServer::new(client, model_name);
             server.run(&host, port).await?;
@@ -617,7 +639,13 @@ async fn main() -> Result<()> {
             peers,
             port,
             bind,
+            n_ctx,
+            ngl,
         } => {
+            if let Some(ctx_val) = n_ctx {
+                std::env::set_var("AEROMESH_N_CTX", ctx_val.clamp(512, 131_072).to_string());
+            }
+            let resolved_ngl = resolve_ngl(ngl);
             let role_clean = role.trim().to_lowercase();
             let model_path = resolve_model_path(model.as_ref())?;
             let loader = GgufSliceLoader::open(&model_path)?;
@@ -634,11 +662,10 @@ async fn main() -> Result<()> {
                     };
 
                     info!(
-                        "🚀 Starting AeroMesh Zero-Weight Worker Node on port {}...",
-                        bind_port
+                        "🚀 Starting AeroMesh Zero-Weight Worker Node on port {} (ngl={})...",
+                        bind_port, resolved_ngl
                     );
-                    let ngl = DEFAULT_GPU_OFFLOAD_LAYERS;
-                    let service = PipelineWorkerService::new(&model_path, slice_config, ngl)?;
+                    let service = PipelineWorkerService::new(&model_path, slice_config, resolved_ngl)?;
                     service.run_server("0.0.0.0", bind_port).await?;
                 }
                 "coordinator" => {
@@ -670,15 +697,14 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|| "aeromesh-model".to_string());
 
                     info!(
-                        "🚀 Starting AeroMesh Zero-Weight Coordinator & API Server on port {}...",
-                        api_port
+                        "🚀 Starting AeroMesh Zero-Weight Coordinator & API Server on {}:{} (ngl={})...",
+                        bind, api_port, resolved_ngl
                     );
-                    let ngl = DEFAULT_GPU_OFFLOAD_LAYERS;
                     let client = PipelineCoordinatorClient::new(
                         &model_path,
                         worker_addrs,
                         slice_config,
-                        ngl,
+                        resolved_ngl,
                     )?;
                     let server = PipelineHttpServer::new(client, model_name);
                     server.run(&bind, api_port).await?;
@@ -695,8 +721,7 @@ async fn main() -> Result<()> {
                         .map(|m| m.len() / (1024 * 1024))
                         .unwrap_or(0);
 
-                    let (coord_ngl, worker_ngl) =
-                        (DEFAULT_GPU_OFFLOAD_LAYERS, DEFAULT_GPU_OFFLOAD_LAYERS);
+                    let (coord_ngl, worker_ngl) = (resolved_ngl, resolved_ngl);
 
                     println!("\n========================================================");
                     println!("   AEROMESH FULL LOCAL MESH INITIALIZING");

@@ -164,21 +164,27 @@
   // VIEW & SUB-TAB SWITCHING
   // ---------------------------------------------------------------------------
   function setWorkspaceView(view, subTab) {
-    const normalized = view === 'models' ? 'models' : (view === 'cluster' ? 'cluster' : 'chat');
+    const normalized = view === 'models'
+      ? 'models'
+      : (view === 'cluster' ? 'cluster' : (view === 'api' ? 'api' : 'chat'));
     state.activeView = normalized;
     if (subTab && normalized === 'models') setSubTab(subTab);
 
     const isChat = normalized === 'chat';
     const isModels = normalized === 'models';
     const isCluster = normalized === 'cluster';
+    const isApi = normalized === 'api';
 
     const clusterView = document.getElementById('cluster-pair-view');
     const navCluster = document.getElementById('nav-tab-cluster');
+    const apiView = document.getElementById('dev-api-view');
+    const navApi = document.getElementById('nav-tab-api');
 
     if (dom.chatViewport) dom.chatViewport.style.display = isChat ? '' : 'none';
     if (dom.composerAnchor) dom.composerAnchor.style.display = isChat ? '' : 'none';
     if (dom.hubView) dom.hubView.style.display = isModels ? 'block' : 'none';
     if (clusterView) clusterView.style.display = isCluster ? 'block' : 'none';
+    if (apiView) apiView.style.display = isApi ? 'block' : 'none';
 
     if (dom.navChat) {
       dom.navChat.classList.toggle('active', isChat);
@@ -192,6 +198,10 @@
       navCluster.classList.toggle('active', isCluster);
       navCluster.setAttribute('aria-selected', String(isCluster));
     }
+    if (navApi) {
+      navApi.classList.toggle('active', isApi);
+      navApi.setAttribute('aria-selected', String(isApi));
+    }
 
     if (isModels) {
       refreshLibrary();
@@ -202,6 +212,12 @@
       if (roleModal) roleModal.style.display = 'none';
       if (typeof window.refreshClusterPairing === 'function') {
         window.refreshClusterPairing();
+      }
+    } else if (isApi) {
+      const roleModal = document.getElementById('aeromesh-role-modal');
+      if (roleModal) roleModal.style.display = 'none';
+      if (typeof window.refreshDevServerPanel === 'function') {
+        window.refreshDevServerPanel();
       }
     }
   }
@@ -233,6 +249,10 @@
 
   window.openClusterPairing = function () {
     setWorkspaceView('cluster');
+  };
+
+  window.openDevApiServer = function () {
+    setWorkspaceView('api');
   };
 
   // ---------------------------------------------------------------------------
