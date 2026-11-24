@@ -753,7 +753,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, repo, filename, hf_token: hfToken }),
       });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
         throw new Error(data.detail || `Download failed (HTTP ${resp.status})`);
       }
@@ -792,7 +792,7 @@
 
     try {
       const resp = await fetch(getApiUrl(`/api/models/hf/files?repo=${encodeURIComponent(repo)}`));
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
       state.expandedRepos[repo] = { loading: false, error: null, files: data.files || [] };
     } catch (err) {
@@ -834,7 +834,7 @@
     }
     try {
       const resp = await fetch(getApiUrl(`/api/models/hf/search?q=${encodeURIComponent(q)}&limit=12`));
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
       lastHfResults = Array.isArray(data.results) ? data.results : [];
       if (dom.hfResultsSection) dom.hfResultsSection.style.display = 'flex';
@@ -867,7 +867,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: rawPath, copy_to_library: copy }),
       });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
       if (data.library) {
         state.library = data.library;
@@ -898,7 +898,8 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode }),
       });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
       if (!data.supported) {
         showFeedback(data.message || 'Paste a local path directly in the input box.', 'info');
         if (dom.manualPathInput) dom.manualPathInput.focus();
@@ -920,7 +921,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'remove', path: folderPath }),
       });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
       if (data.library) {
         state.library = data.library;
@@ -946,7 +947,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
       });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
       if (data.library) {
         state.library = data.library;
@@ -1099,7 +1100,9 @@
       const done = t.status === 'completed';
       const err = t.status === 'error' || t.status === 'cancelled';
 
-      const pct = Number(t.percent || 0).toFixed(1);
+      const rawPct = Number(t.percent);
+      const safePct = Number.isFinite(rawPct) ? Math.min(100, Math.max(0, rawPct)) : 0;
+      const pct = safePct.toFixed(1);
       const bytesStr = t.total_bytes > 0
         ? `${formatBytes(t.downloaded_bytes)} / ${formatBytes(t.total_bytes)}`
         : formatBytes(t.downloaded_bytes);
@@ -1120,7 +1123,7 @@
           <div class="mh-list-actions" data-transfer-actions></div>
         </div>
         <div class="mh-progress-track">
-          <div class="mh-progress-fill ${done ? 'is-done' : err ? 'is-err' : ''}" style="width: ${Math.min(100, Math.max(0, Number(t.percent || 0)))}%"></div>
+          <div class="mh-progress-fill ${done ? 'is-done' : err ? 'is-err' : ''}" style="width: ${safePct}%"></div>
         </div>
       `;
 

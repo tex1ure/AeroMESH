@@ -117,7 +117,20 @@ def validate_peer_host(raw_host: str, default_port: int = DEFAULT_SYNC_PORT) -> 
         raise ValueError("Invalid peer host address.")
 
     port = default_port
-    if ":" in cleaned and cleaned.count(":") == 1:
+    if cleaned.startswith("["):
+        close_idx = cleaned.find("]")
+        if close_idx <= 1:
+            raise ValueError("Invalid bracketed IPv6 peer host.")
+        host = cleaned[1:close_idx].strip()
+        rest = cleaned[close_idx + 1:].strip()
+        if rest:
+            if not rest.startswith(":"):
+                raise ValueError("Invalid peer host syntax after IPv6 brackets.")
+            try:
+                port = int(rest[1:])
+            except ValueError:
+                raise ValueError("Invalid peer port number.")
+    elif ":" in cleaned and cleaned.count(":") == 1:
         host_part, port_str = cleaned.rsplit(":", 1)
         host = host_part.strip()
         try:
@@ -147,6 +160,13 @@ def extract_host_from_endpoint(endpoint: str) -> str:
     raw = str(endpoint or "").strip()
     if not raw:
         return ""
+    raw = re.sub(r"^https?://", "", raw, flags=re.IGNORECASE).split("/", 1)[0].strip()
+    if not raw:
+        return ""
+    if raw.startswith("["):
+        close_idx = raw.find("]")
+        if close_idx > 1:
+            return raw[1:close_idx].strip()
     if ":" in raw and raw.count(":") == 1:
         return raw.rsplit(":", 1)[0].strip()
     return raw

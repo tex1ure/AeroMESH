@@ -646,18 +646,25 @@ async def get_models():
     # can still mark the active model. Only the basename is exposed: absolute
     # local paths are not the client's business.
     local_models = []
-    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
-    if os.path.exists(models_dir):
+    seen_names = set()
+    for models_dir in get_models_dirs():
+        if not os.path.isdir(models_dir):
+            continue
         for f in sorted(glob.glob(os.path.join(models_dir, "*.gguf"))):
             name = os.path.basename(f)
-            if _is_slice_file(name):
+            if _is_slice_file(name) or name.startswith(".aeromesh_") or name in seen_names:
                 continue
+            seen_names.add(name)
+            try:
+                mtime = int(os.path.getmtime(f))
+            except OSError:
+                mtime = int(time.time())
             local_models.append({
                 "id": name,
                 "object": "model",
-                "created": int(os.path.getmtime(f)),
+                "created": mtime,
                 "owned_by": "local_disk",
-                "is_active": len(local_models) == 0,  # first (alphabetical) is the assumed active one
+                "is_active": len(local_models) == 0,  # first discovered is the assumed active one
             })
 
     return {
@@ -675,7 +682,16 @@ async def switch_model(request: Request):
     """
     client = get_backend_client()
     try:
-        payload = await request.json()
+        payload = await _read_json_body(request)
+    except HTTPException as exc:
+        if exc.status_code == 413:
+            raise
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "Request body must be JSON",
+                               "type": "invalid_request_error", "param": "model",
+                               "code": "invalid_json"}},
+        )
     except Exception:
         return JSONResponse(
             status_code=400,
@@ -975,12 +991,14 @@ class NodeRuntimeManager:
         install_dir = get_install_dir()
         data_dir = get_data_dir()
         os.makedirs(data_dir, exist_ok=True)
+        exe_name = "aeromesh.exe" if sys.platform == "win32" else "aeromesh"
         engine_candidates = [
-            os.path.join(install_dir, "aeromesh.exe"),
-            os.path.join(install_dir, "bin", "aeromesh.exe"),
-            os.path.join(install_dir, "target", "release", "aeromesh.exe"),
+            os.path.join(install_dir, exe_name),
+            os.path.join(install_dir, "bin", exe_name),
+            os.path.join(install_dir, "target", "release", exe_name),
+            os.path.join(install_dir, "target", "debug", exe_name),
         ]
-        engine_exe = next((c for c in engine_candidates if os.path.exists(c)), "aeromesh.exe")
+        engine_exe = next((c for c in engine_candidates if os.path.exists(c)), exe_name)
 
         cmd = [engine_exe]
         if role_clean == "worker":
@@ -1172,8 +1190,12 @@ async def _build_server_config_payload() -> dict:
             coordinator_online = True
             data = resp.json()
             models_list = data.get("data") or []
-            if models_list and isinstance(models_list[0], dict):
-                active_model = str(models_list[0].get("id") or "")
+            active_entry = next(
+                (m for m in models_list if isinstance(m, dict) and m.get("is_active")),
+                models_list[0] if (models_list and isinstance(models_list[0], dict)) else None,
+            )
+            if active_entry:
+                active_model = str(active_entry.get("id") or "")
     except Exception:
         pass
 
@@ -1189,7 +1211,7 @@ async def _build_server_config_payload() -> dict:
     lan_exposed = bool(cfg.get("lan_exposed", False))
     bind_host = "0.0.0.0" if lan_exposed else "127.0.0.1"
     base_url = f"{AEROMESH_BACKEND_URL.rstrip('/')}/v1"
-    gateway_base_url = f"http://127.0.0.1:{int(os.environ.get('AEROMESH_PORT', '7860'))}/v1"
+    gateway_base_url = f"http://127.0.0.1:{AEROMESH_UI_PORT}/v1"
     lan_url = f"http://{wifi_ip}:8080/v1" if wifi_ip and wifi_ip != "127.0.0.1" else ""
     tailscale_url = f"http://{ts_ip}:8080/v1" if ts_connected else ""
     display_url = lan_url if (lan_exposed and lan_url) else base_url
@@ -1289,8 +1311,38 @@ async def update_server_config_endpoint(request: Request):
 async def rotate_api_key_endpoint():
     fresh = generate_api_key()
     _upsert_env_var("AEROMESH_API_KEY", fresh)
+
+    # Restart an active managed coordinator so its in-memory auth middleware
+    # picks up the rotated AEROMESH_API_KEY immediately instead of returning 401.
+    restarted = False
+    restart_error = None
+    with node_manager.lock:
+        is_running = node_manager.is_running()
+        cur_role = node_manager.role
+        cur_model = node_manager.model
+        cur_peers = node_manager.peers
+        cur_layers = node_manager.layers
+    if is_running and cur_role in ("coordinator", "all") and cur_model:
+        saved = _load_server_config()
+        res = node_manager.start(
+            cur_role,
+            cur_model,
+            cur_peers,
+            layers=cur_layers,
+            n_ctx=saved.get("n_ctx", DEFAULT_N_CTX),
+            ngl=saved.get("ngl", DEFAULT_NGL),
+            bind=saved.get("bind_host", "127.0.0.1"),
+        )
+        if res.get("status") == "ok":
+            restarted = True
+        else:
+            restart_error = res.get("message")
+
     payload = await _build_server_config_payload()
     payload["rotated"] = True
+    payload["restarted"] = restarted
+    if restart_error:
+        payload["restart_error"] = restart_error
     return payload
 
 
@@ -1347,7 +1399,17 @@ async def chat_completions(request: Request):
             headers=get_auth_headers(),
             timeout=httpx.Timeout(180.0, connect=10.0),
         )
-        content = resp.json()
+        try:
+            content = resp.json()
+        except ValueError:
+            content = {
+                "error": {
+                    "message": resp.text[:500] or f"Upstream returned HTTP {resp.status_code}",
+                    "type": "api_error",
+                    "param": None,
+                    "code": "upstream_non_json",
+                }
+            }
         if resp.status_code == 200 and (compat_meta.get("tools_enabled") or compat_meta.get("json_mode")):
             content = transform_completion_response(content, compat_meta)
         return JSONResponse(status_code=resp.status_code, content=content)
@@ -1658,9 +1720,17 @@ async def generate_image_pipeline(request: Request):
 
     sd_bin, sd_model = _find_sd_binary_and_model()
     model_label = os.path.basename(sd_model) if sd_model else "Not Installed"
-    steps = max(1, min(int(body.get("steps", 12)), 50))
-    width = (max(256, min(int(body.get("width", 512)), 1024)) // 64) * 64
-    height = (max(256, min(int(body.get("height", 512)), 1024)) // 64) * 64
+    try:
+        steps = max(1, min(int(body.get("steps", 12)), 50))
+        width = (max(256, min(int(body.get("width", 512)), 1024)) // 64) * 64
+        height = (max(256, min(int(body.get("height", 512)), 1024)) // 64) * 64
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": {"message": "Fields 'steps', 'width', and 'height' must be integers",
+                              "type": "invalid_request_error", "param": "steps",
+                              "code": "invalid_value"}},
+        )
     stream = bool(body.get("stream", True))
 
     async def dit_event_stream():
@@ -2147,7 +2217,7 @@ async def get_models_library():
 
 @app.post("/api/models/paths", dependencies=[Depends(verify_gateway_access)])
 async def manage_model_paths(request: Request):
-    body = await request.json()
+    body = await _read_json_body(request)
     action = str(body.get("action", "add")).strip().lower()
     raw_path = str(body.get("path", "")).strip().strip('"')
     if not raw_path:
@@ -2173,7 +2243,7 @@ async def manage_model_paths(request: Request):
 
 @app.post("/api/models/import-path", dependencies=[Depends(verify_gateway_access)])
 async def import_model_by_path(request: Request):
-    body = await request.json()
+    body = await _read_json_body(request)
     raw_path = str(body.get("path", "")).strip().strip('"')
     copy_to_library = bool(body.get("copy_to_library", False))
     if not raw_path:
@@ -2221,7 +2291,7 @@ async def import_model_by_path(request: Request):
 
 @app.post("/api/models/browse", dependencies=[Depends(verify_gateway_access)])
 async def browse_local_model_path(request: Request):
-    body = await request.json()
+    body = await _read_json_body(request)
     mode = str(body.get("mode", "file")).strip().lower()
     if sys.platform != "win32":
         return JSONResponse(status_code=200, content={"supported": False, "path": None, "message": "Native folder/file picker is available on Windows desktop; type or paste the path directly."})
@@ -2259,6 +2329,8 @@ async def upload_dropped_model(request: Request):
                 written += len(chunk)
         if written == 0:
             raise HTTPException(status_code=400, detail="Uploaded file was empty.")
+        if lower.endswith(".gguf") and bytes(header_buf) != b"GGUF":
+            raise HTTPException(status_code=400, detail="Dropped file is not a valid GGUF model (missing GGUF header).")
         os.replace(part, dest)
     except Exception:
         try:
@@ -2276,7 +2348,7 @@ async def upload_dropped_model(request: Request):
 
 @app.post("/api/models/delete", dependencies=[Depends(verify_gateway_access)])
 async def delete_managed_model(request: Request):
-    body = await request.json()
+    body = await _read_json_body(request)
     raw_name = str(body.get("name", "")).strip()
     try:
         filename = _sanitize_model_name(raw_name)
@@ -2383,21 +2455,21 @@ async def list_hf_repo_gguf_files(repo: str):
 
 @app.post("/api/models/download", dependencies=[Depends(verify_gateway_access)])
 async def start_model_download(request: Request):
-    body = await request.json()
+    body = await _read_json_body(request)
     raw_url = str(body.get("url", "")).strip()
     repo = str(body.get("repo", "")).strip()
     raw_filename = str(body.get("filename", "")).strip()
     hf_token = str(body.get("hf_token", "")).strip()
 
-    if not raw_url and repo and raw_filename:
-        repo_id = _validate_hf_repo_id(repo)
-        safe_fname = _sanitize_model_name(os.path.basename(raw_filename))
-        raw_url = f"https://huggingface.co/{repo_id}/resolve/main/{quote(raw_filename, safe='/')}"
-    else:
-        if not raw_filename and raw_url:
-            raw_filename = os.path.basename(urlparse(raw_url).path)
-
     try:
+        if not raw_url and repo and raw_filename:
+            repo_id = _validate_hf_repo_id(repo)
+            _sanitize_model_name(os.path.basename(raw_filename))
+            raw_url = f"https://huggingface.co/{repo_id}/resolve/main/{quote(raw_filename, safe='/')}"
+        else:
+            if not raw_filename and raw_url:
+                raw_filename = os.path.basename(urlparse(raw_url).path)
+
         url = _validate_hf_download_url(raw_url)
         filename = _sanitize_model_name(os.path.basename(raw_filename))
     except ValueError as exc:
@@ -2436,7 +2508,7 @@ async def list_model_downloads():
 
 @app.post("/api/models/download/cancel", dependencies=[Depends(verify_gateway_access)])
 async def cancel_model_download(request: Request):
-    body = await request.json()
+    body = await _read_json_body(request)
     download_id = str(body.get("id", "")).strip()
     with _DOWNLOAD_LOCK:
         if download_id not in _DOWNLOAD_TASKS:
@@ -2590,7 +2662,22 @@ def _parse_pair_join_target(invite_code: str, host_raw: str, pin_raw: str):
     if not cleaned or "/" in cleaned or " " in cleaned:
         raise ValueError("Enter a valid peer IP address or hostname.")
 
-    if ":" in cleaned and cleaned.count(":") == 1:
+    if cleaned.startswith("["):
+        close_idx = cleaned.find("]")
+        if close_idx <= 1:
+            raise ValueError("Invalid bracketed IPv6 pairing host.")
+        host = cleaned[1:close_idx].strip()
+        rest = cleaned[close_idx + 1:].strip()
+        if rest:
+            if not rest.startswith(":"):
+                raise ValueError("Invalid pairing host syntax after IPv6 brackets.")
+            try:
+                port = int(rest[1:])
+            except ValueError:
+                raise ValueError("Invalid pairing port number.")
+        else:
+            port = DEFAULT_PAIR_PORT
+    elif ":" in cleaned and cleaned.count(":") == 1:
         h_only, p_str = cleaned.rsplit(":", 1)
         try:
             port = int(p_str)
@@ -2606,10 +2693,10 @@ def _parse_pair_join_target(invite_code: str, host_raw: str, pin_raw: str):
 
     try:
         ip_obj = ipaddress.ip_address(host)
-        if ip_obj.version == 4 and str(ip_obj).startswith("169.254."):
-            raise ValueError("Link-local metadata addresses are not permitted for pairing.")
+        if ip_obj.is_link_local or ip_obj.is_unspecified or ip_obj.is_multicast:
+            raise ValueError("Link-local, unspecified, or multicast addresses are not permitted for pairing.")
     except ValueError as exc:
-        if "Link-local" in str(exc):
+        if "not permitted" in str(exc):
             raise
         if len(host) > 253 or not re.fullmatch(r"[A-Za-z0-9.-]+", host):
             raise ValueError("Invalid peer hostname.")

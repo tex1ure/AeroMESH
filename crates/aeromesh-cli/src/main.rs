@@ -592,6 +592,7 @@ async fn main() -> Result<()> {
                 std::env::set_var("AEROMESH_N_CTX", ctx_val.clamp(512, 131_072).to_string());
             }
             let resolved_ngl = resolve_ngl(ngl);
+            std::env::set_var("AEROMESH_NGL", resolved_ngl.to_string());
             let model_path = resolve_model_path(model.as_ref())?;
             let loader = GgufSliceLoader::open(&model_path)?;
             let total_layers = loader.total_layers;
@@ -646,6 +647,7 @@ async fn main() -> Result<()> {
                 std::env::set_var("AEROMESH_N_CTX", ctx_val.clamp(512, 131_072).to_string());
             }
             let resolved_ngl = resolve_ngl(ngl);
+            std::env::set_var("AEROMESH_NGL", resolved_ngl.to_string());
             let role_clean = role.trim().to_lowercase();
             let model_path = resolve_model_path(model.as_ref())?;
             let loader = GgufSliceLoader::open(&model_path)?;

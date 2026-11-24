@@ -1049,7 +1049,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
           apply_restart: true
         })
       });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
       window.syncInferenceRuntimeFromServer(data);
       if (typeof window.refreshDevServerPanel === 'function') {
@@ -1110,20 +1110,63 @@ window.getApiUrl = window.getApiUrl || function(path) {
     }
   }
 
-  function clearAllChats() {
-    if (confirm('Clear all conversation history from this browser?')) {
-      for (const [chatId] of activeStreams) {
-        stopChatGeneration(chatId);
-      }
-      conversations = [];
-      createNewChat();
+  let confirmClearAllPending = false;
+  let confirmClearAllTimer = null;
+
+  function showStudioNotice(message) {
+    let toast = document.getElementById('concurrency-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'concurrency-toast';
+      toast.className = 'concurrency-toast';
+      document.body.appendChild(toast);
     }
+    toast.innerHTML = `<i data-lucide="info"></i><span>${escapeHtml(message)}</span>`;
+    if (window.lucide) lucide.createIcons();
+    toast.classList.add('show');
+    if (window._concurrencyToastTimer) clearTimeout(window._concurrencyToastTimer);
+    window._concurrencyToastTimer = setTimeout(() => {
+      toast.classList.remove('show');
+    }, 3500);
+  }
+
+  function clearAllChats() {
+    if (!confirmClearAllPending) {
+      confirmClearAllPending = true;
+      if (elements.btnClearAll) {
+        if (!elements.btnClearAll.dataset.origHtml) {
+          elements.btnClearAll.dataset.origHtml = elements.btnClearAll.innerHTML;
+        }
+        elements.btnClearAll.textContent = 'Confirm Clear?';
+      }
+      if (confirmClearAllTimer) clearTimeout(confirmClearAllTimer);
+      confirmClearAllTimer = setTimeout(() => {
+        confirmClearAllPending = false;
+        if (elements.btnClearAll && elements.btnClearAll.dataset.origHtml) {
+          elements.btnClearAll.innerHTML = elements.btnClearAll.dataset.origHtml;
+          if (window.lucide) lucide.createIcons();
+        }
+      }, 4500);
+      return;
+    }
+
+    confirmClearAllPending = false;
+    if (confirmClearAllTimer) clearTimeout(confirmClearAllTimer);
+    if (elements.btnClearAll && elements.btnClearAll.dataset.origHtml) {
+      elements.btnClearAll.innerHTML = elements.btnClearAll.dataset.origHtml;
+      if (window.lucide) lucide.createIcons();
+    }
+    for (const [chatId] of activeStreams) {
+      stopChatGeneration(chatId);
+    }
+    conversations = [];
+    createNewChat();
   }
 
   function exportCurrentChat() {
     const chat = getCurrentChat();
     if (!chat || chat.messages.length === 0) {
-      alert('No messages to export.');
+      showStudioNotice('No messages to export yet.');
       return;
     }
 
@@ -1337,9 +1380,9 @@ window.getApiUrl = window.getApiUrl || function(path) {
       telemetryTag.className = 'telemetry-tag';
       if (metrics) {
         if (metrics.isDistributed || (metrics.wireMB && parseFloat(metrics.wireMB) > 0)) {
-          telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${metrics.tokPerSec || '—'} tok/s</span> • <span><i data-lucide="network" style="width: 11px; height: 11px;"></i> ${metrics.wireMB || '0.00'} MB Wire</span> • <span><i data-lucide="box" style="width: 11px; height: 11px;"></i> ${metrics.perTokenKB || 'not reported'}</span> • <span class="badge-direct-wireguard"><i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> Direct WireGuard</span>`;
+          telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${escapeHtml(metrics.tokPerSec || '—')} tok/s</span> • <span><i data-lucide="network" style="width: 11px; height: 11px;"></i> ${escapeHtml(metrics.wireMB || '0.00')} MB Wire</span> • <span><i data-lucide="box" style="width: 11px; height: 11px;"></i> ${escapeHtml(metrics.perTokenKB || 'not reported')}</span> • <span class="badge-direct-wireguard"><i data-lucide="shield-check" style="width: 12px; height: 12px;"></i> Direct WireGuard</span>`;
         } else {
-          telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${metrics.tokPerSec || '—'} tok/s</span> • <span>0.0 MB Wire (SHM)</span>`;
+          telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> ${escapeHtml(metrics.tokPerSec || '—')} tok/s</span> • <span>0.0 MB Wire (SHM)</span>`;
         }
       } else {
         telemetryTag.innerHTML = `<span><i data-lucide="zap" style="width: 11px; height: 11px;"></i> Zero-Weight Mesh</span>`;
@@ -1543,7 +1586,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
       const header = document.createElement('div');
       header.className = 'code-block-header';
       header.innerHTML = `
-        <span style="font-family: monospace; text-transform: uppercase; color: var(--accent-orange); font-size: 10.5px;">${lang}</span>
+        <span style="font-family: monospace; text-transform: uppercase; color: var(--accent-orange); font-size: 10.5px;">${escapeHtml(lang)}</span>
         <button class="copy-code-btn" title="Copy Code">
           <i data-lucide="copy" style="width: 11px; height: 11px;"></i>
           <span>Copy</span>
@@ -1557,12 +1600,13 @@ window.getApiUrl = window.getApiUrl || function(path) {
           copyBtn.classList.add('copied');
           copyBtn.innerHTML = '<i data-lucide="check" style="width: 11px; height: 11px;"></i><span>Copied!</span>';
           if (window.lucide) lucide.createIcons();
-          setTimeout(() => {
+          if (copyBtn._copyTimer) clearTimeout(copyBtn._copyTimer);
+          copyBtn._copyTimer = setTimeout(() => {
             copyBtn.classList.remove('copied');
             copyBtn.innerHTML = '<i data-lucide="copy" style="width: 11px; height: 11px;"></i><span>Copy</span>';
             if (window.lucide) lucide.createIcons();
           }, 2000);
-        });
+        }).catch(() => {});
       };
 
       pre.parentNode.insertBefore(wrapper, pre);
@@ -1573,14 +1617,17 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
   function copyToClipboard(text, btnElement) {
     navigator.clipboard.writeText(text).then(() => {
-      const originalHtml = btnElement.innerHTML;
+      if (!btnElement.dataset.origHtml) {
+        btnElement.dataset.origHtml = btnElement.innerHTML;
+      }
       btnElement.innerHTML = '<i data-lucide="check" style="width: 11px; height: 11px; color: var(--accent-mint);"></i><span>Copied</span>';
       if (window.lucide) lucide.createIcons();
-      setTimeout(() => {
-        btnElement.innerHTML = originalHtml;
+      if (btnElement._copyTimer) clearTimeout(btnElement._copyTimer);
+      btnElement._copyTimer = setTimeout(() => {
+        btnElement.innerHTML = btnElement.dataset.origHtml;
         if (window.lucide) lucide.createIcons();
       }, 2000);
-    });
+    }).catch(() => {});
   }
 
   function scrollToBottom(smooth = false) {
@@ -1669,7 +1716,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
     if (chatId === currentChatId) {
       updateSendButtonState(false);
     }
-    if (activeStreams.size === 0) {
+    if (activeStreams.size === 0 && clusterState === 'online_generating') {
       setClusterState('online_idle');
     }
     renderHistoryList();
@@ -1771,9 +1818,12 @@ window.getApiUrl = window.getApiUrl || function(path) {
       isDistributed: false
     };
 
+    const prevClusterState = clusterState;
     activeStreams.set(targetChatId, streamInfo);
     updateSendButtonState(true);
-    setClusterState('online_generating');
+    if (prevClusterState === 'online_idle' || prevClusterState === 'online_generating') {
+      setClusterState('online_generating');
+    }
     renderHistoryList();
 
     const STOP_SEQUENCES = [
@@ -1789,6 +1839,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
       '</s>'
     ];
 
+    let streamHadError = false;
     try {
       const response = await fetch(getApiUrl('/api/chat/stream'), {
         method: 'POST',
@@ -1905,6 +1956,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
         console.log(`Generation for ${targetChatId} aborted by user.`);
         streamInfo.accumulatedText += '\n\n*(Generation stopped by user)*';
       } else {
+        streamHadError = true;
         console.error(`Stream error for ${targetChatId}:`, err);
         streamInfo.accumulatedText += `\n\n❌ **Communication Error**: ${err.message}`;
       }
@@ -1927,7 +1979,11 @@ window.getApiUrl = window.getApiUrl || function(path) {
       clearKvOnSend = false;
       elements.pillClearKv.classList.remove('active');
       if (activeStreams.size === 0) {
-        setClusterState('online_idle');
+        if (streamHadError) {
+          fetchClusterStatus();
+        } else if (clusterState === 'online_generating') {
+          setClusterState('online_idle');
+        }
       }
     }
   }
@@ -2362,7 +2418,16 @@ window.getApiUrl = window.getApiUrl || function(path) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: promptText, steps: 6, width: 768, height: 768, stream: true }),
       });
+      if (!resp.ok || !resp.body) {
+        let errDetail = `HTTP ${resp.status}`;
+        try {
+          const errJson = await resp.json();
+          if (errJson.detail) errDetail = typeof errJson.detail === 'string' ? errJson.detail : (errJson.detail.error?.message || errDetail);
+        } catch (_) {}
+        throw new Error(errDetail);
+      }
 
+      const esc = window.escapeHtml || ((v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -2378,7 +2443,12 @@ window.getApiUrl = window.getApiUrl || function(path) {
           if (!line.startsWith('data: ')) continue;
           const payloadStr = line.slice(6).trim();
           if (!payloadStr || payloadStr === '[DONE]') continue;
-          const evt = JSON.parse(payloadStr);
+          let evt;
+          try {
+            evt = JSON.parse(payloadStr);
+          } catch (_) {
+            continue;
+          }
 
           if (evt.type === 'dit_mesh_conditioning') {
             statusTitle.textContent = `Stage 0: 2-Node Mesh Conditioning (Coord ${evt.coordinator_layers} ➔ Worker ${evt.worker_node})`;
@@ -2422,7 +2492,7 @@ window.getApiUrl = window.getApiUrl || function(path) {
               renderLatentCanvas(canvas, promptText, evt.seed, 1.0);
               statusTitle.textContent = `DiT Synthesis Complete (${evt.sd_error || 'Procedural Fallback'})`;
             }
-            footerTelemetry.innerHTML = `<span>${evt.steps} Steps in ${evt.elapsed_s}s</span> &bull; <span>${evt.accum_wire_mb} MB Total Wire</span> &bull; <span>0.0 MB Weights</span>`;
+            footerTelemetry.innerHTML = `<span>${esc(evt.steps)} Steps in ${esc(evt.elapsed_s)}s</span> &bull; <span>${esc(evt.accum_wire_mb)} MB Total Wire</span> &bull; <span>0.0 MB Weights</span>`;
             downloadBtn.style.display = 'inline-flex';
             downloadBtn.onclick = () => {
               const a = document.createElement('a');
@@ -2932,16 +3002,20 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
       const sel = document.getElementById('rm-model-select');
       const models = Array.isArray(st.models) ? st.models : [];
-      if (sel && sel.options.length !== models.length) {
-        const prev = sel.value;
-        sel.innerHTML = '';
-        models.forEach(m => {
-          const opt = document.createElement('option');
-          opt.value = m;
-          opt.textContent = m;
-          if (m === prev || (!prev && m === 'test.gguf')) opt.selected = true;
-          sel.appendChild(opt);
-        });
+      if (sel) {
+        const currentValues = Array.from(sel.options).map((o) => o.value);
+        const listChanged = currentValues.length !== models.length || currentValues.some((v, idx) => v !== models[idx]);
+        if (listChanged) {
+          const prev = sel.value;
+          sel.innerHTML = '';
+          models.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            if (m === prev || (!prev && m === 'test.gguf')) opt.selected = true;
+            sel.appendChild(opt);
+          });
+        }
       }
 
       const imgLbl = document.getElementById('rm-img-model-label');
@@ -3011,11 +3085,16 @@ window.getApiUrl = window.getApiUrl || function(path) {
 
     try {
       startLogPolling();
-      await fetch(window.getApiUrl('/api/node/start'), {
+      const startResp = await fetch(window.getApiUrl('/api/node/start'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ role, model, peers, layers }),
       });
+      const startData = await startResp.json().catch(() => ({}));
+      if (!startResp.ok || startData.status === 'error') {
+        stopLogPolling();
+        throw new Error(startData.message || startData.detail || `HTTP ${startResp.status}`);
+      }
 
       await refreshNodeState();
 

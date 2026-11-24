@@ -114,6 +114,7 @@ def load_server_config_file(path: str) -> Dict[str, Any]:
             n_ctx=raw.get("n_ctx", 4096),
             ngl=raw.get("ngl", -1),
             lan_exposed=raw.get("lan_exposed", False),
+            bind_host=raw.get("bind_host"),
         )
     except Exception:
         return defaults
@@ -124,6 +125,7 @@ def save_server_config_file(path: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         n_ctx=cfg.get("n_ctx", 4096),
         ngl=cfg.get("ngl", -1),
         lan_exposed=cfg.get("lan_exposed", False),
+        bind_host=cfg.get("bind_host"),
     )
     parent = os.path.dirname(path)
     if parent:

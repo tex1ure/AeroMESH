@@ -121,10 +121,13 @@
       document.body.removeChild(ta);
     }
     if (btn) {
-      const orig = btn.innerHTML;
+      if (!btn.dataset.origHtml) {
+        btn.dataset.origHtml = btn.innerHTML;
+      }
       btn.textContent = labelAfter || 'Copied!';
-      setTimeout(() => {
-        btn.innerHTML = orig;
+      if (btn._copyTimer) clearTimeout(btn._copyTimer);
+      btn._copyTimer = setTimeout(() => {
+        btn.innerHTML = btn.dataset.origHtml;
         if (window.lucide) lucide.createIcons();
       }, 1500);
     }
@@ -308,7 +311,8 @@
       const dirLabel = j.direction === 'pull'
         ? `Pull from ${j.peer_name || j.peer_host}`
         : `Push to ${j.peer_name || j.peer_host}`;
-      const pct = Math.max(0, Math.min(100, Number(j.percent || 0)));
+      const rawPct = Number(j.percent);
+      const pct = Number.isFinite(rawPct) ? Math.max(0, Math.min(100, rawPct)) : 0;
       const isDone = j.status === 'completed';
       const isErr = j.status === 'error' || j.status === 'cancelled';
       const fillClass = isDone ? 'is-done' : (isErr ? 'is-err' : '');
@@ -375,7 +379,9 @@
     }
 
     const statusBadge = (overall, readyCount, onlineCount) => {
-      if (overall === 'ready') return `<span class="cp-status-tag is-ready">Verified Match (${readyCount}/${onlineCount})</span>`;
+      const rNum = Number.isFinite(Number(readyCount)) ? Number(readyCount) : 0;
+      const oNum = Number.isFinite(Number(onlineCount)) ? Number(onlineCount) : 0;
+      if (overall === 'ready') return `<span class="cp-status-tag is-ready">Verified Match (${rNum}/${oNum})</span>`;
       if (overall === 'needs_sync') return `<span class="cp-status-tag is-warn">Missing on Peer</span>`;
       if (overall === 'missing_locally') return `<span class="cp-status-tag is-info">Available on Peer</span>`;
       if (overall === 'mismatch') return `<span class="cp-status-tag is-err">GGUF Hash Mismatch</span>`;

@@ -371,7 +371,10 @@ def _skip_or_read_gguf_value(f, vtype: int, want_value: bool):
         raw_len = f.read(8)
         if len(raw_len) < 8:
             raise EOFError("Truncated GGUF string")
-        f.seek(struct.unpack("<Q", raw_len)[0], os.SEEK_CUR)
+        str_len = struct.unpack("<Q", raw_len)[0]
+        if str_len > 16 * 1024 * 1024:
+            raise ValueError("GGUF string length exceeds safety bound")
+        f.seek(str_len, os.SEEK_CUR)
         return None
 
     if vtype == _GGUF_TYPE_ARRAY:
@@ -388,7 +391,10 @@ def _skip_or_read_gguf_value(f, vtype: int, want_value: bool):
                 raw_len = f.read(8)
                 if len(raw_len) < 8:
                     raise EOFError("Truncated GGUF string array")
-                f.seek(struct.unpack("<Q", raw_len)[0], os.SEEK_CUR)
+                str_len = struct.unpack("<Q", raw_len)[0]
+                if str_len > 16 * 1024 * 1024:
+                    raise ValueError("GGUF array string length exceeds safety bound")
+                f.seek(str_len, os.SEEK_CUR)
         else:
             for _ in range(count):
                 _skip_or_read_gguf_value(f, elem_type, False)
@@ -901,7 +907,7 @@ def plan_layer_split(
         if b["vram_total_mb"] > 0:
             max_vram_pct = max(max_vram_pct, vram_pct)
 
-        range_str = f"{layer_start}..{layer_end}" if (layer_start is not None and layer_end is not None) else ""
+        range_str = f"{layer_start}..={layer_end}" if (layer_start is not None and layer_end is not None) else ""
         ram_pct = round((ram_used_by_stage / max(1.0, b["node"]["ram_total_mb"])) * 100.0, 1)
 
         stages.append({

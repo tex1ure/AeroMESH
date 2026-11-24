@@ -115,11 +115,14 @@
       document.body.removeChild(ta);
     }
     if (btn && copied) {
-      const orig = btn.innerHTML;
+      if (!btn.dataset.origHtml) {
+        btn.dataset.origHtml = btn.innerHTML;
+      }
       btn.innerHTML = `<i data-lucide="check" style="width: 14px; height: 14px;"></i><span>${esc(doneLabel || 'Copied')}</span>`;
       if (window.lucide) lucide.createIcons();
-      setTimeout(() => {
-        btn.innerHTML = orig;
+      if (btn._copyTimer) clearTimeout(btn._copyTimer);
+      btn._copyTimer = setTimeout(() => {
+        btn.innerHTML = btn.dataset.origHtml;
         if (window.lucide) lucide.createIcons();
       }, 1800);
     }
@@ -274,7 +277,7 @@
           apply_restart: Boolean(applyRestart),
         }),
       });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
         throw new Error(data.detail || `HTTP ${resp.status}`);
       }
@@ -299,11 +302,12 @@
       const resp = await fetch(getApiUrl('/api/server/api-key/rotate'), {
         method: 'POST',
       });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
       state.keyRevealed = true;
       renderConfig(data);
-      showFeedback('Rotated AEROMESH_API_KEY and saved to .env. Update IDE clients with the new key.', 'ok');
+      const restartNote = data.restarted ? ' Active coordinator restarted with the new key.' : '';
+      showFeedback(`Rotated AEROMESH_API_KEY and saved to .env.${restartNote} Update IDE clients with the new key.`, 'ok');
     } catch (err) {
       showFeedback(`Failed to rotate API key: ${err.message}`, 'error');
     } finally {
@@ -338,7 +342,9 @@
       }
       const resp = await fetch(getApiUrl('/v1/models'), { headers });
       const ms = Math.round(performance.now() - t0);
-      const data = await resp.json();
+      const rawText = await resp.text();
+      let data;
+      try { data = JSON.parse(rawText); } catch (_) { data = rawText || { error: `HTTP ${resp.status}` }; }
       showTestOutput('GET /v1/models', resp.status, ms, data);
       if (resp.ok) {
         showFeedback(`OpenAI endpoint healthy (HTTP 200 in ${ms} ms).`, 'ok');
@@ -415,7 +421,9 @@
         body: JSON.stringify(body),
       });
       const ms = Math.round(performance.now() - t0);
-      const data = await resp.json();
+      const rawText = await resp.text();
+      let data;
+      try { data = JSON.parse(rawText); } catch (_) { data = rawText || { error: `HTTP ${resp.status}` }; }
       showTestOutput(label, resp.status, ms, data);
       if (resp.ok) {
         const choice = (data.choices && data.choices[0]) || {};

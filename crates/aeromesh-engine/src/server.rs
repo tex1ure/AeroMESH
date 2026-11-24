@@ -946,10 +946,27 @@ fn build_tool_and_json_system_directive(
     if let Some(tool_list) = tools {
         if !tool_list.is_empty() && !tool_choice_is_none {
             let tools_json = serde_json::to_string_pretty(tool_list).unwrap_or_default();
-            parts.push(format!(
+            let mut directive = format!(
                 "# Tools\nYou may call one or more functions to assist with the user query.\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{}\n</tools>\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{{\"name\": \"<function-name>\", \"arguments\": {{<args-json-object>}}}}\n</tool_call>",
                 tools_json
-            ));
+            );
+            if let Some(tc) = tool_choice {
+                if tc.as_str().map(|s| s.eq_ignore_ascii_case("required")).unwrap_or(false) {
+                    directive.push_str("\nYou MUST call at least one of the provided tools using <tool_call></tool_call>.");
+                } else if let Some(forced_name) = tc
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|v| v.as_str())
+                {
+                    if !forced_name.trim().is_empty() {
+                        directive.push_str(&format!(
+                            "\nYou MUST call the function \"{}\" using <tool_call></tool_call>.",
+                            forced_name.trim()
+                        ));
+                    }
+                }
+            }
+            parts.push(directive);
         }
     }
 
@@ -979,7 +996,30 @@ fn build_tool_and_json_system_directive(
     }
 }
 
-fn extract_tool_calls_from_text(text: &str, session_id: u64) -> Option<Vec<serde_json::Value>> {
+fn strip_json_code_fence(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.starts_with("```") {
+        if let Some(first_nl) = trimmed.find('\n') {
+            let inner = &trimmed[first_nl + 1..];
+            if let Some(close_idx) = inner.rfind("```") {
+                let candidate = inner[..close_idx].trim();
+                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                    return candidate.to_string();
+                }
+            }
+        }
+    }
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+    text.to_string()
+}
+
+fn extract_tool_calls_from_text(
+    text: &str,
+    session_id: u64,
+    allowed_names: Option<&std::collections::HashSet<String>>,
+) -> Option<Vec<serde_json::Value>> {
     let mut calls = Vec::new();
     let mut rest = text;
     let mut idx = 0usize;
@@ -991,23 +1031,28 @@ fn extract_tool_calls_from_text(text: &str, session_id: u64) -> Option<Vec<serde
         let raw = after_start[..end].trim();
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
             if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
-                let args_val = parsed
-                    .get("arguments")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({}));
-                let args_str = match args_val {
-                    serde_json::Value::String(s) => s,
-                    other => serde_json::to_string(&other).unwrap_or_else(|_| "{}".to_string()),
-                };
-                calls.push(serde_json::json!({
-                    "id": format!("call_{}_{}", session_id, idx),
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": args_str
-                    }
-                }));
-                idx += 1;
+                let is_allowed = allowed_names
+                    .map(|set| set.is_empty() || set.contains(name))
+                    .unwrap_or(true);
+                if is_allowed {
+                    let args_val = parsed
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    let args_str = match args_val {
+                        serde_json::Value::String(s) => s,
+                        other => serde_json::to_string(&other).unwrap_or_else(|_| "{}".to_string()),
+                    };
+                    calls.push(serde_json::json!({
+                        "id": format!("call_{}_{}", session_id, idx),
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": args_str
+                        }
+                    }));
+                    idx += 1;
+                }
             }
         }
         rest = &after_start[end + "</tool_call>".len()..];
@@ -1395,10 +1440,37 @@ async fn handle_chat_completions(
             .into_response()
     } else {
         let current_model = active_model.clone();
+        let tool_choice_is_none = req
+            .tool_choice
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("none"))
+            .unwrap_or(false);
+        let allowed_tool_names: std::collections::HashSet<String> = req
+            .tools
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|t| {
+                t.get("function")
+                    .and_then(|f| f.get("name"))
+                    .or_else(|| t.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
         let has_tools = req
             .tools
             .as_ref()
             .map(|t| !t.is_empty())
+            .unwrap_or(false)
+            && !tool_choice_is_none;
+        let json_mode = req
+            .response_format
+            .as_ref()
+            .and_then(|rf| rf.get("type"))
+            .and_then(|v| v.as_str())
+            .map(|t| t == "json_object" || t == "json_schema")
             .unwrap_or(false);
         let mut client = state.coordinator.lock().await;
         match client
@@ -1410,7 +1482,11 @@ async fn handle_chat_completions(
                     generated_text = format!("<think>\n{}", generated_text);
                 }
                 let parsed_tools = if has_tools {
-                    extract_tool_calls_from_text(&generated_text, session_id)
+                    extract_tool_calls_from_text(
+                        &generated_text,
+                        session_id,
+                        Some(&allowed_tool_names),
+                    )
                 } else {
                     None
                 };
@@ -1426,10 +1502,15 @@ async fn handle_chat_completions(
                         "tool_calls".to_string(),
                     )
                 } else {
+                    let final_text = if json_mode {
+                        strip_json_code_fence(&generated_text)
+                    } else {
+                        generated_text
+                    };
                     (
                         ChatMessage {
                             role: "assistant".to_string(),
-                            content: Some(serde_json::Value::String(generated_text)),
+                            content: Some(serde_json::Value::String(final_text)),
                             tool_calls: None,
                             tool_call_id: None,
                             name: None,
@@ -1718,6 +1799,7 @@ mod tests {
             hidden_dim: 128,
             total_layers: 1,
             transport: None,
+            last_rtt_ms: None,
             target_dtype: aeromesh_core::ActivationDtype::RawF32,
             sampling: None,
             abort_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),

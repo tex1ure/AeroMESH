@@ -44,6 +44,19 @@ pub struct PipelineWorkerService {
     pub instance: Arc<Mutex<LlamaPipelineInstance>>,
 }
 
+/// Resolves the configured GPU offload layer count from `AEROMESH_NGL`,
+/// mapping negative values ("all GPU layers") to 999 and defaulting to 999.
+fn resolve_runtime_ngl() -> i32 {
+    match std::env::var("AEROMESH_NGL")
+        .ok()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+    {
+        Some(v) if v < 0 => 999,
+        Some(v) => v.clamp(0, 999),
+        None => 999,
+    }
+}
+
 impl PipelineWorkerService {
     pub fn new<P: AsRef<Path>>(
         model_path: P,
@@ -63,7 +76,7 @@ impl PipelineWorkerService {
             &target_model_path,
             slice_config.clone(),
             n_gpu_layers,
-            4096,
+            0,
         )?;
 
         info!(
@@ -233,43 +246,49 @@ fn hot_swap_worker_model_stage(
         "🔄 Hot-swapping worker model to match incoming activation dimension and layer slice..."
     );
 
-    let models_dir = Path::new("models");
-    if let Ok(entries) = std::fs::read_dir(models_dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|e| e.to_str()) == Some("gguf")
-                && !p.to_string_lossy().contains("_stage")
-            {
-                if let Ok(loader) = GgufSliceLoader::open(&p) {
-                    if loader.hidden_dim == target_hidden_dim {
-                        let total_layers = loader.total_layers;
-                        let w_start = worker_start.min(total_layers.saturating_sub(1));
-                        let w_end = worker_end.min(total_layers.saturating_sub(1));
-                        let new_slice = LayerSliceConfig::new(w_start, w_end, total_layers)?;
-                        let _file_size_mb = std::fs::metadata(&p)
-                            .map(|m| m.len() / (1024 * 1024))
-                            .unwrap_or(0);
-                        let ngl = 999;
+    for models_dir in aeromesh_core::model_search_dirs() {
+        if let Ok(entries) = std::fs::read_dir(&models_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let fname = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if p.extension().and_then(|e| e.to_str()) == Some("gguf")
+                    && !crate::gguf_slicer::is_stage_slice_name(&fname)
+                    && !fname.starts_with(".aeromesh_")
+                {
+                    if let Ok(loader) = GgufSliceLoader::open(&p) {
+                        if loader.hidden_dim == target_hidden_dim {
+                            let total_layers = loader.total_layers;
+                            let w_start = worker_start.min(total_layers.saturating_sub(1));
+                            let w_end = worker_end.min(total_layers.saturating_sub(1));
+                            let new_slice = LayerSliceConfig::new(w_start, w_end, total_layers)?;
+                            let _file_size_mb = std::fs::metadata(&p)
+                                .map(|m| m.len() / (1024 * 1024))
+                                .unwrap_or(0);
+                            let ngl = resolve_runtime_ngl();
 
-                        let out_dir = p.parent().unwrap_or_else(|| Path::new("models"));
-                        let target_path = crate::gguf_slicer::slice_gguf_stage(
-                            &p,
-                            out_dir,
-                            &new_slice,
-                            stage_index,
-                            total_stages,
-                        )?;
+                            let out_dir = p.parent().unwrap_or_else(|| Path::new("models"));
+                            let target_path = crate::gguf_slicer::slice_gguf_stage(
+                                &p,
+                                out_dir,
+                                &new_slice,
+                                stage_index,
+                                total_stages,
+                            )?;
 
-                        inst.close();
-                        let new_inst = LlamaPipelineInstance::open(
-                            &target_path,
-                            new_slice.clone(),
-                            ngl,
-                            4096,
-                        )?;
-                        *inst = new_inst;
-                        info!(model = %target_path.display(), hidden_dim = loader.hidden_dim, "✅ Worker successfully hot-swapped model");
-                        return Ok(new_slice);
+                            inst.close();
+                            let new_inst = LlamaPipelineInstance::open(
+                                &target_path,
+                                new_slice.clone(),
+                                ngl,
+                                0,
+                            )?;
+                            *inst = new_inst;
+                            info!(model = %target_path.display(), hidden_dim = loader.hidden_dim, "✅ Worker successfully hot-swapped model");
+                            return Ok(new_slice);
+                        }
                     }
                 }
             }
@@ -832,7 +851,7 @@ impl PipelineCoordinatorClient {
             &target_model_path,
             local_slice.clone(),
             n_gpu_layers,
-            4096,
+            0,
         )?;
         let hidden_dim = instance.hidden_dim;
 
@@ -976,7 +995,7 @@ impl PipelineCoordinatorClient {
         let _file_size_mb = std::fs::metadata(path_ref)
             .map(|m| m.len() / (1024 * 1024))
             .unwrap_or(0);
-        let ngl = 999;
+        let ngl = resolve_runtime_ngl();
 
         let num_stages = self.worker_addrs.len() + 1;
         // Accept both the current `_split{N}_stage1.gguf` naming and the
@@ -997,7 +1016,7 @@ impl PipelineCoordinatorClient {
             &target_model_path,
             local_slice.clone(),
             ngl,
-            4096,
+            0,
         ) {
             Ok(inst) => {
                 // Two-phase load succeeded! Safely close old instance and take new one
@@ -1022,7 +1041,7 @@ impl PipelineCoordinatorClient {
                     &target_model_path,
                     local_slice.clone(),
                     ngl,
-                    4096,
+                    0,
                 ) {
                     Ok(inst) => inst,
                     Err(second_err) => {
